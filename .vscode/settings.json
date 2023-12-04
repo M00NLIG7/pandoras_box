@@ -1,0 +1,6 @@
+{
+  "files.associations": {
+    "errno.h": "c"
+  },
+  "rust-analyzer.linkedProjects": ["./Cargo.toml", "./chimera/Cargo.toml"]
+}
