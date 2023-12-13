@@ -28,6 +28,9 @@ impl client::Handler for SSHHandler {
 pub struct SSHSession {
     key: Option<String>,
     // session: thrussh::client::Handle<SSHHandler>,
+    creds: Credentials,
+    ip: Box<str>,
+    port: Box<str>,
     session: Arc<Mutex<thrussh::client::Handle<SSHHandler>>>,
 }
 
@@ -63,9 +66,9 @@ impl SSHClient {
         self
     }
 
-    pub async fn connect<'a>(
+    pub async fn connect(
         &mut self,
-        creds: &Credentials<'a>,
+        creds: &Credentials,
     ) -> Result<SSHSession, Box<dyn std::error::Error>> {
         if self.ip.is_none() {
             return Err("Please configure ip()".into());
@@ -87,9 +90,13 @@ impl SSHClient {
         Ok(SSHSession {
             key: self.key.clone(),
             session: Arc::new(Mutex::new(session)),
+            creds: creds.clone(),
+            ip: self.ip.clone().unwrap().into_boxed_str(),
+            port: self.port.clone().unwrap().into_boxed_str(),
         })
     }
 }
+
 impl SSHSession {
     async fn establish_connection(
         addr: impl std::net::ToSocketAddrs,
@@ -108,7 +115,7 @@ impl SSHSession {
         Ok(session)
     }
 
-    async fn call(&self, command: &str) -> Result<CommandResult> {
+    async fn try_call(&self, command: &str) -> Result<CommandResult, thrussh::Error> {
         let mut session = self.session.lock().await;
         let mut channel: client::Channel = session.channel_open_session().await?;
         channel.exec(true, command).await?;
@@ -118,7 +125,7 @@ impl SSHSession {
         while let Some(msg) = channel.wait().await {
             match msg {
                 thrussh::ChannelMsg::Data { ref data } => {
-                    output.write_all(&data).unwrap();
+                    output.write_all(data)?;
                 }
                 thrussh::ChannelMsg::ExitStatus { exit_status } => {
                     code = Some(exit_status);
@@ -126,7 +133,50 @@ impl SSHSession {
                 _ => {}
             }
         }
+
         Ok(CommandResult { output, code })
+    }
+
+    async fn call(&self, command: &str) -> Result<CommandResult> {
+        loop {
+            let result = self.try_call(command).await;
+
+            match result {
+                Ok(command_result) => return Ok(command_result),
+                Err(e) => {
+                    println!("Error during SSH call: {:?}", e);
+                    // Attempt to reconnect
+                    if let Err(reconnect_error) = self.reconnect().await {
+                        println!("Reconnect failed: {:?}", reconnect_error);
+                        // If reconnect fails, return the original error
+                        // todo!()
+                        return Err(e.into());
+                    }
+                    // If reconnect succeeds, loop will retry the command
+                }
+            }
+        }
+    }
+
+    async fn reconnect(&self) -> Result<(), thrussh::Error> {
+        // Re-establish the connection
+        let new_session = SSHSession::establish_connection(
+            format!("{}:{}", self.ip, self.port),
+            &self.creds.username.to_string(),
+            &self
+                .creds
+                .password
+                .clone()
+                .expect("No password supplied")
+                .to_string(),
+        )
+        .await?;
+
+        // Update the session in your SSHSession struct
+        let mut session_guard = self.session.lock().await;
+        *session_guard = new_session;
+
+        Ok(())
     }
 }
 

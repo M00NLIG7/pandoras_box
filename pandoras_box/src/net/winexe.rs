@@ -132,7 +132,7 @@ impl WinexeClient {
 
     pub async fn connect<'a>(
         &mut self,
-        creds: &Credentials<'a>,
+        creds: &Credentials,
     ) -> Result<WinexeSession, Box<dyn std::error::Error>> {
         if self.ip.is_none() {
             return Err("Please configure ip()".into());

@@ -5,7 +5,6 @@ use crate::net::session_pool::SessionPool;
 use crate::net::ssh::{SSHClient, SSHSession};
 use crate::net::winexe::{WinexeClient, WinexeSession};
 use futures::future::join_all;
-use libc::passwd;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -43,7 +42,7 @@ impl Spreader {
                     let session = match SSHClient::new()
                         .ip(host.ip.clone())
                         .connect(&Credentials {
-                            username: "root",
+                            username: "root".into(),
                             password: Some(self.password.clone()),
                             key: None,
                         })

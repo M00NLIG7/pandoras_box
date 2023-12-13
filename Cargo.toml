@@ -3,3 +3,5 @@ members = [
     "pandoras_box",
     "chimera",
 ]
+resolver = "2"
+
