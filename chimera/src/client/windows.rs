@@ -5,6 +5,7 @@ use super::client;
 use super::client::NetworkConnection;
 use super::client::NetworkInfo;
 use super::client::Host;
+use super::client::OpenPort;
 use netstat::*;
 
 
@@ -71,10 +72,12 @@ impl NetworkInfo for Host {
     }
 
     fn net_info() -> (Box<[super::client::NetworkConnection]>, Box<[super::client::OpenPort]>) {
+        // Retrieve active connections and open ports
         let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
         let proto_flags = ProtocolFlags::TCP | ProtocolFlags::UDP;
         let sockets_info = get_sockets_info(af_flags, proto_flags).unwrap();
         let mut connections = Vec::new();
+        let mut open_ports = Vec::new();
         for si in sockets_info {
             match si.protocol_socket_info {
                 ProtocolSocketInfo::Tcp(tcp_si) => {
@@ -82,28 +85,34 @@ impl NetworkInfo for Host {
                         local_address: tcp_si.local_addr.to_string().into_boxed_str(),
                         remote_address: tcp_si.remote_addr.to_string().into_boxed_str(),
                         state: tcp_si.state.to_string().into_boxed_str(),
-                        protocol: "TCP".into_boxed_str(),
-                        pid: tcp_si.associated_pids.into_boxed_str(),
+                        protocol: "TCP".to_string().into_boxed_str(),
+                        pid: None,
+                    });
+                    open_ports.push(OpenPort {
+                        port: tcp_si.remote_port,
+                        protocol: "TCP".to_string().into_boxed_str(),
+                        pid: None,
+                        version: "N/A".to_string().into_boxed_str(),
+                        state: "N/A".to_string().into_boxed_str()
                     });
                 },
                 ProtocolSocketInfo::Udp(udp_si) => {
                     connections.push(NetworkConnection {
                         local_address: udp_si.local_addr.to_string().into_boxed_str(),
-                        remote_address: udp_si.remote_addr.to_string().into_boxed_str(),
-                        state: udp_si.state.to_string().into_boxed_str(),
-                        protocol: "UDP".to_boxed_str(),
-                        pid: udp_si.associated_pids,
+                        remote_address: "N/A".to_string().into_boxed_str(),
+                        state: "N/A".to_string().into_boxed_str(),
+                        protocol: "UDP".to_string().into_boxed_str(),
+                        pid: None,
                     });
                 },
             }
 
-            let mut open_ports = Vec::new();
-
-            (
-                connections.into_boxed_slice(),
-                open_ports.into_boxed_slice()
-            )
         }
+
+        (
+            connections.into_boxed_slice(),
+            open_ports.into_boxed_slice()
+        )
     }
 
 }
