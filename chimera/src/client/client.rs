@@ -78,14 +78,13 @@ pub struct Host {
     pub disks: Box<[Disk]>,
     pub network_adapters: String,
     pub ports: Box<[OpenPort]>,
-    pub firewall_rules: String,
-    // pub processes: String,
+    //pub firewall_rules: String,
     pub connections: Box<[NetworkConnection]>,
     pub services: String,
     pub users: Box<[User]>,
     pub shares: String,
     pub persistent_programs: String,
-    pub containers: Box<[Container]>,
+    //pub containers: Box<[Container]>,
 }
 
 impl Host {
@@ -141,12 +140,12 @@ impl Host {
             network_adapters: String::from(""),
             ports: open_ports,
             connections: connections,
-            firewall_rules: String::from(""),
+            //firewall_rules: String::from(""),
             services: String::from(""),
             users: users.into(),
             shares: String::from(""),
             persistent_programs: String::from(""),
-            containers: Host::containers(),
+            //containers: Host::containers(),
         }
     }
 }
