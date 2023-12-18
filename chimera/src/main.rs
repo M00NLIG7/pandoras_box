@@ -6,7 +6,7 @@ use crate::client::client::NetworkInfo;
 fn main() {
     let c = Host::new();
     // println!("Ports: {:?}", c.ports);
-    println!("{:?}", c.connections);
+    println!("{:?}", c.ports);
     // println!("{:?}", c.containers);
     // NetworkInfo::ports();
 }

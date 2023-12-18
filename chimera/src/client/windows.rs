@@ -116,13 +116,22 @@ impl NetworkInfo for Host {
                     state: tcp.state.to_string().into_boxed_str(),
                     pid: processes.first().map(|p| p.pid as i32),
                     });
-                    open_ports.push(OpenPort {
+                    
+
+
+                    let new_open_port = OpenPort {
                         port: tcp.remote_port,
                         protocol: "TCP".to_string().into_boxed_str(),
-                        pid: None,
-                        version: "N/A".to_string().into_boxed_str(),
-                        state: "N/A".to_string().into_boxed_str()
-                    });
+                        pid: processes.first().map(|p| p.pid as i32),
+                        version: "".to_string().into_boxed_str(),
+                        state: tcp.state.to_string().into_boxed_str(),
+                    };
+            
+                    if !open_ports.iter().any(|existing_port| {
+                        existing_port.port == new_open_port.port && existing_port.protocol == new_open_port.protocol
+                    }) {
+                        open_ports.push(new_open_port);
+                    }
                 },
                 ProtocolSocketInfo::Udp(udp) => sockets.push(NetworkConnection {
                     local_address: udp.local_addr.to_string().into_boxed_str(),
@@ -186,9 +195,7 @@ impl Shares for Host {
         };
     }
 }
-struct ProcessInfo {
-    pid: u32,
-}
+
 struct Process {
     pid: u32,
 }

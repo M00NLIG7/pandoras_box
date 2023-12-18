@@ -59,6 +59,7 @@ pub struct User {
 }
 
 #[derive(Debug)]
+#[derive(PartialEq)]
 pub struct OpenPort {
     pub port: u16,
     pub protocol: Box<str>,
