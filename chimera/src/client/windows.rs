@@ -5,6 +5,8 @@ use super::client;
 use super::client::NetworkConnection;
 use super::client::NetworkInfo;
 use super::client::Host;
+use super::client::Services;
+use super::client::Service;
 use super::client::OpenPort;
 use netstat::*;
 
@@ -55,7 +57,6 @@ fn retrieve_server_features() -> Result<Vec<ServerFeatures>, wmi::WMIError> {
     Ok(vec![])
 }
 
-
 // Retrieve NetworkInfo
 impl NetworkInfo for Host {
     fn ip() -> Box<str> {
@@ -68,7 +69,7 @@ impl NetworkInfo for Host {
     }
 
     fn firewall_rules() {
-        todo!()
+        todo!("firewall_rules")
     }
 
     fn net_info() -> (Box<[super::client::NetworkConnection]>, Box<[super::client::OpenPort]>) {
@@ -115,4 +116,28 @@ impl NetworkInfo for Host {
         )
     }
 
+}
+
+
+impl Services for Host {
+    fn services() -> Box<[Service]> {
+        let com_lib = match COMLibrary::new() {
+            Ok(lib) => lib,
+            Err(e) => return Box::new([]), // or handle the error as appropriate
+        };
+        
+        let wmi_con = match WMIConnection::new(com_lib) {
+            Ok(con) => con,
+            Err(e) => return Box::new([]), // or handle the error as appropriate
+        };
+
+        let services_result = wmi_con.query();
+        let services = match services_result {
+            Ok(services) =>  return services.into_boxed_slice(),
+            Err(e) => {
+                println!("Error: {}", e);
+                return Box::new([]);
+            }
+        };
+    }
 }

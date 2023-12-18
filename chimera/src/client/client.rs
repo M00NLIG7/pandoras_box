@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use sysinfo::{CpuExt, DiskExt, Networks, System, SystemExt, UserExt};
 
 #[derive(Debug)]
@@ -80,12 +81,23 @@ pub struct Host {
     pub ports: Box<[OpenPort]>,
     //pub firewall_rules: String,
     pub connections: Box<[NetworkConnection]>,
-    pub services: String,
+    pub services: Box<[Service]>,
     pub users: Box<[User]>,
     pub shares: String,
     pub persistent_programs: String,
     //pub containers: Box<[Container]>,
 }
+
+#[derive(Deserialize, Debug)]
+#[serde(rename = "Win32_Service")]
+#[serde(rename_all = "PascalCase")]
+pub struct Service {
+    name: String,
+    start_mode: String,
+    state: String,
+    status: String,
+}
+
 
 impl Host {
     pub fn new() -> Host {
@@ -141,7 +153,7 @@ impl Host {
             ports: open_ports,
             connections: connections,
             //firewall_rules: String::from(""),
-            services: String::from(""),
+            services: Host::services(),
             users: users.into(),
             shares: String::from(""),
             persistent_programs: String::from(""),
@@ -155,6 +167,10 @@ pub trait NetworkInfo {
     fn firewall_rules();
     fn ip() -> Box<str>;
     fn containers() -> Box<[Container]>;
+}
+
+pub trait Services {
+    fn services() -> Box<[Service]>;
 }
 
 pub trait Infect {
