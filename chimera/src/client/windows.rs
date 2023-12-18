@@ -8,6 +8,8 @@ use super::client::Host;
 use super::client::Services;
 use super::client::Service;
 use super::client::OpenPort;
+use super::client::Shares;
+use super::client::Share;
 use netstat::*;
 
 
@@ -120,20 +122,42 @@ impl NetworkInfo for Host {
 
 
 impl Services for Host {
-    fn services() -> Box<[Service]> {
+    fn get_services() -> Box<[Service]> {
         let com_lib = match COMLibrary::new() {
             Ok(lib) => lib,
-            Err(e) => return Box::new([]), // or handle the error as appropriate
+            _ => return Box::new([]), // or handle the error as appropriate
         };
         
         let wmi_con = match WMIConnection::new(com_lib) {
             Ok(con) => con,
-            Err(e) => return Box::new([]), // or handle the error as appropriate
+            _ => return Box::new([]), // or handle the error as appropriate
         };
 
         let services_result = wmi_con.query();
         let services = match services_result {
             Ok(services) =>  return services.into_boxed_slice(),
+            _ => {
+                return Box::new([]);
+            }
+        };
+    }
+}
+
+impl Shares for Host {
+    fn get_shares() -> Box<[super::client::Share]> {
+        let com_lib = match COMLibrary::new() {
+            Ok(lib) => lib,
+            _ => return Box::new([]), // or handle the error as appropriate
+        };
+        
+        let wmi_con = match WMIConnection::new(com_lib) {
+            Ok(con) => con,
+            _ => return Box::new([]), // or handle the error as appropriate
+        };
+
+        let shares_result = wmi_con.query();
+        let shares = match shares_result {
+            Ok(shares) =>  return shares.into_boxed_slice(),
             Err(e) => {
                 println!("Error: {}", e);
                 return Box::new([]);

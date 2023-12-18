@@ -83,11 +83,12 @@ pub struct Host {
     pub connections: Box<[NetworkConnection]>,
     pub services: Box<[Service]>,
     pub users: Box<[User]>,
-    pub shares: String,
+    pub shares: Box<[Share]>,
     pub persistent_programs: String,
     //pub containers: Box<[Container]>,
 }
 
+// WMI Structs
 #[derive(Deserialize, Debug)]
 #[serde(rename = "Win32_Service")]
 #[serde(rename_all = "PascalCase")]
@@ -98,6 +99,14 @@ pub struct Service {
     status: String,
 }
 
+#[derive(Deserialize, Debug)]
+#[serde(rename = "Win32_Share")]
+#[serde(rename_all = "PascalCase")]
+pub struct Share {
+    name: String,
+    path: String,
+    description: String,
+}
 
 impl Host {
     pub fn new() -> Host {
@@ -153,9 +162,9 @@ impl Host {
             ports: open_ports,
             connections: connections,
             //firewall_rules: String::from(""),
-            services: Host::services(),
+            services: Host::get_services(),
             users: users.into(),
-            shares: String::from(""),
+            shares: Host::get_shares(),
             persistent_programs: String::from(""),
             //containers: Host::containers(),
         }
@@ -170,7 +179,11 @@ pub trait NetworkInfo {
 }
 
 pub trait Services {
-    fn services() -> Box<[Service]>;
+    fn get_services() -> Box<[Service]>;
+}
+
+pub trait Shares {
+    fn get_shares() -> Box<[Share]>;
 }
 
 pub trait Infect {
