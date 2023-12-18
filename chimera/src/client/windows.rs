@@ -1,6 +1,7 @@
 use wmi::*;
 use serde::{Deserialize};
 use local_ip_address::local_ip;
+use sysinfo::{ProcessExt, System, SystemExt};
 use super::client;
 use super::client::NetworkConnection;
 use super::client::NetworkInfo;
@@ -75,46 +76,66 @@ impl NetworkInfo for Host {
     }
 
     fn net_info() -> (Box<[super::client::NetworkConnection]>, Box<[super::client::OpenPort]>) {
-        // Retrieve active connections and open ports
+        let sys = System::new_all();
         let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
         let proto_flags = ProtocolFlags::TCP | ProtocolFlags::UDP;
-        let sockets_info = get_sockets_info(af_flags, proto_flags).unwrap();
-        let mut connections = Vec::new();
-        let mut open_ports = Vec::new();
-        for si in sockets_info {
+        let iterator = iterate_sockets_info(af_flags, proto_flags).expect("Failed to get socket information!");
+    
+        let mut sockets: Vec<NetworkConnection> = Vec::new();
+        let mut open_ports: Vec<OpenPort> = Vec::new();
+    
+        for info in iterator {
+            let si = match info {
+                Ok(si) => si,
+                Err(_err) => {
+                    println!("Failed to get info for socket!");
+                    continue;
+                }
+            };
+    
+            // gather associated processes
+            let process_ids = si.associated_pids;
+            let mut processes: Vec<Process> = Vec::new();
+            let all_processes = process_info(&sys);
+            for pid in process_ids {
+                for process in &all_processes {
+                    if process.pid == pid {
+                        processes.push(Process {
+                            pid: process.pid,
+                        });
+                    }
+                }
+            }
+    
             match si.protocol_socket_info {
-                ProtocolSocketInfo::Tcp(tcp_si) => {
-                    connections.push(NetworkConnection {
-                        local_address: tcp_si.local_addr.to_string().into_boxed_str(),
-                        remote_address: tcp_si.remote_addr.to_string().into_boxed_str(),
-                        state: tcp_si.state.to_string().into_boxed_str(),
-                        protocol: "TCP".to_string().into_boxed_str(),
-                        pid: None,
+                ProtocolSocketInfo::Tcp(tcp) => {
+                sockets.push(NetworkConnection {
+                    local_address: tcp.local_addr.to_string().into_boxed_str(),
+                    remote_address: tcp.remote_addr.to_string().into_boxed_str(),
+                    protocol: "TCP".to_string().into_boxed_str(),
+                    state: tcp.state.to_string().into_boxed_str(),
+                    pid: processes.first().map(|p| p.pid as i32),
                     });
                     open_ports.push(OpenPort {
-                        port: tcp_si.remote_port,
+                        port: tcp.remote_port,
                         protocol: "TCP".to_string().into_boxed_str(),
                         pid: None,
                         version: "N/A".to_string().into_boxed_str(),
                         state: "N/A".to_string().into_boxed_str()
                     });
                 },
-                ProtocolSocketInfo::Udp(udp_si) => {
-                    connections.push(NetworkConnection {
-                        local_address: udp_si.local_addr.to_string().into_boxed_str(),
-                        remote_address: "N/A".to_string().into_boxed_str(),
-                        state: "N/A".to_string().into_boxed_str(),
-                        protocol: "UDP".to_string().into_boxed_str(),
-                        pid: None,
-                    });
-                },
+                ProtocolSocketInfo::Udp(udp) => sockets.push(NetworkConnection {
+                    local_address: udp.local_addr.to_string().into_boxed_str(),
+                    remote_address: "".to_string().into_boxed_str(),
+                    protocol: "UDP".to_string().into_boxed_str(),
+                    state: "".to_string().into_boxed_str(),
+                    pid: processes.first().map(|p| p.pid as i32),
+                }),
             }
-
         }
-
         (
-            connections.into_boxed_slice(),
-            open_ports.into_boxed_slice()
+            sockets.into_boxed_slice(),
+            open_ports.into_boxed_slice(),
         )
     }
 
@@ -159,9 +180,31 @@ impl Shares for Host {
         let shares = match shares_result {
             Ok(shares) =>  return shares.into_boxed_slice(),
             Err(e) => {
-                println!("Error: {}", e);
+                println!("Error: {}", e);   
                 return Box::new([]);
             }
         };
     }
+}
+struct ProcessInfo {
+    pid: u32,
+}
+struct Process {
+    pid: u32,
+}
+
+fn process_info(sys: &System) -> std::vec::Vec<Process> {
+    let processes = sys.processes();
+
+    let mut process_dump = vec![];
+
+    for (pid, process_data) in processes {
+
+        let value = Process {
+            pid: pid.to_string().parse::<u32>().unwrap(),
+        };
+        process_dump.push(value);
+    }
+
+    return process_dump
 }
