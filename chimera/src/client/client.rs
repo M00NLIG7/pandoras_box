@@ -1,92 +1,5 @@
+use crate::client::types::{Container, Disk, Host, Service, Share, User, UserInfo, OS};
 use sysinfo::{CpuExt, DiskExt, Networks, System, SystemExt, UserExt};
-
-#[derive(Debug)]
-pub struct Disk {
-    pub name: Box<str>,
-    pub mount_point: Box<str>,
-    pub filesystem: Box<str>,
-    pub total_space: u64,
-    pub available_space: u64,
-}
-
-#[derive(Debug)]
-pub struct ContainerVolume {
-    pub host_path: Box<str>,
-    pub container_path: Box<str>,
-    pub mode: Box<str>,
-    pub name: Box<str>,
-    pub rw: bool,
-    pub v_type: Box<str>,
-}
-
-#[derive(Debug)]
-pub struct ContainerNetwork {
-    pub name: Box<str>,
-    pub ip: Box<str>,
-    pub gateway: Box<str>,
-    pub mac_address: Box<str>,
-}
-
-#[derive(Debug)]
-pub struct Container {
-    pub id: Box<str>,
-    pub name: Box<str>,
-    // pub networks: Box<[ContainerNetwork]>,
-    pub port_bindings: Box<[Box<str>]>,
-    pub volumes: Box<[ContainerVolume]>,
-    pub status: Box<str>,
-    pub cmd: Box<str>,
-}
-
-#[derive(Debug)]
-pub struct NetworkConnection {
-    pub local_address: Box<str>,
-    pub remote_address: Box<str>,
-    pub state: Box<str>,
-    pub protocol: Box<str>,
-    pub pid: Option<i32>,
-}
-
-#[derive(Debug)]
-pub struct User {
-    pub name: Box<str>,
-    // pub uid
-    pub uid: Box<str>,
-    pub gid: Box<str>,
-    pub groups: Box<[Box<str>]>,
-    pub shell: Option<Box<str>>,
-}
-
-#[derive(Debug)]
-pub struct OpenPort {
-    pub port: u16,
-    pub protocol: Box<str>,
-    pub pid: Option<i32>,
-    pub version: Box<str>,
-    pub state: Box<str>,
-}
-
-#[derive(Debug)]
-pub struct Host {
-    pub hostname: Box<str>,
-    pub ip: Box<str>,
-    // pub max_addr: Box<str>,
-    pub os: Box<str>,
-    pub cpu: Box<str>,
-    pub memory: u64,
-    // pub disk: u64,
-    pub disks: Box<[Disk]>,
-    pub network_adapters: String,
-    pub ports: Box<[OpenPort]>,
-    pub firewall_rules: String,
-    // pub processes: String,
-    pub connections: Box<[NetworkConnection]>,
-    pub services: String,
-    pub users: Box<[User]>,
-    pub shares: String,
-    pub persistent_programs: String,
-    pub containers: Box<[Container]>,
-}
 
 impl Host {
     pub fn new() -> Host {
@@ -94,72 +7,62 @@ impl Host {
         // First we update all information of our `System` struct.
         sys.refresh_all();
 
-        let disks: Box<[Disk]> = sys
-            .disks()
-            .iter()
-            .map(|disk| Disk {
-                name: disk.name().to_str().unwrap().into(),
-                mount_point: disk.mount_point().to_str().unwrap().into(),
-                filesystem: String::from_utf8(disk.file_system().to_vec())
-                    .unwrap()
-                    .into(),
-                total_space: disk.total_space() / 1024 / 1024,
-                available_space: disk.available_space() / 1024 / 1024,
-            })
-            .collect();
-
-        // println!("{:?}", sys.networks());
-        // let storage: u64 = sys.disks().iter().map(|disk| disk.available_space()).sum();
-
-        let mut users: Vec<_> = Vec::new();
-
-        for user in sys.users() {
-            users.push(User {
-                name: user.name().into(),
-                uid: user.id().to_string().into(),
-                gid: user.group_id().to_string().into(),
-                groups: user
-                    .groups()
-                    .iter()
-                    .map(|group| group.clone().into_boxed_str())
-                    .collect(),
-                shell: None,
-            });
-        }
-
-        let (connections, open_ports) = Host::net_info();
+        let (connections, open_ports) = Host::conn_info();
 
         Host {
-            hostname: sys_info::hostname().unwrap_or(String::from("")).into(),
+            hostname: sys_info::hostname().unwrap_or_default().into(),
             ip: Host::ip(),
             // max_addr:
             os: std::env::consts::OS.into(),
             cpu: sys.cpus().first().unwrap().brand().into(),
             memory: sys.total_memory(),
             // disk: storage / 1024 / 1024 / 1024,
-            disks: disks,
+            disks: disks(&sys),
             network_adapters: String::from(""),
             ports: open_ports,
             connections: connections,
             firewall_rules: String::from(""),
-            services: String::from(""),
-            users: users.into(),
-            shares: String::from(""),
+            services: Host::services(),
+            users: users(&sys),
+            shares: Host::shares(),
             persistent_programs: String::from(""),
             containers: Host::containers(),
         }
     }
 }
 
-pub trait NetworkInfo {
-    fn net_info() -> (Box<[NetworkConnection]>, Box<[OpenPort]>);
-    fn firewall_rules();
-    fn ip() -> Box<str>;
-    fn containers() -> Box<[Container]>;
+fn disks(sys: &System) -> Box<[Disk]> {
+    sys.disks()
+        .iter()
+        .map(|disk| Disk {
+            name: disk.name().to_str().unwrap().into(),
+            mount_point: disk.mount_point().to_str().unwrap().into(),
+            filesystem: String::from_utf8(disk.file_system().to_vec())
+                .unwrap()
+                .into(),
+            total_space: disk.total_space() / 1024 / 1024,
+            available_space: disk.available_space() / 1024 / 1024,
+        })
+        .collect()
 }
 
-pub trait Infect {
-    fn init(&self, schema: &str);
+fn users(sys: &System) -> Box<[User]> {
+    sys.users()
+        .iter()
+        .map(|user| User {
+            name: user.name().into(),
+            uid: user.id().to_string().into(),
+            gid: user.group_id().to_string().into(),
+            groups: user
+                .groups()
+                .iter()
+                .map(|group| group.clone().into_boxed_str())
+                .collect(),
+            is_admin: user.is_admin(),
+            is_local: user.is_local(),
+            shell: None,
+        })
+        .collect()
 }
 
 fn calculate_resource_weight(cpu_cores: u32, memory_mb: u64) -> u64 {
