@@ -19,7 +19,7 @@ tar = "0.4.40"
 tempfile = "3.8.0"
 thrussh = "0.34.0"
 thrussh-keys = "0.22.1"
-tokio = {version = "1.32.0", features = ["full"]}
+tokio = {version = "1.35.0", features = ["fs"]}
 
 [build-dependencies]
 base64 = "0.21.5"
