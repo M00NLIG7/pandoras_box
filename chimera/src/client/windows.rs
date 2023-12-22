@@ -175,37 +175,34 @@ impl OS for Host {
         let results: Vec<HashMap<String, Variant>> = wmi_con.raw_query("SELECT * FROM Win32_Service").unwrap();
         let mut services = Vec::new();
         for os in results {
-            let service = services.push(Service {
+            services.push(Service {
                 name: match os.get("Name").unwrap() {
                     Variant::String(s) => s.clone().into_boxed_str(),
-                    _ => panic!("Unexpected type for Name"),
+                    _ => "".to_string().into_boxed_str(),
                 },
                 status: match os.get("State").unwrap() {
                     Variant::String(s) => match s.as_str() {
-                        "Running" => ServiceStatus::Active,
-                        "Stopped" => ServiceStatus::Inactive,
-                        "Paused" => ServiceStatus::Inactive,
-                        "Start Pending" => ServiceStatus::Inactive,
-                        "Stop Pending" => ServiceStatus::Inactive,
-                        "Continue Pending" => ServiceStatus::Inactive,
-                        "Pause Pending" => ServiceStatus::Inactive,
-                        "Unknown" => ServiceStatus::Unknown,
-                        _ => ServiceStatus::Failed,
+                        "Running" => Some(ServiceStatus::Active),
+                        "Stopped" => Some(ServiceStatus::Inactive),
+                        "Paused" => Some(ServiceStatus::Inactive),
+                        "Start Pending" => Some(ServiceStatus::Inactive),
+                        "Stop Pending" => Some(ServiceStatus::Inactive),
+                        "Continue Pending" => Some(ServiceStatus::Inactive),
+                        "Pause Pending" => Some(ServiceStatus::Inactive),
+                        "Unknown" => Some(ServiceStatus::Unknown),
+                        _ => Some(ServiceStatus::Failed),
                     },
-                    _ => panic!("Unexpected type for State"),
-                },
-                description: match os.get("Description").unwrap() {
-                    Variant::String(s) => s.clone().into_boxed_str(),
-                    Variant::Null => "".to_string().into_boxed_str(),
-                    _ => panic!("Unexpected type for Description: {:?}", os.get("Description").unwrap()),
-                },
-                exec_path: match os.get("PathName") {
-                    Some(Variant::String(s)) => Some(s.clone()),
                     _ => None,
                 },
-                enabled: match os.get("StartMode").unwrap() {
-                    Variant::String(s) => s == "Auto",
+
+                start_mode: match os.get("StartMode").unwrap() {
+                    Variant::String(s) => if s == "Auto" { Some(ServiceStartType::Enabled) } else { Some(ServiceStartType::Disabled) } ,
                     _ => panic!("Unexpected type for StartMode"),
+                },
+
+                state: match os.get("Status").unwrap() {
+                    Variant::String(s) => if s == "OK" { s.to_string().into_boxed_str() } else { s.to_string().into_boxed_str() } ,
+                    _ => "".to_string().into_boxed_str(),
                 },
             });
         }
@@ -213,12 +210,28 @@ impl OS for Host {
     }
 
     fn shares() -> Box<[Share]> {
-        let myshare = Share {
-            share_type: ShareType::SMB,
-            network_path: "".to_string().into_boxed_str(),
+        let com_lib = match COMLibrary::new() {
+            Ok(lib) => lib,
+            _ => return Box::new([]), // or handle the error as appropriate
         };
-
-        return Box::new([myshare]);
+        
+        let wmi_con = match WMIConnection::new(com_lib) {
+            Ok(con) => con,
+            _ => return Box::new([]), // or handle the error as appropriate
+        };
+        
+        let results: Vec<HashMap<String, Variant>> = wmi_con.raw_query("SELECT * FROM Win32_Share").unwrap();
+        let mut shares: Vec<Share> = Vec::new();
+        for os in results {
+            shares.push(Share {
+                share_type: ShareType::SMB,
+                network_path: match os.get("Path").unwrap() {
+                    Variant::String(s) => s.to_string().into_boxed_str(),
+                    _ => "".to_string().into_boxed_str(),
+                },
+            });
+        }
+        return shares.into_boxed_slice();
     }
 
 }
