@@ -1,5 +1,6 @@
 use crate::client::types::{Disk, Host, User, UserInfo, OS};
 use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt};
+use serde::Deserialize;
 
 impl Host {
     pub fn new() -> Host {
