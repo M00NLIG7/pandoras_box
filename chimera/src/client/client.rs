@@ -1,26 +1,6 @@
-use crate::client::types::{Container, Disk, Host, Service, Share, User, UserInfo, OS};
+use crate::client::types::{Container, Disk, Host, User, UserInfo, OS};
 use sysinfo::{CpuExt, DiskExt, Networks, System, SystemExt, UserExt};
-
-#[derive(Debug)]
-pub struct Host {
-    pub hostname: Box<str>,
-    pub ip: Box<str>,
-    // pub max_addr: Box<str>,
-    pub os: Box<str>,
-    pub cpu: Box<str>,
-    pub memory: u64,
-    // pub disk: u64,
-    pub disks: Box<[Disk]>,
-    pub network_adapters: String,
-    pub ports: Box<[OpenPort]>,
-    //pub firewall_rules: String,
-    pub connections: Box<[NetworkConnection]>,
-    pub services: Box<[Service]>,
-    pub users: Box<[User]>,
-    pub shares: Box<[Share]>,
-    pub persistent_programs: String,
-    //pub containers: Box<[Container]>,
-}
+use serde::Deserialize;
 
 // WMI Structs
 #[derive(Deserialize, Debug)]
@@ -42,8 +22,6 @@ pub struct Share {
     description: String,
 }
 
-
-
 impl Host {
     pub fn new() -> Host {
         let mut sys = System::new_all();
@@ -64,10 +42,11 @@ impl Host {
             network_adapters: String::from(""),
             ports: open_ports,
             connections: connections,
-            firewall_rules: String::from(""),
             services: Host::services(),
             users: users(&sys),
             shares: Host::shares(),
+            persistent_programs: String::from(""),
+            firewall_rules: String::from(""),
             //containers: Host::containers(),
         }
     }
