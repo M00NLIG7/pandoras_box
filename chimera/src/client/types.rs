@@ -1,21 +1,26 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct Service {
-    pub(crate) name: Box<str>,            // The name of the service
-    pub(crate) status: ServiceStatus,     // The current status of the service
-    pub(crate) description: Box<str>,     // A brief description of the service
-    pub(crate) exec_path: Option<String>, // Path to the executable or script
-    pub(crate) enabled: bool,             // Whether the service is enabled to start on boot
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 pub enum ServiceStatus {
     Active,   // The service is currently running
     Inactive, // The service is not running
     Failed,   // The service has failed
     Unknown,  // The status of the service is unknown
               // Additional statuses can be added as needed
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub enum ServiceStartType {
+    Enabled,  // The service will start automatically
+    Disabled, // The service will not start
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Service {
+    pub(crate) name: Box<str>,                       // The name of the service
+    pub(crate) state: Box<str>,                      // The current status of the service
+    pub(crate) start_mode: Option<ServiceStartType>, // The start type of the service
+    pub(crate) status: Option<ServiceStatus>,        // The current status of the service
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -56,10 +61,6 @@ pub struct Container {
     pub(crate) cmd: Box<str>,
 }
 
-// NetworkConnection struct
-// remote_address needs to be an option
-// state needs to be an option
-// pid should be a tuple containing the pid and process name
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Clone)]
 pub enum ConnectionState {
     Established,
@@ -181,6 +182,9 @@ pub struct Host {
 pub trait UserInfo {
     fn is_admin(&self) -> bool;
     fn is_local(&self) -> bool;
+
+    #[cfg(target_os = "linux")]
+    fn shell(&self) -> Box<str>;
 }
 
 pub trait Infect {

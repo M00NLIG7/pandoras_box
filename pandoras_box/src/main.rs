@@ -1,6 +1,10 @@
 // mod enumeration;
+mod api;
 mod init;
 mod net;
+
+use std::sync::{Arc, Mutex};
+
 // use enumeration::ping;
 use net::{
     ssh::{self, SSHClient},
@@ -16,7 +20,7 @@ use futures::{Future, FutureExt};
 
 use std::process::Command;
 
-const CHIMERA: &[u8] = include_bytes!("../bin/chimera64.zlib");
+// const CHIMERA: &[u8] = include_bytes!("../bin/chimera64.zlib");
 
 struct MemoryReport;
 
@@ -37,79 +41,61 @@ impl Drop for MemoryReport {
     }
 }
 
-// fn execute_commands<'a, C>(communicator: &'a C, cmds: Vec<&'a str>) -> Vec<impl Future<Output = Result<Option<String>, std::io::Error>> + 'a>
-// where
-//     C: Communicator + 'a,
-// {
-//     cmds.into_iter()
-//         .map(|cmd| {
-
-//             async move {
-//                 communicator.execute_command(
-//                     cmd
-//                 ).await
-//             }
-//         })
-//         .collect()
-// }
-
 #[tokio::main]
 async fn main() {
-    // const WINEXE_ARCHIVE: &'static [u8] = include_bytes!("../img.tar.gz");
-    // let img_path = "/tmp/img";
+    // Used to represent the golden child node to host Serial Scripter
+    let golden_node = Arc::new(Mutex::new(api::types::ServerNode::default()));
 
-    // if !std::path::Path::new(img_path).exists() {
-    //     let tar_data = GzDecoder::new(WINEXE_ARCHIVE);
-    //     let mut archive = Archive::new(tar_data);
-    //     if let Err(e) = archive.unpack("/tmp") {
-    //         eprintln!("Failed to unpack archive: {}", e);
-    //         return;
-    //     }
-    // }
+    // Fetch srv_handle and srv from api::run_server
+    let (srv, srv_handle) = api::start_server(golden_node.clone()).await;
 
-    // let winexe_client = match WinexeClient::new(Some("/tmp/img".to_string())).await {
-    //     Ok(client) => client,
-    //     Err(e) => {
-    //         eprintln!("Failed to create WinexeClient: {}", e);
-    //         return;
-    //     }
+    // Start API server in background
+    tokio::spawn(srv);
+
+    loop {
+        // sleep one second\
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+
+    // Main loop
+    // Scan subnet
+    // batch connect to hosts
+    // transfer chimera binary
+    // run infect procedure of chimera
+    // wait for responses on golden node
+    // execute root procedure on golden node
+    // wait for api key from golden node
+    // distribute api key to all nodes and post inventory
+    // wait for inventory from all nodes
+    // done
+    // Serial scripter manage api key lifetimes
+    // Complex password (typables)
+    // Encrypt database
+
+    // net::spread::spreader::Spreader::new()
+    // let mut hosts = net::enumeration::ping::Enumerator::new("192.168.1".to_string());
+    // let results = hosts.ping_sweep().await;
+    // println!("Hosts: {:?}", hosts.hosts.len());
+
+    srv_handle.stop(true).await;
+
+    // let creds: Credentials = Credentials {
+    //     username: "cm03".into(),
+    //     password: Some("@11272003Cm!".to_string()),
+    //     key: None,
     // };
 
-    // let hosts = ping::ping_sweep();
-    // let mut enumerator = ping::Enumerator::new("10.100.107".to_string());
-    // enumerator.ping_sweep().await.unwrap();
-
-    // let spreader = init::Spreader::new("password".to_string());
-
-    // let mut spreader = Spreader::new("password123".to_string());
-    // spreader.spread
-    // spreader.enumerate_hosts("192.168.60").await;
-    // password123
-    // spreader.spread().await;
-    // for host in enumerator.hosts {
-    //     println!("Host: {}", host.ip);
-    //  GoblinoMunchers759!
-    //     // println!("OS: {:?}", host.os);
-    // }
-
-    let creds: Credentials = Credentials {
-        username: "cm03".into(),
-        password: Some("@11272003Cm!".to_string()),
-        key: None,
-    };
-
-    let ssh_client = SSHClient::new()
-        .ip("10.123.40.102".to_string())
-        .connect(&creds)
-        .await
-        .unwrap();
+    // let ssh_client = SSHClient::new()
+    //     .ip("10.123.40.102".to_string())
+    //     .connect(&creds)
+    //     .await
+    //     .unwrap();
 
     // let mut decompresser = GzDecoder::new(CHIMERA);
     // let mut decompressed_data = Vec::new();
     // decompresser
     //     .read_to_end(&mut decompressed_data)
-    //     .expect("Failed to decompress data");
-
+    //     .expect("Failed to decompress data");d ..
     // let base64_str = String::from_utf8(decompressed_data).expect("Unable to parse UTF-8");
 
     // // Define the chunk size in bytes
@@ -145,84 +131,8 @@ async fn main() {
     //     ssh_client.execute_command(&command).await.unwrap();
     // });
 
-    let command = format!("base64 -d /tmp/chimera64 > /tmp/chimera");
-    ssh_client.execute_command(&command).await.unwrap();
-    // println!("EXECUTIONG {}", command);
+    // let command = format!("base64 -d /tmp/chimera64 > /tmp/chimera");
+    // ssh_client.execute_command(&command).await.unwrap();
 
-    // let winexe_client = WinexeClient::new()
-    //     .container_path("/tmp/img".to_string())
-    //     .ip("139.182.180.236".to_string())
-    //     .connect(&creds)
-    //     .await
-    //     .expect("");
-    // let ssh_client2 = SSHClient::new()
-    //     .ip("139.182.180.113".to_string())
-    //     .connect(&creds)
-    //     .await
-    //     .unwrap();
-    // let ssh_client = SSHClient::new()
-    //     .ip("139.182.180.113".to_string())
-    //     .connect(&creds)
-    //     .await
-    //     .unwrap();
-
-    // let mut handles = vec![];
-
-    // handles.push(tokio::spawn(async move {
-    //     ssh_client2
-    //         .execute_command("echo client2 > /tmp/test")
-    //         .await;
-    //     ssh_client2
-    //         .execute_command("echo client2 > /tmp/test")
-    //         .await;
-    //     ssh_client2
-    //         .execute_command("echo client2 > /tmp/test")
-    //         .await;
-    //     ssh_client2.execute_command("echo Step 2").await;
-    //     ssh_client2.execute_command("echo Step 3").await;
-    // }));
-
-    // handles.push(tokio::spawn(async move {
-    //     ssh_client.execute_command("echo client1 > /tmp/test").await;
-    //     ssh_client.execute_command("echo client1 > /tmp/test").await;
-    // }));
-
-    // Wait for all spawned tasks to complete
-    // join_all(handles).await;
-
-    // ssh_client.unwrap().execute_command("echo Test1 > /tmp/test").await;
-    // let ssh_client = SSHClient::new(&creds, "139.182.180.113:22".to_string(), None).await;
-
-    let cmds = vec![
-        "echo Test3 > /temp/test\n",
-        "echo Test2 > /temp/test\n",
-        "echo Test1 > /temp/test\n",
-    ];
-
-    // let output = winexe_client.execute_command("powershell.exe ls /temp\n").await.unwrap();
-    // let x = winexe_client.execute_command("echo 333\n").await.unwrap();
-    // // print output
-    // println!("{:?}", output);
-    // println!("{:?}", x);
-    // let out = winexe_client.execute_command("echo Test1\n").await.unwrap();
-    // println!("{:?}", out);
-    // winexe_client2.execute_command("echo Test2 > /tmp/test\n").await.unwrap();
-    // winexe_client.close().await.unwrap();
-
-    // ssh_client.execute_command("powershell.exe ls\n").await.unwrap();
-    // ssh_client.child_process.unwrap().wait().await.unwrap();
-    // winexe_client.execute_command("dir\n").await.unwrap();
-    // let command1 = winexe_client.execute_command("echo ONEE\n");
-    // let command2 = winexe_client.execute_command("dir\n");
-    // let command2 = winexe_client.execute_command("dir\n");
-
-    // let (result1, result2) = tokio::join!(command1, command2);
-
-    // winexe_client.close().await;
-
-    // println!("Result 1: {:?}", result1);
-    // println!("Result 2: {:?}", result2);
     let _memory_report = MemoryReport;
-
-    // winexe_client.close().await;
 }
