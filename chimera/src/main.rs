@@ -8,11 +8,8 @@ fn main() {
     let c = Host::new();
     let serialized = serde_json::to_string(&c).unwrap();
     // println!("Serialized Client to JSON: {}", serialized);
-    println!("{:?}", c.connections);
+    println!("{:?}", c.services);
     // println!("{}", c.);
     // println!("{:?}", c.shares);
     // println!("Ports: {:?}", c.ports);
-    // println!("{:?}", c.containers);
-    // println!("{:?}", c.);
-    // NetworkInfo::ports();
 }
