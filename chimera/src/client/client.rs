@@ -2,26 +2,6 @@ use crate::client::types::{Container, Disk, Host, User, UserInfo, OS};
 use sysinfo::{CpuExt, DiskExt, Networks, System, SystemExt, UserExt};
 use serde::Deserialize;
 
-// WMI Structs
-#[derive(Deserialize, Debug)]
-#[serde(rename = "Win32_Service")]
-#[serde(rename_all = "PascalCase")]
-pub struct Service {
-    name: String,
-    start_mode: String,
-    state: String,
-    status: String,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename = "Win32_Share")]
-#[serde(rename_all = "PascalCase")]
-pub struct Share {
-    name: String,
-    path: String,
-    description: String,
-}
-
 impl Host {
     pub fn new() -> Host {
         let mut sys = System::new_all();
