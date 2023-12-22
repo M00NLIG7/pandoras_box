@@ -157,6 +157,11 @@ pub trait OS {
     fn shares() -> Box<[Share]>;
 }
 
+#[cfg(target_os = "windows")]
+pub trait ServerFeatures {
+    fn server_features() -> Box<[String]>;
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Host {
     pub(crate) hostname: Box<str>,
@@ -176,6 +181,8 @@ pub struct Host {
     pub(crate) users: Box<[User]>,
     pub(crate) shares: Box<[Share]>,
     pub(crate) persistent_programs: String,
+    #[cfg(target_os = "windows")]
+    pub(crate) server_features: Box<[String]>
     //pub(crate) containers: Box<[Container]>,
 }
 
