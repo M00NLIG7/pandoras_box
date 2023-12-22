@@ -1,18 +1,11 @@
+use std::collections::HashMap;
+
 use wmi::*;
-use serde::{Deserialize};
+use serde::Deserialize;
 use local_ip_address::local_ip;
 use sysinfo::{ProcessExt, System, SystemExt, UserExt};
-use super::client;
-use super::client::NetworkConnection;
-use super::client::NetworkInfo;
-use super::client::Host;
-use super::client::Services;
-use super::client::Service;
-use super::client::OpenPort;
-use super::client::Shares;
-use super::client::Share;
 use netstat::*;
-
+use super::types::*;
 
 
 // retrieve windows features
@@ -39,6 +32,26 @@ struct OperatingSystem {
     caption: String,
 }
 
+impl From<TcpState> for ConnectionState {
+    fn from(tcp_state: TcpState) -> Self {
+        match tcp_state {
+            TcpState::Established => ConnectionState::Established,
+            TcpState::SynSent => ConnectionState::SynSent,
+            TcpState::SynReceived => ConnectionState::SynRecv,
+            TcpState::FinWait1 => ConnectionState::FinWait1,
+            TcpState::FinWait2 => ConnectionState::FinWait2,
+            TcpState::TimeWait => ConnectionState::TimeWait,
+            TcpState::Closed => ConnectionState::Closed,
+            TcpState::CloseWait => ConnectionState::CloseWait,
+            TcpState::LastAck => ConnectionState::LastAck,
+            TcpState::Listen => ConnectionState::Listen,
+            TcpState::Closing => ConnectionState::Closing,
+            _ => ConnectionState::Unknown,
+        }
+    }
+}
+
+
 fn retrieve_server_features() -> Result<Vec<ServerFeatures>, wmi::WMIError> {
     let wmi_con = WMIConnection::new(COMLibrary::new()?)?;
 
@@ -61,13 +74,13 @@ fn retrieve_server_features() -> Result<Vec<ServerFeatures>, wmi::WMIError> {
 }
 
 // Retrieve NetworkInfo
-impl NetworkInfo for Host {
+impl OS for Host {
     fn ip() -> Box<str> {
         let my_local_ip = local_ip().unwrap().to_string().into_boxed_str();
         return my_local_ip;
     }
 
-    fn containers() -> Box<[super::client::Container]> {
+    fn containers() -> Box<[Container]> {
         todo!()
     }
 
@@ -75,7 +88,7 @@ impl NetworkInfo for Host {
         todo!("firewall_rules")
     }
 
-    fn net_info() -> (Box<[super::client::NetworkConnection]>, Box<[super::client::OpenPort]>) {
+    fn conn_info() -> (Box<[NetworkConnection]>, Box<[OpenPort]>) {
         let sys = System::new_all();
         let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
         let proto_flags = ProtocolFlags::TCP | ProtocolFlags::UDP;
@@ -102,6 +115,7 @@ impl NetworkInfo for Host {
                     if process.pid == pid {
                         processes.push(Process {
                             pid: process.pid,
+                            name: process.name.clone(),
                         });
                     }
                 }
@@ -111,20 +125,19 @@ impl NetworkInfo for Host {
                 ProtocolSocketInfo::Tcp(tcp) => {
                 sockets.push(NetworkConnection {
                     local_address: tcp.local_addr.to_string().into_boxed_str(),
-                    remote_address: tcp.remote_addr.to_string().into_boxed_str(),
+                    remote_address: Some(tcp.remote_addr.to_string().into_boxed_str()),
                     protocol: "TCP".to_string().into_boxed_str(),
-                    state: tcp.state.to_string().into_boxed_str(),
-                    pid: processes.first().map(|p| p.pid as i32),
+                    state: Some(tcp.state.into()),
+                    process: processes.first().cloned(),
                     });
                     
-
 
                     let new_open_port = OpenPort {
                         port: tcp.remote_port,
                         protocol: "TCP".to_string().into_boxed_str(),
-                        pid: processes.first().map(|p| p.pid as i32),
+                        process: processes.first().cloned(),
                         version: "".to_string().into_boxed_str(),
-                        state: tcp.state.to_string().into_boxed_str(),
+                        state: Some(tcp.state.into()),
                     };
             
                     if !open_ports.iter().any(|existing_port| {
@@ -135,10 +148,10 @@ impl NetworkInfo for Host {
                 },
                 ProtocolSocketInfo::Udp(udp) => sockets.push(NetworkConnection {
                     local_address: udp.local_addr.to_string().into_boxed_str(),
-                    remote_address: "".to_string().into_boxed_str(),
+                    remote_address: None,
                     protocol: "UDP".to_string().into_boxed_str(),
-                    state: "".to_string().into_boxed_str(),
-                    pid: processes.first().map(|p| p.pid as i32),
+                    state: None,
+                    process: processes.first().cloned(),
                 }),
             }
         }
@@ -148,11 +161,7 @@ impl NetworkInfo for Host {
         )
     }
 
-}
-
-
-impl Services for Host {
-    fn get_services() -> Box<[Service]> {
+    fn services() -> Box<[Service]> {
         let com_lib = match COMLibrary::new() {
             Ok(lib) => lib,
             _ => return Box::new([]), // or handle the error as appropriate
@@ -162,43 +171,58 @@ impl Services for Host {
             Ok(con) => con,
             _ => return Box::new([]), // or handle the error as appropriate
         };
-
-        let services_result = wmi_con.query();
-        let services = match services_result {
-            Ok(services) =>  return services.into_boxed_slice(),
-            _ => {
-                return Box::new([]);
-            }
-        };
-    }
-}
-
-impl Shares for Host {
-    fn get_shares() -> Box<[super::client::Share]> {
-        let com_lib = match COMLibrary::new() {
-            Ok(lib) => lib,
-            _ => return Box::new([]), // or handle the error as appropriate
-        };
         
-        let wmi_con = match WMIConnection::new(com_lib) {
-            Ok(con) => con,
-            _ => return Box::new([]), // or handle the error as appropriate
-        };
-
-        let shares_result = wmi_con.query();
-        let shares = match shares_result {
-            Ok(shares) =>  return shares.into_boxed_slice(),
-            Err(e) => {
-                println!("Error: {}", e);   
-                return Box::new([]);
-            }
-        };
+        let results: Vec<HashMap<String, Variant>> = wmi_con.raw_query("SELECT * FROM Win32_Service").unwrap();
+        let mut services = Vec::new();
+        for os in results {
+            let service = services.push(Service {
+                name: match os.get("Name").unwrap() {
+                    Variant::String(s) => s.clone().into_boxed_str(),
+                    _ => panic!("Unexpected type for Name"),
+                },
+                status: match os.get("State").unwrap() {
+                    Variant::String(s) => match s.as_str() {
+                        "Running" => ServiceStatus::Active,
+                        "Stopped" => ServiceStatus::Inactive,
+                        "Paused" => ServiceStatus::Inactive,
+                        "Start Pending" => ServiceStatus::Inactive,
+                        "Stop Pending" => ServiceStatus::Inactive,
+                        "Continue Pending" => ServiceStatus::Inactive,
+                        "Pause Pending" => ServiceStatus::Inactive,
+                        "Unknown" => ServiceStatus::Unknown,
+                        _ => ServiceStatus::Failed,
+                    },
+                    _ => panic!("Unexpected type for State"),
+                },
+                description: match os.get("Description").unwrap() {
+                    Variant::String(s) => s.clone().into_boxed_str(),
+                    Variant::Null => "".to_string().into_boxed_str(),
+                    _ => panic!("Unexpected type for Description: {:?}", os.get("Description").unwrap()),
+                },
+                exec_path: match os.get("PathName") {
+                    Some(Variant::String(s)) => Some(s.clone()),
+                    _ => None,
+                },
+                enabled: match os.get("StartMode").unwrap() {
+                    Variant::String(s) => s == "Auto",
+                    _ => panic!("Unexpected type for StartMode"),
+                },
+            });
+        }
+        return services.into_boxed_slice();
     }
+
+    fn shares() -> Box<[Share]> {
+        let myshare = Share {
+            share_type: ShareType::SMB,
+            network_path: "".to_string().into_boxed_str(),
+        };
+
+        return Box::new([myshare]);
+    }
+
 }
 
-struct Process {
-    pid: u32,
-}
 
 fn process_info(sys: &System) -> std::vec::Vec<Process> {
     let processes = sys.processes();
@@ -209,6 +233,7 @@ fn process_info(sys: &System) -> std::vec::Vec<Process> {
 
         let value = Process {
             pid: pid.to_string().parse::<u32>().unwrap(),
+            name: process_data.name().to_string().into_boxed_str(),
         };
         process_dump.push(value);
     }
@@ -216,7 +241,7 @@ fn process_info(sys: &System) -> std::vec::Vec<Process> {
     return process_dump
 }
 
-impl super::client::UserInfo for sysinfo::User {
+impl UserInfo for sysinfo::User {
     fn is_admin(&self) -> bool {
         // Check for sudoers group in groups or uid 0 (root)
         self.groups().iter().any(|group| group == "Administrators") || self.id().to_string() == "0"

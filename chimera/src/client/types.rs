@@ -93,7 +93,7 @@ impl Default for ConnectionState {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Process {
-    pub(crate) pid: i32,
+    pub(crate) pid: u32,
     pub(crate) name: Box<str>,
 }
 
@@ -175,7 +175,7 @@ pub struct Host {
     pub(crate) users: Box<[User]>,
     pub(crate) shares: Box<[Share]>,
     pub(crate) persistent_programs: String,
-    pub(crate) containers: Box<[Container]>,
+    //pub(crate) containers: Box<[Container]>,
 }
 
 pub trait UserInfo {
