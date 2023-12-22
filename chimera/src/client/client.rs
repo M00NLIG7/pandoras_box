@@ -21,12 +21,12 @@ impl Host {
             network_adapters: String::from(""),
             ports: open_ports,
             connections: connections,
-            firewall_rules: String::from(""),
             services: Host::services(),
             users: users(&sys),
             shares: Host::shares(),
             persistent_programs: String::from(""),
-            containers: Host::containers(),
+            firewall_rules: String::from(""),
+            //containers: Host::containers(),
         }
     }
 
@@ -51,6 +51,9 @@ fn disks(sys: &System) -> Box<[Disk]> {
         .collect()
 }
 
+pub trait Infect {
+    fn init(&self, schema: &str);
+}
 fn users(sys: &System) -> Box<[User]> {
     sys.users()
         .iter()
