@@ -7,13 +7,16 @@ build = "build.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+actix-web = "4.4.0"
 anyhow = "1.0.75"
 async-trait = "0.1.74"
 base64 = "0.21.5"
 flate2 = "1.0.27"
 futures = "0.3.29"
 rand = "0.8.5"
-reqwest = {version="0.11.20", features=["blocking"]}
+reqwest = {version="0.11.20", features = ["blocking"]}
+serde = {version = "1.0.193", features = ["derive"]}
+serde_json = "1.0.108"
 surge-ping = "0.5.2"
 tar = "0.4.40"
 tempfile = "3.8.0"

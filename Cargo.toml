@@ -2,7 +2,8 @@
 members = [
     "pandoras_box",
     "chimera",
-    "lasso"
+    "lasso",
+    "test"
 ]
 resolver = "2"
 
