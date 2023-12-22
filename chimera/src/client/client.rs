@@ -1,4 +1,4 @@
-use crate::client::types::{Disk, Host, User, UserInfo, OS};
+use crate::client::types::{Disk, Host, User, UserInfo, OS, ServerFeatures};
 use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt};
 use serde::Deserialize;
 
@@ -27,6 +27,8 @@ impl Host {
             shares: Host::shares(),
             persistent_programs: String::from(""),
             firewall_rules: String::from(""),
+            #[cfg(target_os = "windows")]
+            server_features: Host::server_features(),
             //containers: Host::containers(),
         }
     }

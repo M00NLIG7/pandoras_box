@@ -10,28 +10,6 @@ use super::types::*;
 
 // retrieve windows features
 
-
-// uint32 ID;
-// uint32 ParentID;
-// string Name;
-#[derive(Deserialize, Debug)]
-#[serde(rename = "Win32_ServerFeature")]
-#[serde(rename_all = "PascalCase")]
-pub struct ServerFeatures {
-    id: u32,
-    parent_id: u32,
-    name: String,
-
-}
-
-
-#[derive(Deserialize, Debug)]
-#[serde(rename = "Win32_OperatingSystem")]
-#[serde(rename_all = "PascalCase")]
-struct OperatingSystem {
-    caption: String,
-}
-
 impl From<TcpState> for ConnectionState {
     fn from(tcp_state: TcpState) -> Self {
         match tcp_state {
@@ -49,28 +27,6 @@ impl From<TcpState> for ConnectionState {
             _ => ConnectionState::Unknown,
         }
     }
-}
-
-
-fn retrieve_server_features() -> Result<Vec<ServerFeatures>, wmi::WMIError> {
-    let wmi_con = WMIConnection::new(COMLibrary::new()?)?;
-
-    let results: Vec<OperatingSystem> = wmi_con.query()?;
-
-    let mut is_server = false;
-    results.iter().filter(|os| {
-        os.caption.to_lowercase().contains("server")
-    }).for_each(|os| {
-        println!("Server: {}", os.caption);
-        is_server = true;
-    });
-
-    if is_server == true {
-        let server_features: Vec<ServerFeatures> = wmi_con.query()?;
-        return Ok(server_features);   
-    }
-
-    Ok(vec![])
 }
 
 // Retrieve NetworkInfo
@@ -236,6 +192,64 @@ impl OS for Host {
 
 }
 
+
+
+// uint32 ID;
+// uint32 ParentID;
+// string Name;
+#[derive(Deserialize, Debug)]
+#[serde(rename = "Win32_ServerFeature")]
+#[serde(rename_all = "PascalCase")]
+pub struct Win32ServerFeatures {
+    id: u32,
+    parent_id: u32,
+    name: String,
+
+}
+
+
+#[derive(Deserialize, Debug)]
+#[serde(rename = "Win32_OperatingSystem")]
+#[serde(rename_all = "PascalCase")]
+struct OperatingSystem {
+    caption: String,
+}
+
+
+
+
+impl ServerFeatures for Host {
+    fn server_features() -> Box<[String]> {
+        let com_lib = match COMLibrary::new() {
+            Ok(lib) => lib,
+            _ => return Box::new([]), // or handle the error as appropriate
+        };
+        
+        let wmi_con = match WMIConnection::new(com_lib) {
+            Ok(con) => con,
+            _ => return Box::new([]), // or handle the error as appropriate
+        };
+
+        let results: Vec<OperatingSystem> = wmi_con.query().unwrap();
+    
+        let mut is_server = false;
+        results.iter().filter(|os| {
+            os.caption.to_lowercase().contains("server")
+        }).for_each(|os| {
+            println!("Server: {}", os.caption);
+            is_server = true;
+        });
+    
+        if is_server == true {
+            let server_features: Vec<Win32ServerFeatures> = wmi_con.query().unwrap();
+            return server_features.iter().map(|feature| {
+                feature.name.clone()
+            }).collect::<Vec<String>>().into_boxed_slice(); 
+        } else {
+            return Box::new([]);   
+        }
+    }
+}
 
 fn process_info(sys: &System) -> std::vec::Vec<Process> {
     let processes = sys.processes();
