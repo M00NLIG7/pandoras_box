@@ -1,5 +1,26 @@
-use crate::client::types::{Container, Disk, Host, Service, Share, User, UserInfo, OS};
+use crate::client::types::{Container, Disk, Host, User, UserInfo, OS};
 use sysinfo::{CpuExt, DiskExt, Networks, System, SystemExt, UserExt};
+use serde::Deserialize;
+
+// WMI Structs
+#[derive(Deserialize, Debug)]
+#[serde(rename = "Win32_Service")]
+#[serde(rename_all = "PascalCase")]
+pub struct Service {
+    name: String,
+    start_mode: String,
+    state: String,
+    status: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename = "Win32_Share")]
+#[serde(rename_all = "PascalCase")]
+pub struct Share {
+    name: String,
+    path: String,
+    description: String,
+}
 
 impl Host {
     pub fn new() -> Host {
@@ -21,12 +42,12 @@ impl Host {
             network_adapters: String::from(""),
             ports: open_ports,
             connections: connections,
-            firewall_rules: String::from(""),
             services: Host::services(),
             users: users(&sys),
             shares: Host::shares(),
             persistent_programs: String::from(""),
-            containers: Host::containers(),
+            firewall_rules: String::from(""),
+            //containers: Host::containers(),
         }
     }
 }
@@ -46,6 +67,10 @@ fn disks(sys: &System) -> Box<[Disk]> {
         .collect()
 }
 
+
+pub trait Infect {
+    fn init(&self, schema: &str);
+}
 fn users(sys: &System) -> Box<[User]> {
     sys.users()
         .iter()
