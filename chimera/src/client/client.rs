@@ -25,8 +25,6 @@ impl Host {
             services: Host::services(),
             users: users(&sys),
             shares: Host::shares(),
-            persistent_programs: String::from(""),
-            firewall_rules: String::from(""),
             #[cfg(target_os = "windows")]
             server_features: Host::server_features(),
             //containers: Host::containers(),

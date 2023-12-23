@@ -174,13 +174,11 @@ pub struct Host {
     pub(crate) disks: Box<[Disk]>,
     pub(crate) network_adapters: String,
     pub(crate) ports: Box<[OpenPort]>,
-    pub(crate) firewall_rules: String,
     // pub(crate) processes: String,
     pub(crate) connections: Box<[NetworkConnection]>,
     pub(crate) services: Box<[Service]>,
     pub(crate) users: Box<[User]>,
     pub(crate) shares: Box<[Share]>,
-    pub(crate) persistent_programs: String,
     #[cfg(target_os = "windows")]
     pub(crate) server_features: Box<[String]>
     //pub(crate) containers: Box<[Container]>,
