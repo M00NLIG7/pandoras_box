@@ -1,19 +1,17 @@
 // mod enumeration;
 mod api;
-mod init;
+// mod init;
 mod net;
 
 use std::sync::{Arc, Mutex};
 
 // use enumeration::ping;
-use net::{
-    ssh::{self, SSHClient},
-    winexe::{self, WinexeClient},
-};
+use net::winexe::{self, WinexeClient};
 
 //use std::future::Future;
 use crate::net::communicator::{Credentials, Session};
-use crate::net::spread::spreader::Spreader;
+// use crate::net::spread::spreader::Spreader;
+// use crate::net::spread::spreader::ConnectionPool;
 use flate2::read::GzDecoder;
 use futures::future::join_all;
 use futures::{Future, FutureExt};
@@ -44,20 +42,30 @@ impl Drop for MemoryReport {
 #[tokio::main]
 async fn main() {
     // Used to represent the golden child node to host Serial Scripter
-    let golden_node = Arc::new(Mutex::new(api::types::ServerNode::default()));
+    // let golden_node = Arc::new(Mutex::new(api::types::ServerNode::default()));
 
-    // Fetch srv_handle and srv from api::run_server
-    let (srv, srv_handle) = api::start_server(golden_node.clone()).await;
+    // // Fetch srv_handle and srv from api::run_server
+    // let (srv, srv_handle) = api::start_server(golden_node.clone()).await;
 
-    // Start API server in background
-    tokio::spawn(srv);
+    // // Start API server in background
+    // tokio::spawn(srv);
 
-    loop {
-        // sleep one second\
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    }
+    // loop {
+    //     // sleep one second\
+    //     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    // }
+    let start_tio = std::time::Instant::now();
+    let x = crate::net::spread::spreader::Spreader::new("192.168.220", "MacCheese4Me!").await;
 
+    // println!("Enumeration and connection took {:?}", start_tio.elapsed());
+
+    x.spread().await;
+
+    // srv_handle.stop(true).await;
     // Main loop
+    // let mut spreader = net::spread::spreader::Spreader::new("MacCheese4Me!");
+    // spreader.spread();
+
     // Scan subnet
     // batch connect to hosts
     // transfer chimera binary
@@ -76,27 +84,6 @@ async fn main() {
     // let mut hosts = net::enumeration::ping::Enumerator::new("192.168.1".to_string());
     // let results = hosts.ping_sweep().await;
     // println!("Hosts: {:?}", hosts.hosts.len());
-
-    srv_handle.stop(true).await;
-
-    // let creds: Credentials = Credentials {
-    //     username: "cm03".into(),
-    //     password: Some("@11272003Cm!".to_string()),
-    //     key: None,
-    // };
-
-    // let ssh_client = SSHClient::new()
-    //     .ip("10.123.40.102".to_string())
-    //     .connect(&creds)
-    //     .await
-    //     .unwrap();
-
-    // let mut decompresser = GzDecoder::new(CHIMERA);
-    // let mut decompressed_data = Vec::new();
-    // decompresser
-    //     .read_to_end(&mut decompressed_data)
-    //     .expect("Failed to decompress data");d ..
-    // let base64_str = String::from_utf8(decompressed_data).expect("Unable to parse UTF-8");
 
     // // Define the chunk size in bytes
     // const CHUNK_SIZE: usize = 125 * 1024; // 100 KB
@@ -122,7 +109,6 @@ async fn main() {
 
     //     start = end;
     // }
-    println!("DONE CHUNKING");
     // .for_each(|chunk| {
     //     let chunk_str = chunk.iter().collect::<String>();
 
@@ -135,4 +121,5 @@ async fn main() {
     // ssh_client.execute_command(&command).await.unwrap();
 
     let _memory_report = MemoryReport;
+    println!("Total Elapsed Time {:?}", start_tio.elapsed());
 }

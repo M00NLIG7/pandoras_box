@@ -31,34 +31,24 @@
 //   rc.apache2        [  stopped  ]
 //   rc.bind           [  started  ]
 //   rc.ntpd           [  started  ]
-use std::collections::HashMap;
-use std::process::Command;
+use std::io::{self, Read};
+use std::net::TcpStream;
+use std::str;
+fn ssh_is_open(ip: &str) -> Result<bool, io::Error> {
+    let target = format!("{}:22", ip); // Replace with your target IP or hostname
+    let mut stream = TcpStream::connect(target)?;
 
-fn fetch_service_statuses() -> HashMap<String, String> {
-    let output = Command::new("systemctl")
-        .arg("list-unit-files")
-        .arg("--type=service")
-        .output()
-        .expect("Failed to execute systemctl");
+    let mut buffer = [0; 1024];
+    let bytes_read = stream.read(&mut buffer)?;
 
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    let mut service_statuses = HashMap::new();
+    let banner = str::from_utf8(&buffer[..bytes_read]).unwrap_or_else(|_| "<Invalid UTF-8 data>");
 
-    for line in output_str.lines() {
-        if let Some((service, status)) = line.split_once(' ') {
-            service_statuses.insert(
-                service.to_string(),
-                status.trim().split_whitespace().next().unwrap().to_string(),
-            );
-        }
-    }
-
-    service_statuses
+    Ok(banner.contains("OpenSSH"))
 }
+fn main() -> io::Result<()> {
+    let ip = "localhost";
+    let is_open = ssh_is_open(ip)?;
+    println!("Is port 22 open on {}? {}", ip, is_open);
 
-fn main() {
-    println!("{:?}", fetch_service_statuses().len());
-    for (service, status) in fetch_service_statuses() {
-        println!("service {} Status {}", service, status);
-    }
+    Ok(())
 }
