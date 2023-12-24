@@ -289,7 +289,7 @@ where
                         state: Some(state),
                         protocol: entry.protocol(),
                         process: map.get(&entry.inode()).map(|stat| super::types::Process {
-                            pid: stat.pid,
+                            pid: stat.pid as u32,
                             name: stat.comm.clone().into_boxed_str(),
                         }),
                         // .map(|stat| (stat.pid, stat.comm.clone())),
