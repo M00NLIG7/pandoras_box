@@ -514,6 +514,7 @@ dependencies = [
  "sys-info",
  "sysinfo",
  "tokio",
+ "vc-ltl",
  "which",
  "wmi",
 ]
@@ -2599,6 +2600,12 @@ checksum = "bc5cf98d8186244414c848017f0e2676b3fcb46807f6668a97dfe67359a3c4b7"
 dependencies = [
  "getrandom",
 ]
+
+[[package]]
+name = "vc-ltl"
+version = "5.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba39ee40cae2e458614130c23f6be28410c0e851627fac0bb00d4ec530c9b5cf"
 
 [[package]]
 name = "vcpkg"
