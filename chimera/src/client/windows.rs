@@ -1,15 +1,13 @@
 use std::collections::HashMap;
 
-use wmi::*;
-use serde::Deserialize;
-use local_ip_address::local_ip;
-use sysinfo::{ProcessExt, System, SystemExt, UserExt};
-use netstat::*;
 use super::types::*;
-
+use local_ip_address::local_ip;
+use netstat::*;
+use serde::Deserialize;
+use sysinfo::{ProcessExt, System, SystemExt, UserExt};
+use wmi::*;
 
 // retrieve windows features
-
 
 // uint32 ID;
 // uint32 ParentID;
@@ -21,9 +19,7 @@ pub struct ServerFeatures {
     id: u32,
     parent_id: u32,
     name: String,
-
 }
-
 
 #[derive(Deserialize, Debug)]
 #[serde(rename = "Win32_OperatingSystem")]
@@ -51,23 +47,23 @@ impl From<TcpState> for ConnectionState {
     }
 }
 
-
 fn retrieve_server_features() -> Result<Vec<ServerFeatures>, wmi::WMIError> {
     let wmi_con = WMIConnection::new(COMLibrary::new()?)?;
 
     let results: Vec<OperatingSystem> = wmi_con.query()?;
 
     let mut is_server = false;
-    results.iter().filter(|os| {
-        os.caption.to_lowercase().contains("server")
-    }).for_each(|os| {
-        println!("Server: {}", os.caption);
-        is_server = true;
-    });
+    results
+        .iter()
+        .filter(|os| os.caption.to_lowercase().contains("server"))
+        .for_each(|os| {
+            println!("Server: {}", os.caption);
+            is_server = true;
+        });
 
     if is_server == true {
         let server_features: Vec<ServerFeatures> = wmi_con.query()?;
-        return Ok(server_features);   
+        return Ok(server_features);
     }
 
     Ok(vec![])
@@ -92,11 +88,12 @@ impl OS for Host {
         let sys = System::new_all();
         let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
         let proto_flags = ProtocolFlags::TCP | ProtocolFlags::UDP;
-        let iterator = iterate_sockets_info(af_flags, proto_flags).expect("Failed to get socket information!");
-    
+        let iterator =
+            iterate_sockets_info(af_flags, proto_flags).expect("Failed to get socket information!");
+
         let mut sockets: Vec<NetworkConnection> = Vec::new();
         let mut open_ports: Vec<OpenPort> = Vec::new();
-    
+
         for info in iterator {
             let si = match info {
                 Ok(si) => si,
@@ -105,7 +102,7 @@ impl OS for Host {
                     continue;
                 }
             };
-    
+
             // gather associated processes
             let process_ids = si.associated_pids;
             let mut processes: Vec<Process> = Vec::new();
@@ -120,17 +117,16 @@ impl OS for Host {
                     }
                 }
             }
-    
+
             match si.protocol_socket_info {
                 ProtocolSocketInfo::Tcp(tcp) => {
-                sockets.push(NetworkConnection {
-                    local_address: tcp.local_addr.to_string().into_boxed_str(),
-                    remote_address: Some(tcp.remote_addr.to_string().into_boxed_str()),
-                    protocol: "TCP".to_string().into_boxed_str(),
-                    state: Some(tcp.state.into()),
-                    process: processes.first().cloned(),
+                    sockets.push(NetworkConnection {
+                        local_address: tcp.local_addr.to_string().into_boxed_str(),
+                        remote_address: Some(tcp.remote_addr.to_string().into_boxed_str()),
+                        protocol: "TCP".to_string().into_boxed_str(),
+                        state: Some(tcp.state.into()),
+                        process: processes.first().cloned(),
                     });
-                    
 
                     let new_open_port = OpenPort {
                         port: tcp.remote_port,
@@ -139,13 +135,14 @@ impl OS for Host {
                         version: "".to_string().into_boxed_str(),
                         state: Some(tcp.state.into()),
                     };
-            
+
                     if !open_ports.iter().any(|existing_port| {
-                        existing_port.port == new_open_port.port && existing_port.protocol == new_open_port.protocol
+                        existing_port.port == new_open_port.port
+                            && existing_port.protocol == new_open_port.protocol
                     }) {
                         open_ports.push(new_open_port);
                     }
-                },
+                }
                 ProtocolSocketInfo::Udp(udp) => sockets.push(NetworkConnection {
                     local_address: udp.local_addr.to_string().into_boxed_str(),
                     remote_address: None,
@@ -155,10 +152,7 @@ impl OS for Host {
                 }),
             }
         }
-        (
-            sockets.into_boxed_slice(),
-            open_ports.into_boxed_slice(),
-        )
+        (sockets.into_boxed_slice(), open_ports.into_boxed_slice())
     }
 
     fn services() -> Box<[Service]> {
@@ -166,13 +160,14 @@ impl OS for Host {
             Ok(lib) => lib,
             _ => return Box::new([]), // or handle the error as appropriate
         };
-        
+
         let wmi_con = match WMIConnection::new(com_lib) {
             Ok(con) => con,
             _ => return Box::new([]), // or handle the error as appropriate
         };
-        
-        let results: Vec<HashMap<String, Variant>> = wmi_con.raw_query("SELECT * FROM Win32_Service").unwrap();
+
+        let results: Vec<HashMap<String, Variant>> =
+            wmi_con.raw_query("SELECT * FROM Win32_Service").unwrap();
         let mut services = Vec::new();
         for os in results {
             let service = services.push(Service {
@@ -197,7 +192,10 @@ impl OS for Host {
                 description: match os.get("Description").unwrap() {
                     Variant::String(s) => s.clone().into_boxed_str(),
                     Variant::Null => "".to_string().into_boxed_str(),
-                    _ => panic!("Unexpected type for Description: {:?}", os.get("Description").unwrap()),
+                    _ => panic!(
+                        "Unexpected type for Description: {:?}",
+                        os.get("Description").unwrap()
+                    ),
                 },
                 exec_path: match os.get("PathName") {
                     Some(Variant::String(s)) => Some(s.clone()),
@@ -220,9 +218,7 @@ impl OS for Host {
 
         return Box::new([myshare]);
     }
-
 }
-
 
 fn process_info(sys: &System) -> std::vec::Vec<Process> {
     let processes = sys.processes();
@@ -230,7 +226,6 @@ fn process_info(sys: &System) -> std::vec::Vec<Process> {
     let mut process_dump = vec![];
 
     for (pid, process_data) in processes {
-
         let value = Process {
             pid: pid.to_string().parse::<u32>().unwrap(),
             name: process_data.name().to_string().into_boxed_str(),
@@ -238,7 +233,7 @@ fn process_info(sys: &System) -> std::vec::Vec<Process> {
         process_dump.push(value);
     }
 
-    return process_dump
+    return process_dump;
 }
 
 impl UserInfo for sysinfo::User {
@@ -255,4 +250,3 @@ impl UserInfo for sysinfo::User {
         local_user_sid_pattern.is_match(&self.id().to_string())
     }
 }
-
