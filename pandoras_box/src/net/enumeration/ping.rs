@@ -1,33 +1,29 @@
 // use crate::net::spread::OS;
-use crate::net::spread::spreader::OS;
+// use crate::net::spread::spreader::OS;
+use crate::net::types::{Host, OS};
 use futures::future::join_all;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use surge_ping::{Client, Config, IcmpPacket, ICMP};
 use tokio::time;
-
 // use surge_ping::{Client, Config, IcmpPacket, ICMP};
 // use tokio::time;
-#[derive(Debug)]
-pub struct Host {
-    pub ip: String,
-    pub os: OS,
-}
 
 pub struct Enumerator {
-    subnet: String,
+    subnet: Box<str>,
     pub hosts: Vec<Host>,
 }
 
 impl Enumerator {
-    pub fn new(subnet: String) -> Self {
+    pub fn new(subnet: &str) -> Self {
         Enumerator {
-            subnet: subnet,
+            subnet: subnet.into(),
             hosts: Vec::new(),
         }
     }
 
-    pub async fn ping_sweep(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn ping_sweep(&mut self) -> Result<Vec<Arc<Host>>, Box<dyn std::error::Error>> {
         let mut tasks = Vec::new();
         let client_v4 = Client::new(&Config::default()).await?;
         // let client_v6 = Client::new(&Config::builder().kind(ICMP::V6).build()).await?;
@@ -58,14 +54,20 @@ impl Enumerator {
             .map(|result| result.unwrap_or_default())
             .collect();
 
-        // match results? {}
-        for item in results {
-            if item.is_some() {
-                // println!("{:?}", item);
-                self.hosts.push(item.unwrap());
-            }
-        }
-        Ok(())
+        Ok(results
+            .into_iter()
+            .filter(|item| item.is_some())
+            .filter_map(|item| item)
+            .map(Arc::new)
+            .collect())
+        // // match results? {}
+        // for item in results {
+        //     if item.is_some() {
+        //         // println!("{:?}", item);
+        //         self.hosts.push(item.unwrap());
+        //     }
+        // }
+        // Ok(())
     }
 
     // Ping an address 5 times， and print output message（interval 1s）

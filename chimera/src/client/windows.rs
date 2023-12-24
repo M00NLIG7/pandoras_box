@@ -275,6 +275,36 @@ impl UserInfo for sysinfo::User {
     }
 
     fn is_local(&self) -> bool {
+        let com_lib = match COMLibrary::new() {
+            Ok(lib) => lib,
+            _ => return Box::new([]), // or handle the error as appropriate
+        };
+        
+        let wmi_con = match WMIConnection::new(com_lib) {
+            Ok(con) => con,
+            _ => return Box::new([]), // or handle the error as appropriate
+        };
+        
+        let results: Vec<HashMap<String, Variant>> = wmi_con.raw_query("SELECT * FROM Win32_UserAccount").unwrap();
+        let mut shares: Vec<Share> = Vec::new();
+        for os in results {
+            shares.push(Share {
+                share_type: ShareType::SMB,
+                network_path: match os.get("Path").unwrap() {
+                    Variant::String(s) => s.to_string().into_boxed_str(),
+                    _ => "".to_string().into_boxed_str(),
+                },
+            });
+        }
+
+
+
+
+
+
+
+
+
         let local_user_sid_pattern = regex::Regex::new(r"S-1-5-21-\d{2,}-1000-\d+").unwrap();
 
         // Check if user is local based on SID
