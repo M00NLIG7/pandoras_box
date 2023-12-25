@@ -3,7 +3,8 @@ members = [
     "pandoras_box",
     "chimera",
     "lasso",
-    "test"
+    "test",
+    "local-ip"
 ]
 resolver = "2"
 

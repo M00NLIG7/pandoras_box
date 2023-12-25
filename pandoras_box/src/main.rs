@@ -42,18 +42,14 @@ impl Drop for MemoryReport {
 #[tokio::main]
 async fn main() {
     // Used to represent the golden child node to host Serial Scripter
-    // let golden_node = Arc::new(Mutex::new(api::types::ServerNode::default()));
+    let golden_node = Arc::new(Mutex::new(api::types::ServerNode::default()));
 
-    // // Fetch srv_handle and srv from api::run_server
-    // let (srv, srv_handle) = api::start_server(golden_node.clone()).await;
+    // Fetch srv_handle and srv from api::run_server
+    let (srv, srv_handle) = api::start_server(golden_node.clone()).await;
 
     // // Start API server in background
-    // tokio::spawn(srv);
+    tokio::spawn(srv);
 
-    // loop {
-    //     // sleep one second\
-    //     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    // }
     let start_tio = std::time::Instant::now();
     let x = crate::net::spread::spreader::Spreader::new("192.168.220", "MacCheese4Me!").await;
 
@@ -61,6 +57,8 @@ async fn main() {
 
     x.spread().await;
 
+    srv_handle.stop(true).await;
+    println!("{:?}", golden_node);
     // srv_handle.stop(true).await;
     // Main loop
     // let mut spreader = net::spread::spreader::Spreader::new("MacCheese4Me!");

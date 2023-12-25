@@ -1,4 +1,3 @@
-use pnet::datalink;
 use procfs::net::{route, unix, TcpNetEntry, TcpState, UdpNetEntry, UdpState};
 use procfs::process::FDTarget;
 use procfs::process::Stat;
@@ -157,32 +156,7 @@ impl super::types::OS for crate::Host {
     }
 
     fn ip() -> Box<str> {
-        let routes = match route() {
-            Ok(r) => r,
-            Err(_) => return "0.0.0.0".into(),
-        };
-
-        let intface = match routes
-            .iter()
-            .filter(|r| r.destination.is_unspecified())
-            .last()
-        {
-            Some(route) => route.iface.clone(),
-            None => return "0.0.0.0".into(),
-        };
-
-        let interfaces = datalink::interfaces();
-        let interface = interfaces
-            .into_iter()
-            .find(|iface| iface.name == intface.to_string());
-
-        match interface {
-            Some(iface) => match iface.ips.first() {
-                Some(ip) => ip.ip().to_string().into_boxed_str(),
-                None => "0.0.0.0".into(),
-            },
-            None => "0.0.0.0".into(),
-        }
+        local_ip::get_local_ip().into()
     }
 
     fn containers() -> Box<[super::types::Container]> {
