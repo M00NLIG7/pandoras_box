@@ -1,32 +1,14 @@
 use std::collections::HashMap;
 
-use super::types::*;
-use local_ip_address::local_ip;
-use netstat::*;
-use serde::Deserialize;
-use sysinfo::{ProcessExt, System, SystemExt, UserExt};
 use wmi::*;
+use serde::Deserialize;
+use local_ip_address::local_ip;
+use sysinfo::{ProcessExt, System, SystemExt, UserExt};
+use netstat::*;
+use super::types::*;
+
 
 // retrieve windows features
-
-// uint32 ID;
-// uint32 ParentID;
-// string Name;
-#[derive(Deserialize, Debug)]
-#[serde(rename = "Win32_ServerFeature")]
-#[serde(rename_all = "PascalCase")]
-pub struct ServerFeatures {
-    id: u32,
-    parent_id: u32,
-    name: String,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename = "Win32_OperatingSystem")]
-#[serde(rename_all = "PascalCase")]
-struct OperatingSystem {
-    caption: String,
-}
 
 impl From<TcpState> for ConnectionState {
     fn from(tcp_state: TcpState) -> Self {
@@ -45,28 +27,6 @@ impl From<TcpState> for ConnectionState {
             _ => ConnectionState::Unknown,
         }
     }
-}
-
-fn retrieve_server_features() -> Result<Vec<ServerFeatures>, wmi::WMIError> {
-    let wmi_con = WMIConnection::new(COMLibrary::new()?)?;
-
-    let results: Vec<OperatingSystem> = wmi_con.query()?;
-
-    let mut is_server = false;
-    results
-        .iter()
-        .filter(|os| os.caption.to_lowercase().contains("server"))
-        .for_each(|os| {
-            println!("Server: {}", os.caption);
-            is_server = true;
-        });
-
-    if is_server == true {
-        let server_features: Vec<ServerFeatures> = wmi_con.query()?;
-        return Ok(server_features);
-    }
-
-    Ok(vec![])
 }
 
 // Retrieve NetworkInfo
@@ -88,12 +48,11 @@ impl OS for Host {
         let sys = System::new_all();
         let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
         let proto_flags = ProtocolFlags::TCP | ProtocolFlags::UDP;
-        let iterator =
-            iterate_sockets_info(af_flags, proto_flags).expect("Failed to get socket information!");
-
+        let iterator = iterate_sockets_info(af_flags, proto_flags).expect("Failed to get socket information!");
+    
         let mut sockets: Vec<NetworkConnection> = Vec::new();
         let mut open_ports: Vec<OpenPort> = Vec::new();
-
+    
         for info in iterator {
             let si = match info {
                 Ok(si) => si,
@@ -102,7 +61,7 @@ impl OS for Host {
                     continue;
                 }
             };
-
+    
             // gather associated processes
             let process_ids = si.associated_pids;
             let mut processes: Vec<Process> = Vec::new();
@@ -117,16 +76,17 @@ impl OS for Host {
                     }
                 }
             }
-
+    
             match si.protocol_socket_info {
                 ProtocolSocketInfo::Tcp(tcp) => {
-                    sockets.push(NetworkConnection {
-                        local_address: tcp.local_addr.to_string().into_boxed_str(),
-                        remote_address: Some(tcp.remote_addr.to_string().into_boxed_str()),
-                        protocol: "TCP".to_string().into_boxed_str(),
-                        state: Some(tcp.state.into()),
-                        process: processes.first().cloned(),
+                sockets.push(NetworkConnection {
+                    local_address: tcp.local_addr.to_string().into_boxed_str(),
+                    remote_address: Some(tcp.remote_addr.to_string().into_boxed_str()),
+                    protocol: "TCP".to_string().into_boxed_str(),
+                    state: Some(tcp.state.into()),
+                    process: processes.first().cloned(),
                     });
+                    
 
                     let new_open_port = OpenPort {
                         port: tcp.remote_port,
@@ -135,14 +95,13 @@ impl OS for Host {
                         version: "".to_string().into_boxed_str(),
                         state: Some(tcp.state.into()),
                     };
-
+            
                     if !open_ports.iter().any(|existing_port| {
-                        existing_port.port == new_open_port.port
-                            && existing_port.protocol == new_open_port.protocol
+                        existing_port.port == new_open_port.port && existing_port.protocol == new_open_port.protocol
                     }) {
                         open_ports.push(new_open_port);
                     }
-                }
+                },
                 ProtocolSocketInfo::Udp(udp) => sockets.push(NetworkConnection {
                     local_address: udp.local_addr.to_string().into_boxed_str(),
                     remote_address: None,
@@ -152,7 +111,10 @@ impl OS for Host {
                 }),
             }
         }
-        (sockets.into_boxed_slice(), open_ports.into_boxed_slice())
+        (
+            sockets.into_boxed_slice(),
+            open_ports.into_boxed_slice(),
+        )
     }
 
     fn services() -> Box<[Service]> {
@@ -160,50 +122,43 @@ impl OS for Host {
             Ok(lib) => lib,
             _ => return Box::new([]), // or handle the error as appropriate
         };
-
+        
         let wmi_con = match WMIConnection::new(com_lib) {
             Ok(con) => con,
             _ => return Box::new([]), // or handle the error as appropriate
         };
-
-        let results: Vec<HashMap<String, Variant>> =
-            wmi_con.raw_query("SELECT * FROM Win32_Service").unwrap();
+        
+        let results: Vec<HashMap<String, Variant>> = wmi_con.raw_query("SELECT * FROM Win32_Service").unwrap();
         let mut services = Vec::new();
         for os in results {
-            let service = services.push(Service {
+            services.push(Service {
                 name: match os.get("Name").unwrap() {
                     Variant::String(s) => s.clone().into_boxed_str(),
-                    _ => panic!("Unexpected type for Name"),
+                    _ => "".to_string().into_boxed_str(),
                 },
                 status: match os.get("State").unwrap() {
                     Variant::String(s) => match s.as_str() {
-                        "Running" => ServiceStatus::Active,
-                        "Stopped" => ServiceStatus::Inactive,
-                        "Paused" => ServiceStatus::Inactive,
-                        "Start Pending" => ServiceStatus::Inactive,
-                        "Stop Pending" => ServiceStatus::Inactive,
-                        "Continue Pending" => ServiceStatus::Inactive,
-                        "Pause Pending" => ServiceStatus::Inactive,
-                        "Unknown" => ServiceStatus::Unknown,
-                        _ => ServiceStatus::Failed,
+                        "Running" => Some(ServiceStatus::Active),
+                        "Stopped" => Some(ServiceStatus::Inactive),
+                        "Paused" => Some(ServiceStatus::Inactive),
+                        "Start Pending" => Some(ServiceStatus::Inactive),
+                        "Stop Pending" => Some(ServiceStatus::Inactive),
+                        "Continue Pending" => Some(ServiceStatus::Inactive),
+                        "Pause Pending" => Some(ServiceStatus::Inactive),
+                        "Unknown" => Some(ServiceStatus::Unknown),
+                        _ => Some(ServiceStatus::Failed),
                     },
-                    _ => panic!("Unexpected type for State"),
-                },
-                description: match os.get("Description").unwrap() {
-                    Variant::String(s) => s.clone().into_boxed_str(),
-                    Variant::Null => "".to_string().into_boxed_str(),
-                    _ => panic!(
-                        "Unexpected type for Description: {:?}",
-                        os.get("Description").unwrap()
-                    ),
-                },
-                exec_path: match os.get("PathName") {
-                    Some(Variant::String(s)) => Some(s.clone()),
                     _ => None,
                 },
-                enabled: match os.get("StartMode").unwrap() {
-                    Variant::String(s) => s == "Auto",
+
+                start_mode: match os.get("StartMode").unwrap() {
+                    Variant::String(s) => if s == "Auto" { Some(ServiceStartType::Enabled) } else { Some(ServiceStartType::Disabled) } ,
                     _ => panic!("Unexpected type for StartMode"),
+                },
+
+                state: match os.get("Status").unwrap() {
+                    Variant::String(s) => if s == "OK" { s.to_string().into_boxed_str() } else { s.to_string().into_boxed_str() } ,
+                    _ => "".to_string().into_boxed_str(),
                 },
             });
         }
@@ -211,12 +166,85 @@ impl OS for Host {
     }
 
     fn shares() -> Box<[Share]> {
-        let myshare = Share {
-            share_type: ShareType::SMB,
-            network_path: "".to_string().into_boxed_str(),
+        let com_lib = match COMLibrary::new() {
+            Ok(lib) => lib,
+            _ => return Box::new([]), // or handle the error as appropriate
+        };
+        
+        let wmi_con = match WMIConnection::new(com_lib) {
+            Ok(con) => con,
+            _ => return Box::new([]), // or handle the error as appropriate
+        };
+        
+        let results: Vec<HashMap<String, Variant>> = wmi_con.raw_query("SELECT * FROM Win32_Share").unwrap();
+        let mut shares: Vec<Share> = Vec::new();
+        for os in results {
+            shares.push(Share {
+                share_type: ShareType::SMB,
+                network_path: match os.get("Path").unwrap() {
+                    Variant::String(s) => s.to_string().into_boxed_str(),
+                    _ => "".to_string().into_boxed_str(),
+                },
+            });
+        }
+        return shares.into_boxed_slice();
+    }
+
+}
+
+
+
+// uint32 ID;
+// uint32 ParentID;
+// string Name;
+#[derive(Deserialize, Debug)]
+#[serde(rename = "Win32_ServerFeature")]
+#[serde(rename_all = "PascalCase")]
+pub struct Win32ServerFeatures {
+    id: u32,
+    parent_id: u32,
+    name: String,
+
+}
+
+
+#[derive(Deserialize, Debug)]
+#[serde(rename = "Win32_OperatingSystem")]
+#[serde(rename_all = "PascalCase")]
+struct OperatingSystem {
+    caption: String,
+}
+
+impl ServerFeatures for Host {
+    fn server_features() -> Box<[String]> {
+        let com_lib = match COMLibrary::new() {
+            Ok(lib) => lib,
+            _ => return Box::new([]), // or handle the error as appropriate
+        };
+        
+        let wmi_con = match WMIConnection::new(com_lib) {
+            Ok(con) => con,
+            _ => return Box::new([]), // or handle the error as appropriate
         };
 
-        return Box::new([myshare]);
+        let results: Vec<OperatingSystem> = wmi_con.query().unwrap();
+    
+        let mut is_server = false;
+        results.iter().filter(|os| {
+            os.caption.to_lowercase().contains("server")
+        }).for_each(|os| {
+            println!("Server: {}", os.caption);
+            is_server = true;
+        });
+    
+        if is_server == true {
+            let server_features: Vec<Win32ServerFeatures> = wmi_con.query().unwrap();
+            return server_features.iter().map(|feature| {
+                feature.name.clone()
+            }).collect::<Vec<String>>().into_boxed_slice(); 
+        } else {
+            return Box::new([]);   
+        }
     }
 }
 
@@ -226,6 +254,7 @@ fn process_info(sys: &System) -> std::vec::Vec<Process> {
     let mut process_dump = vec![];
 
     for (pid, process_data) in processes {
+
         let value = Process {
             pid: pid.to_string().parse::<u32>().unwrap(),
             name: process_data.name().to_string().into_boxed_str(),
@@ -233,8 +262,32 @@ fn process_info(sys: &System) -> std::vec::Vec<Process> {
         process_dump.push(value);
     }
 
-    return process_dump;
+    return process_dump
 }
+
+fn get_rid_from_sid(sid: &str) -> Option<&str> {
+    sid.split('-').last()
+}
+
+fn get_domain_id_from_sid(sid: &str) -> Result<String, &'static str> {
+    let parts: Vec<&str> = sid.split('-').collect();
+
+    // Check if SID has the correct format
+    if parts.len() < 8 || parts[0] != "S" {
+        return Err("Invalid SID format");
+    }
+
+    // Extract the domain identifier parts
+    let sub_authority1 = parts[4];
+    let sub_authority2 = parts[5];
+    let sub_authority3 = parts[6];
+
+    // Combine the parts to form the domain identifier
+    let domain_identifier = format!("{}-{}-{}", sub_authority1, sub_authority2, sub_authority3);
+
+    Ok(domain_identifier)
+}
+
 
 impl UserInfo for sysinfo::User {
     fn is_admin(&self) -> bool {
@@ -243,10 +296,39 @@ impl UserInfo for sysinfo::User {
     }
 
     fn is_local(&self) -> bool {
-        let local_user_sid_pattern = regex::Regex::new(r"S-1-5-21-\d{2,}-1000-\d+").unwrap();
+        // Get seperate list of users and filter for local admin
+        let binding = sysinfo::System::new_all();
+        let all_users = binding.users();
+        
+        // Extract domain id from local admin
+        let domain_id = all_users.iter()
+            .filter_map(|user| {
+                let uid = &user.id().to_string();
+                match get_rid_from_sid(uid) {
+                    Some(rid) if rid == "500" => {
+                        match get_domain_id_from_sid(uid) {
+                            Ok(domain_id) => Some(domain_id),
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .next();
+        
+        // Compare local domain id to domain ids of current user
+        let is_user_local = {
+            if let Some(local_sid_value) = domain_id {
+                match get_domain_id_from_sid(&self.id().to_string()) {
+                    Ok(domain_id) => domain_id == local_sid_value,
+                    Err(_) => false,
+                }
+            } else {
+                false
+            }
+        };
 
-        // Check if user is local based on SID
-        // self.id().to_string() == "S-1-5-21-1004336348-1177238915-682003330-513"
-        local_user_sid_pattern.is_match(&self.id().to_string())
+        return is_user_local;
     }
 }
+
