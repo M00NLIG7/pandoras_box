@@ -2,19 +2,25 @@ pub mod types;
 
 use actix_web::dev::Server;
 use actix_web::dev::ServerHandle;
-use actix_web::{post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{post, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use types::ServerNode;
 
 #[post("/evil_fetch")]
 pub async fn evil_fetch(
+    req: HttpRequest, // Include the HttpRequest object in the parameters
     highest_node: web::Data<Arc<Mutex<ServerNode>>>,
     new_node: web::Json<ServerNode>,
 ) -> impl Responder {
+    let connection_info = req.connection_info();
+    let client_ip = connection_info.peer_addr().unwrap_or("0.0.0.0");
+
     if let Ok(mut highest_node) = highest_node.lock() {
         if new_node.evil_secret > highest_node.evil_secret {
             *highest_node = new_node.into_inner();
+            println!("Client IP: {}", client_ip);
+            println!("New highest node: {:?}", highest_node);
             HttpResponse::Ok().json(json!({"message": "New highest node!"}))
         } else {
             HttpResponse::Ok().json(json!({"message": "Not the highest node."}))
@@ -36,8 +42,8 @@ pub async fn start_server(server_node: Arc<Mutex<ServerNode>>) -> (Server, Serve
         // .route("/evil_fetch", web::post().to(evil_fetch))
     })
     // Bind the server to an address
-    .bind("0.0.0.0:8080")
-    .expect("Can not bind to port 8080")
+    .bind("0.0.0.0:6969")
+    .expect("Can not bind to port 6969")
     // Start the server
     .run();
 

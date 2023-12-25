@@ -14,7 +14,7 @@ base64 = "0.21.5"
 flate2 = "1.0.27"
 futures = "0.3.29"
 rand = "0.8.5"
-reqwest = {version="0.11.20", features = ["blocking"]}
+reqwest = {version="0.11.20",default-features = false, features = ["blocking", "rustls-tls"]}
 russh = "0.40.2"
 russh-keys = "0.40.1"
 russh-sftp = "2.0.0-beta.4"
@@ -24,6 +24,8 @@ surge-ping = "0.5.2"
 tar = "0.4.40"
 tempfile = "3.8.0"
 tokio = {version = "1.35.0", features = ["fs", "io-std"]}
+local-ip = { path = "../local-ip" }
+
 
 [build-dependencies]
 base64 = "0.21.5"
