@@ -150,7 +150,6 @@ pub struct Share {
 
 pub trait OS {
     fn conn_info() -> (Box<[NetworkConnection]>, Box<[OpenPort]>);
-    fn firewall_rules();
     fn ip() -> Box<str>;
     fn containers() -> Box<[Container]>;
     fn services() -> Box<[Service]>;
@@ -179,9 +178,9 @@ pub struct Host {
     pub(crate) services: Box<[Service]>,
     pub(crate) users: Box<[User]>,
     pub(crate) shares: Box<[Share]>,
+    pub(crate) containers: Box<[Container]>,
     #[cfg(target_os = "windows")]
-    pub(crate) server_features: Box<[String]>
-    //pub(crate) containers: Box<[Container]>,
+    pub(crate) server_features: Box<[String]>,
 }
 
 pub trait UserInfo {

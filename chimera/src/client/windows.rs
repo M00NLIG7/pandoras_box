@@ -6,6 +6,8 @@ use local_ip_address::local_ip;
 use sysinfo::{ProcessExt, System, SystemExt, UserExt};
 use netstat::*;
 use super::types::*;
+use serde_json::Map;
+use serde_json::Value;
 
 
 // retrieve windows features
@@ -29,6 +31,135 @@ impl From<TcpState> for ConnectionState {
     }
 }
 
+fn get_container_ids(command: &str) -> Vec<String> {
+    let output = super::utils::CommandExecutor::execute_command(command, Some(&["ps", "-q"]), None);
+    match output {
+        Ok(output) => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(String::from)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn get_generic_containers(command: &str) -> Vec<super::types::Container> {
+    let container_ids = get_container_ids(command);
+
+    container_ids
+        .iter()
+        .filter_map(|id| {
+            let inspect_str = match super::utils::CommandExecutor::execute_command(
+                command,
+                Some(&["inspect", id]),
+                None,
+            ) {
+                Ok(output) => String::from_utf8_lossy(&output.stdout).into(),
+                Err(_) => "".to_string(),
+            };
+            generic_container(&inspect_str).ok()
+        })
+        .collect()
+}
+
+fn generic_container(inspect_data: &str) -> Result<super::types::Container, serde_json::Error> {
+    let json: serde_json::Value = serde_json::from_str(inspect_data)?;
+
+    let container_info = &json[0];
+
+    Ok(super::types::Container {
+        name: container_info["Name"].as_str().unwrap_or_default().into(),
+        status: container_info["State"]["Status"]
+            .as_str()
+            .unwrap_or_default()
+            .into(),
+        id: container_info["Id"].as_str().unwrap_or_default().into(),
+        cmd: container_info["Config"]["Cmd"]
+            .as_array()
+            .unwrap_or(&vec!["".into()])[0]
+            .as_str()
+            .unwrap_or_default()
+            .into(),
+        port_bindings: port_from_inspect(&container_info["NetworkSettings"]["Ports"].as_object())
+            .into(),
+        volumes: volumes_from_inspect(&container_info["Mounts"].as_array()).into(),
+        networks: networks_from_inspect(&container_info["NetworkSettings"]["Networks"].as_object()),
+    })
+}
+
+fn volumes_from_inspect(mounts: &Option<&Vec<Value>>) -> Box<[super::types::ContainerVolume]> {
+    mounts.map_or(Box::new([]), |mounts| {
+        mounts
+            .iter()
+            .filter_map(|mount| {
+                Some(super::types::ContainerVolume {
+                    host_path: mount["Source"].as_str()?.into(),
+                    container_path: mount["Destination"].as_str()?.into(),
+                    mode: mount["Mode"].as_str()?.into(),
+                    name: mount["Name"].as_str()?.into(),
+                    rw: mount["RW"].as_bool()?,
+                    v_type: mount["Type"].as_str()?.into(),
+                })
+            })
+            .collect::<Box<_>>()
+        // .into_boxed_slice()
+    })
+}
+
+fn networks_from_inspect(
+    networks: &Option<&Map<String, Value>>,
+) -> Box<[super::types::ContainerNetwork]> {
+    // Parse the JSON and extract network information
+    networks.map_or(Box::new([]), |networks| {
+        networks
+            .iter()
+            .map(|(name, network_data)| super::types::ContainerNetwork {
+                name: name.clone().into_boxed_str(),
+                ip: network_data["IPAddress"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .into(),
+                gateway: network_data["Gateway"].as_str().unwrap_or_default().into(),
+                mac_address: network_data["MacAddress"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .into(),
+            })
+            .collect::<Box<_>>()
+    })
+}
+
+fn port_from_inspect(port_map: &Option<&Map<String, Value>>) -> Box<[Box<str>]> {
+    port_map.map_or(Box::new([] as [Box<str>; 0]), |ports_map| {
+        ports_map
+            .iter()
+            .flat_map(|(container_port, host_ports)| {
+                host_ports
+                    .as_array()
+                    .map_or(Vec::new(), |host_ports_array| {
+                        host_ports_array
+                            .iter()
+                            .filter_map(|host_port_details| {
+                                let host_ip =
+                                    host_port_details["HostIp"].as_str().unwrap_or("0.0.0.0");
+                                let host_port =
+                                    host_port_details["HostPort"].as_str().unwrap_or("");
+                                Some(
+                                    format!("{}:{}->{}", host_ip, host_port, container_port)
+                                        .into_boxed_str(),
+                                )
+                            })
+                            .collect::<Vec<Box<str>>>()
+                    })
+            })
+            .collect::<Box<[Box<str>]>>() // Directly collecting into a Boxed Slice
+    })
+}
+
+
+
+
+
+
 // Retrieve NetworkInfo
 impl OS for Host {
     fn ip() -> Box<str> {
@@ -37,11 +168,13 @@ impl OS for Host {
     }
 
     fn containers() -> Box<[Container]> {
-        todo!()
-    }
+        let mut containers = Vec::new();
 
-    fn firewall_rules() {
-        todo!("firewall_rules")
+        if which::which("docker").is_ok() {
+            containers.extend(get_generic_containers("docker"));
+        }
+
+        containers.into_boxed_slice()
     }
 
     fn conn_info() -> (Box<[NetworkConnection]>, Box<[OpenPort]>) {
