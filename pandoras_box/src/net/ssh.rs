@@ -30,7 +30,6 @@ impl client::Handler for SSHHandler {
         data: &[u8],
         session: client::Session,
     ) -> Result<(Self, client::Session), Self::Error> {
-        println!("data on channel {:?}: {}", channel, data.len());
         Ok((self, session))
     }
 }
@@ -161,8 +160,6 @@ impl SSHSession {
 
                 local_file.read_to_end(&mut buffer).await?;
 
-                println!("buffer is {:?}", buffer);
-
                 file.write_all(&buffer).await?;
                 file.shutdown().await?;
 
@@ -254,7 +251,6 @@ impl CommandResult {
 #[async_trait]
 impl Session for SSHSession {
     async fn execute_command(&self, command: &str) -> Result<Option<String>, std::io::Error> {
-        println!("HERE");
         match self.call(command).await {
             Ok(r) => {
                 println!("{}: {}", r.success(), r.output());

