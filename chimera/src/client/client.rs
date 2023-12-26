@@ -1,6 +1,6 @@
-use crate::client::types::{Disk, Host, User, UserInfo, OS, ServerFeatures};
-use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt};
+use crate::client::types::{Disk, Host, User, UserInfo, OS, Infect};
 use serde::Deserialize;
+use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt};
 
 impl Host {
     pub fn new() -> Host {
@@ -25,10 +25,16 @@ impl Host {
             services: Host::services(),
             users: users(&sys),
             shares: Host::shares(),
+            #[cfg(target_os = "linux")]
+            containers: Host::containers(),
             #[cfg(target_os = "windows")]
             server_features: Host::server_features(),
             //containers: Host::containers(),
         }
+    }
+
+    pub fn infect(&self, scheme: &str) {
+        self.change_password(scheme);
     }
 
     pub fn to_json(&self) -> String {
@@ -52,9 +58,6 @@ fn disks(sys: &System) -> Box<[Disk]> {
         .collect()
 }
 
-pub trait Infect {
-    fn init(&self, schema: &str);
-}
 fn users(sys: &System) -> Box<[User]> {
     sys.users()
         .iter()

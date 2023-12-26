@@ -8,7 +8,7 @@ use std::path::Path;
 
 fn main() -> io::Result<()> {
     // Specify the path to the file you want to encode
-    let source_file = Path::new("../target/x86_64-unknown-linux-musl/release/chimera");
+    let source_file = Path::new("../target/i686-unknown-linux-musl/release/chimera");
 
     // Ensure the source file exists
     if !source_file.exists() {
