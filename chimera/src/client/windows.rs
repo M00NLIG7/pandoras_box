@@ -334,8 +334,6 @@ impl OS for Host {
 #[serde(rename = "Win32_ServerFeature")]
 #[serde(rename_all = "PascalCase")]
 pub struct Win32ServerFeatures {
-    id: u32,
-    parent_id: u32,
     name: String,
 
 }
