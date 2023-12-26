@@ -4,10 +4,7 @@ mod api;
 mod net;
 
 use std::sync::{Arc, Mutex};
-
 // use enumeration::ping;
-use net::winexe::{self, WinexeClient};
-
 //use std::future::Future;
 use crate::net::communicator::{Credentials, Session};
 // use crate::net::spread::spreader::Spreader;
@@ -55,9 +52,11 @@ async fn main() {
 
     // println!("Enumeration and connection took {:?}", start_tio.elapsed());
 
-    x.spread().await;
+    x.command_spray("SSH", "ls -la").await;
+    // x.spread().await;
 
     srv_handle.stop(true).await;
+    x.close().await;
     println!("{:?}", golden_node);
     // srv_handle.stop(true).await;
     // Main loop
@@ -75,13 +74,8 @@ async fn main() {
     // wait for inventory from all nodes
     // done
     // Serial scripter manage api key lifetimes
-    // Complex password (typables)
+    // Complex password (typables) after we confirm acess and have ssh keys
     // Encrypt database
-
-    // net::spread::spreader::Spreader::new()
-    // let mut hosts = net::enumeration::ping::Enumerator::new("192.168.1".to_string());
-    // let results = hosts.ping_sweep().await;
-    // println!("Hosts: {:?}", hosts.hosts.len());
 
     // // Define the chunk size in bytes
     // const CHUNK_SIZE: usize = 125 * 1024; // 100 KB

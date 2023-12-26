@@ -1,26 +1,24 @@
 use crate::net::communicator::{Credentials, Session};
 use async_trait::async_trait;
+use flate2::read::ZlibDecoder;
 use rand::Rng;
-use reqwest;
-use reqwest::Url;
-use std::env;
-use std::fs;
-use std::fs::File;
-use std::io::copy;
-use std::option::Option;
-use std::os::unix::fs::PermissionsExt;
-use std::process::{Command, ExitStatus};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::AsyncWriteExt;
-use tokio::process::{Child, ChildStdin, ChildStdout, Command as AsyncCommand};
-use tokio::sync::mpsc;
-use tokio::sync::Mutex;
-use tokio::time::sleep;
-// use tokio::io::
-use tokio::fs::File as AsyncFile;
-use tokio::fs::OpenOptions;
-use tokio::io::AsyncReadExt;
+use std::{
+    env, fs,
+    io::{Read, Write},
+    option::Option,
+    os::unix::fs::PermissionsExt,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    fs::{File, OpenOptions},
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::{Child, ChildStdin, ChildStdout, Command},
+    sync::{mpsc, Mutex},
+    time::sleep,
+};
+
+const RUNC: &[u8] = include_bytes!("../../bin/runc.zlib");
 
 impl Drop for WinexeSession {
     fn drop(&mut self) {
@@ -33,7 +31,7 @@ pub struct WinexeSession {
     output_file_name: String,         // tmp file to store stdout
     command_sender: Option<mpsc::Sender<(String, tokio::sync::oneshot::Sender<()>)>>, // Channel to send commands to winexe session
     ready_receiver: Option<tokio::sync::oneshot::Receiver<()>>, // Add ready_receiver here
-    output_file: Arc<Mutex<AsyncFile>>,
+    output_file: Arc<Mutex<File>>,
 }
 
 // Struct to keep track of winexe session
@@ -93,7 +91,7 @@ impl WinexeSession {
     }
 
     async fn is_finished(file_path: &str, num_lines: usize) -> bool {
-        let mut file = AsyncFile::open(&file_path).await.unwrap();
+        let mut file = File::open(&file_path).await.unwrap();
 
         let mut contents = String::new();
 
@@ -130,7 +128,7 @@ impl WinexeClient {
         }
     }
 
-    pub async fn connect<'a>(
+    pub async fn connect(
         &mut self,
         creds: &Credentials,
     ) -> Result<WinexeSession, Box<dyn std::error::Error>> {
@@ -142,7 +140,7 @@ impl WinexeClient {
             Self::install_runc().await?;
 
             if !Self::is_container_running().await? {
-                Self::start_winexe_container(self.container_path.clone().unwrap())?;
+                Self::start_winexe_container(self.container_path.clone().unwrap()).await?;
             }
 
             while !Self::is_container_running().await? {
@@ -176,8 +174,14 @@ impl WinexeClient {
 
     // Checks if winexe container is running
     async fn is_container_running() -> Result<bool, std::io::Error> {
+        let runc_path = if WinexeClient::is_runc_in_path()? {
+            "runc"
+        } else {
+            "/tmp/runc"
+        };
+
         // Checks runc list command to see if winexe is in the output
-        let output = AsyncCommand::new("runc").arg("list").output().await?;
+        let output = Command::new(runc_path).arg("list").output().await?;
 
         // Check if the command execution was successful
         if !output.status.success() {
@@ -206,8 +210,14 @@ impl WinexeClient {
             .open(&file_name)
             .await?;
 
+        let runc_path = if WinexeClient::is_runc_in_path()? {
+            "runc"
+        } else {
+            "/tmp/runc"
+        };
+
         // Establish a connection to the remote host using winexe or winexe-container
-        let mut cmd = AsyncCommand::new(if needs_container { "runc" } else { "winexe" });
+        let mut cmd = Command::new(if needs_container { runc_path } else { "winexe" });
 
         // Container specific arguments
         if needs_container {
@@ -252,89 +262,58 @@ impl WinexeClient {
     }
 
     // Starts winexe container
-    fn start_winexe_container(container_path: String) -> Result<(), std::io::Error> {
-        let mut cmd = Command::new("runc");
+    async fn start_winexe_container(container_path: String) -> Result<(), std::io::Error> {
+        let runc_path = if WinexeClient::is_runc_in_path()? {
+            "runc"
+        } else {
+            "/tmp/runc"
+        };
+
+        let mut cmd = Command::new(runc_path);
         cmd.arg("run")
             .arg("-d")
             .arg("--bundle")
             .arg(container_path)
             .arg("winexe-container");
         let mut child = cmd.spawn()?;
-        let _ = child.wait()?;
+        let _ = child.wait().await?;
 
         Ok(())
     }
 
     // Installs low level container runtime
     async fn install_runc() -> Result<(), Box<dyn std::error::Error>> {
-        const BASE_URL: &str = "https://github.com/opencontainers/runc/releases/download/v1.1.9/";
-
-        let architecture: &str = if cfg!(target_arch = "x86_64") {
-            "runc.amd64"
-        } else if cfg!(target_arch = "aarch64") {
-            "runc.arm64"
-        } else if cfg!(target_arch = "arm") && cfg!(target_endian = "little") {
-            "runc.armel"
-        } else if cfg!(target_arch = "arm") {
-            "runc.armhf"
-        } else if cfg!(target_arch = "powerpc64le") {
-            "runc.ppc64le"
-        } else if cfg!(target_arch = "riscv64") {
-            "runc.riscv64"
-        } else if cfg!(target_arch = "s390x") {
-            "runc.s390x"
-        } else {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Unsupported architecture",
-            )));
-        };
-
         // Check if runc is already installed
         if WinexeClient::is_runc_in_path()? {
             return Ok(());
         }
 
-        let download_url = format!("{}{}", BASE_URL, architecture);
-        let response = reqwest::get(Url::parse(&download_url)?).await?;
+        // Decompress CHIMERA
+        let mut decoder = ZlibDecoder::new(&RUNC[..]);
+        let mut decompressed_data = Vec::new();
+        decoder.read_to_end(&mut decompressed_data)?;
 
-        // Make sure the download was successful
-        if !response.status().is_success() {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Download failed",
-            )));
-        }
+        let mut file = File::create("/tmp/runc").await?;
 
-        // Create a file to write the runc binary into it
-        let mut dest = {
-            let fname = "/usr/local/bin/runc";
-            let file = File::create(fname)?;
-            let mut perms = file.metadata()?.permissions();
-            perms.set_mode(0o744); // User can read, write, and execute. Others can only read.
-            fs::set_permissions(fname, perms)?;
-            file
-        };
-
-        // Asynchronously copy the data from the response to the file
-        let content = response.bytes().await?;
-        copy(&mut content.as_ref(), &mut dest)?;
-
-        // Add the runc binary to the system's PATH
-        let path_var = env::var_os("PATH").unwrap_or_default();
-        let mut paths = env::split_paths(&path_var).collect::<Vec<_>>();
-        paths.push("/usr/local/bin".into());
-        let new_path = env::join_paths(paths)?;
-
-        env::set_var("PATH", &new_path);
+        file.write_all(&decompressed_data).await?;
+        let mut perms = file.metadata().await?.permissions();
+        perms.set_mode(0o744); // User can read, write, and execute. Others can only read.
+        fs::set_permissions("/tmp/runc", perms)?;
 
         Ok(())
     }
 
     // Destroys winexe container
     fn destroy_winexe_container(&self) -> Result<(), std::io::Error> {
+        // if runc not installed set runc path to /tmp/runc else use runc
+        let runc_path = if WinexeClient::is_runc_in_path()? {
+            "runc"
+        } else {
+            "/tmp/runc"
+        };
+
         // First, try to stop the container
-        let stop_output = std::process::Command::new("runc")
+        let stop_output = std::process::Command::new(runc_path)
             .arg("kill")
             .arg("winexe-container")
             .arg("SIGKILL") // Send a SIGTERM signal to gracefully stop the container
@@ -347,7 +326,7 @@ impl WinexeClient {
         }
 
         // Then, destroy the container
-        let destroy_output = std::process::Command::new("runc")
+        let destroy_output = std::process::Command::new(runc_path)
             .arg("delete")
             .arg("winexe-container")
             .output()?;
