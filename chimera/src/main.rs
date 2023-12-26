@@ -1,10 +1,13 @@
 pub mod client;
-use crate::client::types::Host;
+use crate::client::types::{Host, OS};
+
 use clap::{arg, command, value_parser, Command};
 
 #[tokio::main]
 async fn main() {
     let matches = command!()
+        // .arg(arg!(-s --show "Returns ip of system").required(false))
+        .subcommand(Command::new("ip").about("Returns ip of system"))
         .arg(arg!(-i --inventory "Gets Host inventory").required(false))
         .subcommand(
             Command::new("infect")
@@ -51,6 +54,7 @@ async fn main() {
                 println!("Root operation without specific path");
             }
         }
+        Some(("ip", _)) => println!("{}", Host::ip()),
         _ => {}
     }
 }
