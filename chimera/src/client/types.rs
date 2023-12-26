@@ -179,7 +179,6 @@ pub struct Host {
     pub(crate) users: Box<[User]>,
     pub(crate) shares: Box<[Share]>,
     pub(crate) containers: Box<[Container]>,
-    pub(crate) containers: Box<[Container]>,
     #[cfg(target_os = "windows")]
     pub(crate) server_features: Box<[String]>,
 }
@@ -193,5 +192,5 @@ pub trait UserInfo {
 }
 
 pub trait Infect {
-    fn change_password(&self, schema: &str);
+    fn change_password(&self, magic: u8, schema: &str);
 }
