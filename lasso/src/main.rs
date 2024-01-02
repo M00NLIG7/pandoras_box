@@ -1,97 +1,147 @@
-use nix::mount::{mount, umount2, MsFlags};
-use nix::sched::{unshare, CloneFlags};
-use nix::sys::stat::Mode;
-use nix::unistd::{chdir, chroot, mkdir, pivot_root};
-use std::path::Path;
-use std::process::Command;
-use std::{io, io::Write};
+use shrs::prelude::{Env, ShellBuilder};
 
-fn main() -> nix::Result<()> {
-    // Creating a new UTS namespace
-    // unshare(CloneFlags::CLONE_NEWUTS)?;
-    unshare(
-        CloneFlags::CLONE_NEWUSER
-            | CloneFlags::CLONE_NEWPID
-            | CloneFlags::CLONE_NEWNS
-            | CloneFlags::CLONE_NEWNET
-            | CloneFlags::CLONE_NEWIPC
-            | CloneFlags::CLONE_NEWCGROUP
-            | CloneFlags::CLONE_FILES,
-    )?;
+use crossterm::{
+    event::{read, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use std::io::BufRead;
+use std::io::{self, BufReader, Read, Write};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 
-    // Set up overlay filesystem
-    let lower_dir = Path::new("/tmp/img/rootfs");
-    let overlay_path = Path::new("/tmp/overlay");
-    let upper_dir = Path::new("/tmp/overlay/upper");
-    let work_dir = Path::new("/tmp/overlay/work");
-    let overlay_mount = Path::new("/tmp/overlay/mount");
+fn main() {
+    let x = false;
 
-    mkdir(overlay_path, Mode::S_IRWXU)?;
-    mkdir(upper_dir, Mode::S_IRWXU)?;
-    mkdir(work_dir, Mode::S_IRWXU)?;
-    mkdir(overlay_mount, Mode::S_IRWXU)?;
-    println!("created mount dir");
+    // Create a channel for sending data to the runc process
+    let (tx, rx) = mpsc::channel::<String>();
 
-    println!("mounting overlay");
-    let options = &format!(
-        "lowerdir={},upperdir={},workdir={}",
-        lower_dir.display(),
-        upper_dir.display(),
-        work_dir.display()
-    );
+    // Spawn the runc process in a new thread
+    thread::spawn(move || {
+        let mut child = Command::new("runc")
+            .arg("run")
+            .arg("-b")
+            .arg("/usr/local/bin/jail")
+            .arg("jail")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to start runc");
 
-    print!("mounting overlay: {}", options);
-    mount(
-        Some("overlay"),
-        overlay_mount,
-        Some("overlay"),
-        MsFlags::empty(),
-        Some(options.as_str()),
-    )?;
+        let mut child_stdin = child.stdin.take().expect("Failed to open stdin");
+        let child_stdout = child.stdout.take().unwrap();
+        let child_stderr = child.stderr.take().unwrap();
 
-    println!("mounted");
+        // Handling stdout and stderr in separate threads
+        let stdout_handle = thread::spawn(move || {
+            let reader = BufReader::new(child_stdout);
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
+                        if line.trim().is_empty() || line.contains("#") {
+                            continue;
+                        }
+                        println!("{}", line);
+                    }
+                    Err(e) => {
+                        eprintln!("Error reading stdout: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
 
-    // chroot(overlay_mount)?;
-    // chdir("/")?;
+        let stderr_handle = thread::spawn(move || {
+            let reader = BufReader::new(child_stderr);
+            for line in reader.lines() {
+                eprintln!("{}", line.unwrap());
+            }
+        });
 
-    // for entry in read_dir("/").unwrap() {
-    //     let entry = entry.unwrap();
-    //     println!("entry: {:?}", entry);
-    // }
+        // Write data to the child's stdin as it arrives
+        for command in rx {
+            writeln!(child_stdin, "{}", command).expect("Failed to write to stdin");
+        }
 
-    // Now the process is in a new UTS namespace
-    // You can change the hostname in this namespace without affecting the global hostname
-    // println!("{:?}", split_paths(unparsed));
+        // Wait for the child process to exit
+        child.wait().expect("Failed to wait on child");
 
-    // loop {
-    //     // Print the prompt
-    //     print!("> ");
-    //     io::stdout().flush().unwrap();
+        // Ensure stdout and stderr handles are finished
+        stdout_handle.join().expect("Failed to join stdout handle");
+        stderr_handle.join().expect("Failed to join stderr handle");
+    });
 
-    //     // Read a line of input
-    //     let mut input = String::new();
-    //     io::stdin().read_line(&mut input).unwrap();
+    // Setup terminal in raw mode
+    enable_raw_mode().expect("Failed to enable raw mode");
+    execute!(io::stdout(), EnterAlternateScreen).expect("Failed to enter alternate screen");
 
-    //     // Remove the newline character
-    //     let input = input.trim();
+    let mut command = String::new();
 
-    //     // Exit the shell on 'exit' command
-    //     if input == "exit" {
-    //         break;
-    //     }
+    // Print the initial prompt
+    print_prompt();
 
-    //     // Execute the command
-    //     let output = Command::new("sh")
-    //         .arg("-c")
-    //         .arg(input)
-    //         .output()
-    //         .expect("Failed to execute command");
+    loop {
+        match read().expect("Failed to read event") {
+            Event::Key(key_event) => {
+                match key_event.code {
+                    KeyCode::Char(c) => {
+                        print!("{}", c);
+                        io::stdout().flush().unwrap();
+                        command.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        if !command.is_empty() {
+                            command.pop();
+                            // Move cursor back, replace with space and move back again
+                            print!("\x08 \x08");
+                            io::stdout().flush().unwrap();
+                        }
+                    }
+                    KeyCode::Enter => {
+                        println!();
+                        if !command.is_empty() {
+                            tx.send(command.clone()).expect("Failed to send command");
 
-    //     // Print the output
-    //     io::stdout().write_all(&output.stdout).unwrap();
-    //     io::stderr().write_all(&output.stderr).unwrap();
-    // }
+                            // Check if the command is 'exit'
+                            if command.trim() == "exit" {
+                                break; // Break out of the loop to end the program
+                            }
 
-    umount2(overlay_mount, nix::mount::MntFlags::MNT_DETACH)?;
-    Ok(())
+                            command.clear();
+                        }
+                        // Wait 100 ms
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+
+                        // Print the prompt immediately after handling the command
+                        print_prompt();
+                    }
+                    KeyCode::Esc => {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Cleanup
+    execute!(io::stdout(), LeaveAlternateScreen).expect("Failed to leave alternate screen");
+    disable_raw_mode().expect("Failed to disable raw mode");
+
+    let mut env = Env::new();
+    env.load();
+
+    let shell = ShellBuilder::default().with_env(env).build().unwrap();
+
+    shell.run();
+
+
+}
+
+fn print_prompt() {
+    print!("$ ");
+    io::stdout().flush().unwrap();
 }

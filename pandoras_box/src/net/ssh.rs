@@ -53,7 +53,7 @@ impl SSHSession {
         password: impl Into<String>,
     ) -> Result<client::Handle<SSHHandler>, russh::Error> {
         let config = client::Config {
-            inactivity_timeout: Some(Duration::from_secs(5)),
+            inactivity_timeout: None,
             ..<_>::default()
         };
 
@@ -84,6 +84,7 @@ impl SSHSession {
                 }
                 russh::ChannelMsg::ExitStatus { exit_status } => {
                     code = Some(exit_status);
+                    println!("Exit status: {:?}", exit_status);
                 }
                 _ => {}
             }
@@ -253,7 +254,14 @@ impl Session for SSHSession {
     async fn execute_command(&self, command: &str) -> Result<Option<String>, std::io::Error> {
         match self.call(command).await {
             Ok(r) => {
-                println!("{}: {}", r.success(), r.output());
+                println!(
+                    "Command execution of {} on {} successful: {}",
+                    command,
+                    self.ip,
+                    r.success()
+                );
+                println!("Command exit code: {:?}", r.code);
+                println!("Command output: {}", r.output());
                 Ok(Some(r.output()))
             }
             Err(e) => {
@@ -261,6 +269,10 @@ impl Session for SSHSession {
                 Err(std::io::Error::new(std::io::ErrorKind::Other, e))
             }
         }
+    }
+
+    fn get_ip(&self) -> &Box<str> {
+        &self.ip
     }
 
     // Close the session

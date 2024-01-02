@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ServiceStatus {
     Active,   // The service is currently running
     Inactive, // The service is not running
@@ -10,12 +11,14 @@ pub enum ServiceStatus {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ServiceStartType {
     Enabled,  // The service will start automatically
     Disabled, // The service will not start
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Service {
     pub(crate) name: Box<str>,                       // The name of the service
     pub(crate) state: Box<str>,                      // The current status of the service
@@ -24,6 +27,7 @@ pub struct Service {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Disk {
     pub(crate) name: Box<str>,
     pub(crate) mount_point: Box<str>,
@@ -33,26 +37,29 @@ pub struct Disk {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerVolume {
     pub(crate) host_path: Box<str>,
     pub(crate) container_path: Box<str>,
     pub(crate) mode: Box<str>,
-    pub(crate) name: Box<str>,
+    pub(crate) volume_name: Box<str>,
     pub(crate) rw: bool,
     pub(crate) v_type: Box<str>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerNetwork {
-    pub(crate) name: Box<str>,
+    pub(crate) network_name: Box<str>,
     pub(crate) ip: Box<str>,
     pub(crate) gateway: Box<str>,
     pub(crate) mac_address: Box<str>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Container {
-    pub(crate) id: Box<str>,
+    pub(crate) container_id: Box<str>,
     pub(crate) name: Box<str>,
     pub(crate) networks: Box<[ContainerNetwork]>,
     pub(crate) port_bindings: Box<[Box<str>]>,
@@ -62,6 +69,7 @@ pub struct Container {
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Clone)]
+#[serde(rename_all = "camelCase")]
 pub enum ConnectionState {
     Established,
     SynSent,
@@ -93,6 +101,7 @@ impl Default for ConnectionState {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Process {
     pub(crate) pid: u32,
     pub(crate) name: Box<str>,
@@ -108,6 +117,7 @@ impl Clone for Process {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NetworkConnection {
     pub(crate) local_address: Box<str>,
     pub(crate) remote_address: Option<Box<str>>,
@@ -117,6 +127,7 @@ pub struct NetworkConnection {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct User {
     pub(crate) name: Box<str>,
     pub(crate) uid: Box<str>,
@@ -128,6 +139,7 @@ pub struct User {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OpenPort {
     pub(crate) port: u16,
     pub(crate) protocol: Box<str>,
@@ -137,12 +149,14 @@ pub struct OpenPort {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ShareType {
     NFS,
     SMB,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Share {
     pub(crate) share_type: ShareType, // Type of the file share (NFS, SMB, etc.)
     pub(crate) network_path: Box<str>, // Network path or URL of the file share
@@ -162,10 +176,13 @@ pub trait ServerFeatures {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Host {
     pub(crate) hostname: Box<str>,
     pub(crate) ip: Box<str>,
+    pub(crate) version: Box<str>,
     // pub(crate) max_addr: Box<str>,
+    pub(crate) cores: u8,
     pub(crate) os: Box<str>,
     pub(crate) cpu: Box<str>,
     pub(crate) memory: u64,
