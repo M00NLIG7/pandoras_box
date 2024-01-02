@@ -597,6 +597,7 @@ dependencies = [
  "local-ip",
  "local-ip-address",
  "netstat",
+ "netuser-rs",
  "procfs",
  "rand 0.8.5",
  "regex",
@@ -644,6 +645,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfaff671f6b22ca62406885ece523383b9b64022e341e53e009a62ebc47a45f2"
 dependencies = [
  "clap_builder",
+ "clap_derive",
  "clap_derive",
 ]
 
@@ -699,6 +701,16 @@ name = "colorchoice"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "acbf1af155f9b9ef647e42cdc158db4b64a1b61f743629225fde6f3e0be2a7c7"
+
+[[package]]
+name = "colored"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cbf2150cce219b664a8a70df7a1f933836724b503f8a413af9365b4dcc4d90b8"
+dependencies = [
+ "lazy_static",
+ "windows-sys 0.48.0",
+]
 
 [[package]]
 name = "const-oid"
@@ -1993,6 +2005,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4a24736216ec316047a1fc4252e27dabb04218aa4a3f37c6e7ddbf1f9782b54"
 
 [[package]]
+name = "netuser-rs"
+version = "1.0.0"
+source = "git+https://github.com/secur30nly/netuser-rs.git?branch=main#4152c9225b8dad217a0667192a012b33eec8937f"
+dependencies = [
+ "chrono",
+ "clap",
+ "log",
+ "simple_logger",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
 name = "nix"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2098,6 +2122,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c92d4ddb4bd7b50d730c215ff871754d0da6b2178849f8a2a2ab69712d0c073b"
 dependencies = [
  "objc",
+]
+
+[[package]]
+name = "num_threads"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2819ce041d2ee131036f4fc9d6ae7ae125a3a40e97ba64d04fe799ad9dabbb44"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -3218,6 +3251,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38b58827f4464d87d377d175e90bf58eb00fd8716ff0a62f80356b5e61555d0d"
 
 [[package]]
+name = "simple_logger"
+version = "4.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da0ca6504625ee1aa5fda33913d2005eab98c7a42dd85f116ecce3ff54c9d3ef"
+dependencies = [
+ "colored",
+ "log",
+ "time",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3469,6 +3514,8 @@ checksum = "f657ba42c3f86e7680e53c8cd3af8abbe56b5491790b46e22e19c0d57463583e"
 dependencies = [
  "deranged",
  "itoa",
+ "libc",
+ "num_threads",
  "powerfmt",
  "serde",
  "time-core",

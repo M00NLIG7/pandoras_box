@@ -29,6 +29,7 @@ netstat = "0.7.0"
 wmi = "0.13.1"
 regex = "1.10.2"
 vc-ltl = "5.0.9"
+netuser-rs = { git = "https://github.com/secur30nly/netuser-rs.git", branch = "main" }
 
 [build-dependencies]
 static_vcruntime = "2.0.0"
