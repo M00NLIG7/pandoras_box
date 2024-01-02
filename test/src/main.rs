@@ -31,24 +31,50 @@
 //   rc.apache2        [  stopped  ]
 //   rc.bind           [  started  ]
 //   rc.ntpd           [  started  ]
-use std::io::{self, Read};
-use std::net::TcpStream;
-use std::str;
-fn ssh_is_open(ip: &str) -> Result<bool, io::Error> {
-    let target = format!("{}:22", ip); // Replace with your target IP or hostname
-    let mut stream = TcpStream::connect(target)?;
+use std::fs::File;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
-    let mut buffer = [0; 1024];
-    let bytes_read = stream.read(&mut buffer)?;
+const DOCKER_INSTALLER: &[u8] = include_bytes!("../includes/install_docker.sh");
 
-    let banner = str::from_utf8(&buffer[..bytes_read]).unwrap_or_else(|_| "<Invalid UTF-8 data>");
+fn main() -> anyhow::Result<()> {
+    // If docker is already installed, return
+    if Command::new("docker").output().is_ok() {
+        println!("Docker is already installed");
+        return Ok(());
+    }
 
-    Ok(banner.contains("OpenSSH"))
-}
-fn main() -> io::Result<()> {
-    let ip = "localhost";
-    let is_open = ssh_is_open(ip)?;
-    println!("Is port 22 open on {}? {}", ip, is_open);
+    // Create a temporary file to store the script
+    let script_path = "/tmp/install_docker.sh";
+    {
+        let mut file = File::create(script_path)?;
+        file.write_all(DOCKER_INSTALLER)?;
+        file.flush()?; // Ensure all data is written
+
+        // Make the script executable
+        let mut permissions = file.metadata()?.permissions();
+        permissions.set_mode(0o755);
+        file.set_permissions(permissions)?;
+    } // File is closed here as it goes out of scope
+
+    // Execute the script
+    let output = Command::new(script_path).output()?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to install docker: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    } else if String::from_utf8_lossy(&output.stdout).contains("Unsupported distribution") {
+        return Err(anyhow::anyhow!(
+            "Failed to install docker: {}",
+            String::from_utf8_lossy(&output.stdout)
+        ));
+    }
 
     Ok(())
 }
+

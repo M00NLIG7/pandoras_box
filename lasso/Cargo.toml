@@ -6,5 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-nix = { version = "0.27.1", features = ["sched","fs", "mount"] }
+crossterm = "0.27.0"
+flate2 = "1.0.28"
+shrs = "0.0.2"
+tar = "0.4.40"
+tokio = {version = "1.35.1", features = ["full"]}
 which = "5.0.0"

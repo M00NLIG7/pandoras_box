@@ -2,11 +2,10 @@ FROM alpine:edge
 
 WORKDIR /root
 
-RUN apk add gnutls
-RUN wget https://github.com/sogaani/winexe/releases/download/v1.0/winexe-static
-RUN chmod +x winexe-static
+# Combine package installation and cleanup
+RUN apk add --no-cache gnutls && \
+    wget https://github.com/sogaani/winexe/releases/download/v1.0/winexe-static -O winexe-static && \
+    chmod +x winexe-static && \
+    rm -rf /var/cache/apk/*
 
-COPY winexe-wrapper.sh /root
-RUN chmod +x /root/winexe-wrapper.sh
-
-ENTRYPOINT ["/root/winexe-wrapper.sh"]
+ENTRYPOINT ["./winexe-static"]

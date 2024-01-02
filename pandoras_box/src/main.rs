@@ -9,9 +9,7 @@ use std::sync::{Arc, Mutex};
 use crate::net::communicator::{Credentials, Session};
 // use crate::net::spread::spreader::Spreader;
 // use crate::net::spread::spreader::ConnectionPool;
-use flate2::read::GzDecoder;
-use futures::future::join_all;
-use futures::{Future, FutureExt};
+use tokio::sync::watch;
 
 use std::process::Command;
 
@@ -41,19 +39,39 @@ async fn main() {
     // Used to represent the golden child node to host Serial Scripter
     let golden_node = Arc::new(Mutex::new(api::types::ServerNode::default()));
 
+    let (api_key_sender, mut api_key_receiver) = watch::channel(String::new());
+    let shared_api_key = Arc::new(api_key_sender);
+
     // Fetch srv_handle and srv from api::run_server
-    let (srv, srv_handle) = api::start_server(golden_node.clone()).await;
+    let (srv, srv_handle) = api::start_server(shared_api_key.clone(), golden_node.clone()).await;
 
     // // Start API server in background
     tokio::spawn(srv);
 
+
     let start_tio = std::time::Instant::now();
-    let x = crate::net::spread::spreader::Spreader::new("192.168.220", "MacCheese4Me!").await;
+    let mut x = crate::net::spread::spreader::Spreader::new("192.168.220", "MacCheese4Me!").await;
 
-    // println!("Enumeration and connection took {:?}", start_tio.elapsed());
+    x.spread().await;
+    let golden_ip = golden_node.lock().unwrap().ip.to_string();
 
-    x.command_spray("SSH", "ls -la").await;
-    // x.spread().await;
+    let _ = x.root(&golden_ip).await;
+
+    // Wait for the API key to be updated
+    let mut api_key = String::new();
+    while api_key.is_empty() {
+        println!("Waiting for API Key...");
+        api_key_receiver.changed().await.unwrap();
+        api_key = api_key_receiver.borrow().clone();
+    }
+
+    let nix_cmd = format!("/tmp/chimera init -m {} -k {}", golden_ip, api_key);
+    let win_cmd = format!("C:\\temp\\chimera.exe init -i {} -k {}", golden_ip, api_key);
+
+    println!("Nix Command: {}", nix_cmd);
+
+    x.command_spray("SSH", &nix_cmd, vec![]).await;
+    x.command_spray("WINEXE", &win_cmd, vec![&golden_ip]).await;
 
     srv_handle.stop(true).await;
     x.close().await;
