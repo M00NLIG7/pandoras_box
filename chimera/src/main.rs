@@ -1,5 +1,6 @@
 pub mod client;
 use crate::client::types::{Host, OS};
+#[cfg(target_os = "linux")]
 use crate::client::utils::{install_docker, install_serial_scripter};
 
 use clap::{arg, command, value_parser, Command};
@@ -74,12 +75,21 @@ async fn main() {
             }
         }
         Some(("root", sub_matches)) => {
-            let lifetime = sub_matches.get_one::<u8>("lifetime").unwrap();
-            let mother_ip = sub_matches.get_one::<std::net::IpAddr>("mother").unwrap();
-            let port = sub_matches.get_one::<u16>("port").unwrap();
 
-            let host = Host::new();
-            host.root(&mother_ip.to_string(), *port, *lifetime);
+            #[cfg(target_os = "windows")]
+            {
+                println!("This action is not supported on Windows");
+            }
+        
+            #[cfg(target_os = "linux")]
+            {
+                let lifetime = sub_matches.get_one::<u8>("lifetime").unwrap();
+                let mother_ip = sub_matches.get_one::<std::net::IpAddr>("mother").unwrap();
+                let port = sub_matches.get_one::<u16>("port").unwrap();
+    
+                let host = Host::new();
+                host.root(&mother_ip.to_string(), *port, *lifetime);
+            }
         }
         Some(("ip", _)) => println!("{}", Host::ip()),
         Some(("init", sub_matches)) => {

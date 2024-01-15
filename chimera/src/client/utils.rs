@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::fs::Permissions;
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Output, Stdio};
 
@@ -54,6 +55,9 @@ impl CommandExecutor {
     }
 }
 
+
+
+#[cfg(target_os = "linux")]
 // Install docker
 pub fn install_docker() -> anyhow::Result<()> {
     // Check if Docker is already installed
@@ -86,6 +90,7 @@ pub fn install_docker() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 pub fn install_serial_scripter(api_key: &str, lifetime: u8) -> anyhow::Result<()> {
     // Write docker-compose to file at /tmp and execute it detatched
     let mut file = File::create("/tmp/docker-compose.yml")?;
