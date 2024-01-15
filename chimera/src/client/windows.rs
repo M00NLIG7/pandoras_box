@@ -72,7 +72,7 @@ fn generic_container(inspect_data: &str) -> Result<super::types::Container, serd
             .as_str()
             .unwrap_or_default()
             .into(),
-        id: container_info["Id"].as_str().unwrap_or_default().into(),
+        container_id: container_info["Id"].as_str().unwrap_or_default().into(),
         cmd: container_info["Config"]["Cmd"]
             .as_array()
             .unwrap_or(&vec!["".into()])[0]
@@ -86,6 +86,7 @@ fn generic_container(inspect_data: &str) -> Result<super::types::Container, serd
     })
 }
 
+
 fn volumes_from_inspect(mounts: &Option<&Vec<Value>>) -> Box<[super::types::ContainerVolume]> {
     mounts.map_or(Box::new([]), |mounts| {
         mounts
@@ -95,7 +96,7 @@ fn volumes_from_inspect(mounts: &Option<&Vec<Value>>) -> Box<[super::types::Cont
                     host_path: mount["Source"].as_str()?.into(),
                     container_path: mount["Destination"].as_str()?.into(),
                     mode: mount["Mode"].as_str()?.into(),
-                    name: mount["Name"].as_str()?.into(),
+                    volume_name: mount["Name"].as_str()?.into(),
                     rw: mount["RW"].as_bool()?,
                     v_type: mount["Type"].as_str()?.into(),
                 })
@@ -105,6 +106,7 @@ fn volumes_from_inspect(mounts: &Option<&Vec<Value>>) -> Box<[super::types::Cont
     })
 }
 
+
 fn networks_from_inspect(
     networks: &Option<&Map<String, Value>>,
 ) -> Box<[super::types::ContainerNetwork]> {
@@ -113,7 +115,7 @@ fn networks_from_inspect(
         networks
             .iter()
             .map(|(name, network_data)| super::types::ContainerNetwork {
-                name: name.clone().into_boxed_str(),
+                network_name: name.clone().into_boxed_str(),
                 ip: network_data["IPAddress"]
                     .as_str()
                     .unwrap_or_default()
