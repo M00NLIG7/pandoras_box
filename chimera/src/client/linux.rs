@@ -677,3 +677,4 @@ impl super::types::UserInfo for sysinfo::User {
         // self.shell().into()
     }
 }
+

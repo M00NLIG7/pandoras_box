@@ -2,11 +2,11 @@ use std::fs::File;
 use std::fs::Permissions;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 const DOCKER_INSTALLER: &[u8] = include_bytes!("../../includes/install_docker.sh");
 const DOCKER_COMPOSE: &[u8] = include_bytes!("../../includes/docker-compose.yml");
-
 
 pub(crate) struct CommandExecutor;
 
@@ -54,48 +54,22 @@ impl CommandExecutor {
     }
 }
 
-// Install docker
-pub fn install_docker() -> anyhow::Result<()> {
-    // Check if Docker is already installed
-    if Command::new("docker").output().is_ok() {
-        println!("Docker is already installed.");
-        return Ok(());
-    }
-
-    // Create a temporary file to store the script
-    let script_path = "/tmp/install_docker.sh";
-    {
-        let mut file = File::create(script_path)?;
-        file.write_all(DOCKER_INSTALLER)?;
-        file.flush()?;
-
-        // Make the script executable
-        let mut permissions = file.metadata()?.permissions();
-        permissions.set_mode(0o755);
-        file.set_permissions(permissions)?;
-    }
-
-    // Execute the script
-    let output = Command::new(script_path).output()?;
-
-    if !output.status.success() {
-        let error_message = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("Failed to install Docker: {}", error_message));
-    }
-
-    Ok(())
-}
-
 pub fn install_serial_scripter(api_key: &str, lifetime: u8) -> anyhow::Result<()> {
     // Write docker-compose to file at /tmp and execute it detatched
     let mut file = File::create("/tmp/docker-compose.yml")?;
     file.write_all(DOCKER_COMPOSE)?;
 
+    let docker_compose_prefix = if which::which("docker-compose").is_ok() {
+        "docker-compose"
+    } else {
+        "docker compose"
+    };
+
     let mut command = Command::new("sh");
 
     command
         .arg("-c")
-        .arg("docker compose -f /tmp/docker-compose.yml up -d");
+        .arg(format!("{} -f /tmp/docker-compose.yml up -d", docker_compose_prefix));
 
     // docker-compose up -d
     command.env("API_KEY", api_key);
@@ -119,3 +93,74 @@ pub fn install_serial_scripter(api_key: &str, lifetime: u8) -> anyhow::Result<()
     //
     Ok(())
 }
+
+pub fn is_docker_compatabile() -> bool {
+    if which::which("docker").is_ok() {
+        return true;
+    }
+    // delete the script if it exists
+    let script_path = Path::new("/tmp/install_docker.sh");
+    if script_path.exists() {
+        std::fs::remove_file(script_path).unwrap();
+    }
+
+
+    match write_docker_script() {
+        Ok(_) => {
+            let output = Command::new("/tmp/install_docker.sh").arg("--dryrun").output().unwrap();
+
+            if !output.status.success() {
+                return false;
+            }
+
+            let output_string = String::from_utf8_lossy(&output.stdout);
+
+            return !output_string.contains("end-of-life");
+        }
+        Err(e) => {
+            println!("Failed to install Docker: {}", e);
+            false
+        }
+    }
+}
+
+fn write_docker_script() -> anyhow::Result<()> {
+    let script_path = Path::new("/tmp/install_docker.sh");
+
+    if !script_path.exists() {
+        // Create a temporary file to store the script
+        let mut file = File::create(script_path)?;
+        file.write_all(DOCKER_INSTALLER)?;
+        file.flush()?;
+
+        // Make the script executable
+        let mut permissions = file.metadata()?.permissions();
+        permissions.set_mode(0o755);
+        file.set_permissions(permissions)?;
+    }
+    Ok(())
+}
+
+// Install docker
+pub fn install_docker() -> anyhow::Result<()> {
+    // Check if Docker is already installed
+    if which::which("docker").is_ok() {
+        return Ok(());
+    }
+
+    write_docker_script()?; 
+
+    // Execute the script
+    let output = Command::new("/tmp/install_docker.sh").output()?;
+
+    if !output.status.success() {
+        let error_message = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+                "Failed to install Docker: {}",
+                error_message
+                ));
+    }
+
+    Ok(())
+}
+

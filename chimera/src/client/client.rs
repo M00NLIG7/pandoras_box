@@ -195,22 +195,16 @@ fn users(sys: &System) -> Box<[User]> {
         .collect()
 }
 
-fn calculate_resource_weight(cpu_cores: u32, memory_mb: u64) -> u64 {
-    let cpu_cores_weight = 4;
-    let memory_weight = 2;
-
-    (cpu_cores as u64 * cpu_cores_weight as u64 * 1024) + (memory_mb as u64 * memory_weight)
-}
-
 pub async fn evil_fetch(
     ip: &std::net::IpAddr,
     port: &u16,
-) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
     // let cpu_cores: u32 = sys_info::cpu_num();
     let cpu_cores = match sys_info::cpu_num() {
         Ok(cpu_cores) => cpu_cores,
         _ => 1,
     };
+
 
     match sys_info::mem_info() {
         Ok(mem_info) => {
@@ -219,9 +213,17 @@ pub async fn evil_fetch(
 
             let url = format!("http://{}:{}/evil_fetch", ip, port);
 
+            #[cfg(target_os = "windows")]
+            let supports_docker = false;
+            
+            #[cfg(not(target_os = "windows"))]
+            let supports_docker = super::utils::is_docker_compatabile();
+
+
             let data = serde_json::json!({
                 "evil_secret": resources,
                 "ip": Host::ip(),
+                "supports_docker": supports_docker,
             });
 
             let client = reqwest::Client::builder()
@@ -238,3 +240,13 @@ pub async fn evil_fetch(
     }
     Ok(())
 }
+
+
+fn calculate_resource_weight(cpu_cores: u32, memory_mb: u64) -> u64 {
+    let cpu_cores_weight = 4;
+    let memory_weight = 2;
+
+    (cpu_cores as u64 * cpu_cores_weight as u64 * 1024) + (memory_mb as u64 * memory_weight)
+}
+
+
