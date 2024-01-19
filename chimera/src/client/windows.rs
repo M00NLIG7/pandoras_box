@@ -1,13 +1,36 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use super::types::*;
 use local_ip_address::local_ip;
 use netstat::*;
+use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::Map;
 use serde_json::Value;
-use sysinfo::{ProcessExt, System, SystemExt, UserExt};
-use wmi::*;
+
+static LOCAL_DOMAIN_ID: Lazy<String> = Lazy::new(|| {
+    // Get seperate list of users and filter for local admin
+    let binding = sysinfo::System::new_all();
+    let all_users = binding.users();
+
+    // Extract domain id from local admin
+    let domain_id = all_users
+        .iter()
+        .filter_map(|user| {
+            let uid = &user.id().to_string();
+            match get_rid_from_sid(uid) {
+                Some(rid) if rid == "500" => match get_domain_id_from_sid(uid) {
+                    Ok(domain_id) => Some(domain_id),
+                    Err(_) => None,
+                },
+                _ => None,
+            }
+        })
+        .next();
+
+    return domain_id.unwrap();
+});
 
 // retrieve windows features
 
@@ -71,7 +94,7 @@ fn generic_container(inspect_data: &str) -> Result<super::types::Container, serd
             .as_str()
             .unwrap_or_default()
             .into(),
-        id: container_info["Id"].as_str().unwrap_or_default().into(),
+        container_id: container_info["Id"].as_str().unwrap_or_default().into(),
         cmd: container_info["Config"]["Cmd"]
             .as_array()
             .unwrap_or(&vec!["".into()])[0]
@@ -94,7 +117,7 @@ fn volumes_from_inspect(mounts: &Option<&Vec<Value>>) -> Box<[super::types::Cont
                     host_path: mount["Source"].as_str()?.into(),
                     container_path: mount["Destination"].as_str()?.into(),
                     mode: mount["Mode"].as_str()?.into(),
-                    name: mount["Name"].as_str()?.into(),
+                    volume_name: mount["Name"].as_str()?.into(),
                     rw: mount["RW"].as_bool()?,
                     v_type: mount["Type"].as_str()?.into(),
                 })
@@ -112,7 +135,7 @@ fn networks_from_inspect(
         networks
             .iter()
             .map(|(name, network_data)| super::types::ContainerNetwork {
-                name: name.clone().into_boxed_str(),
+                network_name: name.clone().into_boxed_str(),
                 ip: network_data["IPAddress"]
                     .as_str()
                     .unwrap_or_default()
@@ -315,6 +338,7 @@ impl OS for Host {
                 },
             });
         }
+
         return services.into_boxed_slice();
     }
 
@@ -341,6 +365,7 @@ impl OS for Host {
                 },
             });
         }
+
         return shares.into_boxed_slice();
     }
 }
@@ -410,7 +435,6 @@ fn process_info(sys: &System) -> std::vec::Vec<Process> {
         };
         process_dump.push(value);
     }
-
     return process_dump;
 }
 
@@ -444,38 +468,11 @@ impl UserInfo for sysinfo::User {
     }
 
     fn is_local(&self) -> bool {
-        // Get seperate list of users and filter for local admin
-        let binding = sysinfo::System::new_all();
-        let all_users = binding.users();
-
-        // Extract domain id from local admin
-        let domain_id = all_users
-            .iter()
-            .filter_map(|user| {
-                let uid = &user.id().to_string();
-                match get_rid_from_sid(uid) {
-                    Some(rid) if rid == "500" => match get_domain_id_from_sid(uid) {
-                        Ok(domain_id) => Some(domain_id),
-                        Err(_) => None,
-                    },
-                    _ => None,
-                }
-            })
-            .next();
-
         // Compare local domain id to domain ids of current user
-        let is_user_local = {
-            if let Some(local_sid_value) = domain_id {
-                match get_domain_id_from_sid(&self.id().to_string()) {
-                    Ok(domain_id) => domain_id == local_sid_value,
-                    Err(_) => false,
-                }
-            } else {
-                false
-            }
+        return match get_domain_id_from_sid(&self.id().to_string()) {
+            Ok(local_sid_value) => *LOCAL_DOMAIN_ID == local_sid_value,
+            Err(_) => false,
         };
-
-        return is_user_local;
     }
 }
 

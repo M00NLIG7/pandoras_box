@@ -68,7 +68,7 @@ pub struct Container {
     pub(crate) cmd: Box<str>,
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Clone)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Clone, Hash)]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionState {
     Established,
@@ -100,7 +100,7 @@ impl Default for ConnectionState {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Process {
     pub(crate) pid: u32,
@@ -138,7 +138,7 @@ pub struct User {
     pub(crate) shell: Option<Box<str>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Eq, Hash, PartialEq, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenPort {
     pub(crate) port: u16,

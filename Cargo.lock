@@ -596,6 +596,7 @@ dependencies = [
  "local-ip-address",
  "netstat",
  "netuser-rs",
+ "once_cell",
  "procfs",
  "rand 0.8.5",
  "regex",

