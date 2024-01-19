@@ -144,31 +144,6 @@ impl SSHSession {
         Ok(())
     }
 
-    pub async fn transfer_file(&self, local_path: &str, remote_path: &str) -> anyhow::Result<()> {
-        let session = self.session.lock().await;
-        let channel = session.channel_open_session().await?;
-        channel.request_subsystem(true, "sftp").await?;
-        let sftp = SftpSession::new(channel.into_stream()).await;
-
-        match sftp {
-            Ok(sftp) => {
-                let mut file = sftp.create(remote_path).await?;
-
-                let mut local_file = tokio::fs::File::open(local_path).await?;
-
-                // Read the file into a buffer then write it to the remote file using write_all
-                let mut buffer = Vec::new();
-
-                local_file.read_to_end(&mut buffer).await?;
-
-                file.write_all(&buffer).await?;
-                file.shutdown().await?;
-
-                Ok(())
-            }
-            _ => return Err(anyhow!("Error creating SFTP session")),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -251,6 +226,32 @@ impl CommandResult {
 
 #[async_trait]
 impl Session for SSHSession {
+    async fn transfer_file(&self, local_path: &str, remote_path: &str) -> anyhow::Result<()> {
+        let session = self.session.lock().await;
+        let channel = session.channel_open_session().await?;
+        channel.request_subsystem(true, "sftp").await?;
+        let sftp = SftpSession::new(channel.into_stream()).await;
+
+        match sftp {
+            Ok(sftp) => {
+                let mut file = sftp.create(remote_path).await?;
+
+                let mut local_file = tokio::fs::File::open(local_path).await?;
+
+                // Read the file into a buffer then write it to the remote file using write_all
+                let mut buffer = Vec::new();
+
+                local_file.read_to_end(&mut buffer).await?;
+
+                file.write_all(&buffer).await?;
+                file.shutdown().await?;
+
+                Ok(())
+            }
+            _ => return Err(anyhow!("Error creating SFTP session")),
+        }
+    }
+
     async fn execute_command(&self, command: &str) -> Result<Option<String>, std::io::Error> {
         match self.call(command).await {
             Ok(r) => {

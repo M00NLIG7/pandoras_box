@@ -2,18 +2,23 @@
 mod api;
 // mod init;
 mod net;
+use clap::{arg, command, value_parser, Command};
 
+use std::collections::BinaryHeap;
 use std::sync::{Arc, Mutex};
+use std::io::Read;
 // use enumeration::ping;
 //use std::future::Future;
 use crate::net::communicator::{Credentials, Session};
 // use crate::net::spread::spreader::Spreader;
 // use crate::net::spread::spreader::ConnectionPool;
+use crate::net::winexe::*;
 use tokio::sync::watch;
-
+use flate2::read::ZlibDecoder;
 use std::process::Command;
 
 // const CHIMERA: &[u8] = include_bytes!("../bin/chimera64.zlib");
+const COMPRESSED_CHIMERA: &[u8] = include_bytes!("../bin/chimera_win.zlib");
 
 struct MemoryReport;
 
@@ -34,28 +39,77 @@ impl Drop for MemoryReport {
     }
 }
 
+fn decompress_data(compressed_data: &[u8]) -> Vec<u8> {
+    let mut decoder = ZlibDecoder::new(compressed_data);
+    let mut decompressed_data = Vec::new();
+    decoder.read_to_end(&mut decompressed_data).unwrap();
+    decompressed_data
+}
+
+
 #[tokio::main]
 async fn main() {
-    // Used to represent the golden child node to host Serial Scripter
-    let golden_node = Arc::new(Mutex::new(api::types::ServerNode::default()));
+
+    let matches = command!()
+        .arg(arg!(-r, --range <IP_RANGE>)
+            .about("IP Range to scan")
+            .required(true)
+            .value_parser(value_parser!(String)))
+        .arg(arg!(-p, --password <PASSWORD>)
+            .about("Default password")
+            .required(true)
+            .value_parser(value_parser!(String))).get_matches();
+
+    let range = matches.get_one::<String>("range").unwrap();
+    let password = matches.get_one::<String>("password").unwrap();
+
+
 
     let (api_key_sender, mut api_key_receiver) = watch::channel(String::new());
     let shared_api_key = Arc::new(api_key_sender);
 
-    // Fetch srv_handle and srv from api::run_server
-    let (srv, srv_handle) = api::start_server(shared_api_key.clone(), golden_node.clone()).await;
 
-    // // Start API server in background
+    // Self::start_winexe_container(self.container_path.clone().unwrap()).await?;
+
+
+    // Decompressed data is created at startup and should live throughout the application lifetime
+    let chimera_win = decompress_data(COMPRESSED_CHIMERA);
+    let chimera_win_arc = Arc::new(chimera_win);
+
+
+    // Initialize the binary heap
+    let server_heap = Arc::new(Mutex::new(BinaryHeap::new()));
+
+    // Fetch srv_handle and srv from api::start_server
+    let (srv, srv_handle) = api::start_server(shared_api_key.clone(), server_heap.clone(), chimera_win_arc).await;
+
     tokio::spawn(srv);
 
 
+    //WinexeClient::start_winexe_container("/tmp/".into()).await.unwrap();
+
     let start_tio = std::time::Instant::now();
-    let mut x = crate::net::spread::spreader::Spreader::new("192.168.220", "MacCheese4Me!").await;
+    let mut x = crate::net::spread::spreader::Spreader::new(range, password).await;
 
     x.spread().await;
-    let golden_ip = golden_node.lock().unwrap().ip.to_string();
 
-    let _ = x.root(&golden_ip).await;
+    let golden_node;
+
+    loop {
+        if server_heap.lock().unwrap().len() <= 0 {
+            panic!("No nodes suitable nodes found!");
+        } else if let Some(node) = server_heap.lock().unwrap().pop() {
+            println!("{:?}", node);
+            if node.supports_docker {
+                golden_node = node;
+                break;
+            }
+        }
+    }
+
+    let golden_ip = &golden_node.ip.to_string();
+
+    let _ = x.root(golden_ip).await;
 
     // Wait for the API key to be updated
     let mut api_key = String::new();
@@ -66,69 +120,23 @@ async fn main() {
     }
 
     let nix_cmd = format!("/tmp/chimera init -m {} -k {}", golden_ip, api_key);
-    let win_cmd = format!("C:\\temp\\chimera.exe init -i {} -k {}", golden_ip, api_key);
+    let win_cmd = format!("C:\\temp\\chimera.exe init -m {} -k {}", golden_ip, api_key);
 
     println!("Nix Command: {}", nix_cmd);
 
-    x.command_spray("SSH", &nix_cmd, vec![]).await;
-    x.command_spray("WINEXE", &win_cmd, vec![&golden_ip]).await;
+    let cmd_futures = vec![
+        x.command_spray("SSH", &nix_cmd, vec![]),
+        x.command_spray("WINEXE", &win_cmd, vec![&golden_ip]),
+    ];
+
+    futures::future::join_all(cmd_futures).await;
+    //x.command_spray("SSH", &nix_cmd, vec![]).await;
+    //x.command_spray("WINEXE", &win_cmd, vec![&golden_ip]).await;
+
 
     srv_handle.stop(true).await;
     x.close().await;
     println!("{:?}", golden_node);
-    // srv_handle.stop(true).await;
-    // Main loop
-    // let mut spreader = net::spread::spreader::Spreader::new("MacCheese4Me!");
-    // spreader.spread();
-
-    // Scan subnet
-    // batch connect to hosts
-    // transfer chimera binary
-    // run infect procedure of chimera
-    // wait for responses on golden node
-    // execute root procedure on golden node
-    // wait for api key from golden node
-    // distribute api key to all nodes and post inventory
-    // wait for inventory from all nodes
-    // done
-    // Serial scripter manage api key lifetimes
-    // Complex password (typables) after we confirm acess and have ssh keys
-    // Encrypt database
-
-    // // Define the chunk size in bytes
-    // const CHUNK_SIZE: usize = 125 * 1024; // 100 KB
-
-    // let mut start = 0;
-    // let total_length = base64_str.len();
-
-    // while start < total_length {
-    //     let end = std::cmp::min(start + CHUNK_SIZE, total_length);
-    //     let end = base64_str[..end]
-    //         .char_indices()
-    //         .last()
-    //         .map_or(end, |(idx, _)| idx + 1);
-
-    //     let chunk_str = &base64_str[start..end];
-    //     let command = format!("echo \"{}\" >> /tmp/chimera64", chunk_str);
-
-    //     // Assuming ssh_client is an async SSH client and properly initialized
-    //     ssh_client.execute_command(&command).await.unwrap();
-
-    //     // Print the progress
-    //     println!("Transferred {} / {} bytes", end, total_length);
-
-    //     start = end;
-    // }
-    // .for_each(|chunk| {
-    //     let chunk_str = chunk.iter().collect::<String>();
-
-    //     let command = format!("echo \"{}\" >> /tmp/chimera64", chunk_str);
-
-    //     ssh_client.execute_command(&command).await.unwrap();
-    // });
-
-    // let command = format!("base64 -d /tmp/chimera64 > /tmp/chimera");
-    // ssh_client.execute_command(&command).await.unwrap();
 
     let _memory_report = MemoryReport;
     println!("Total Elapsed Time {:?}", start_tio.elapsed());

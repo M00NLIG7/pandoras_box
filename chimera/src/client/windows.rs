@@ -1,14 +1,13 @@
 use std::collections::HashMap;
 
-use wmi::*;
-use serde::Deserialize;
-use local_ip_address::local_ip;
-use sysinfo::{ProcessExt, System, SystemExt, UserExt};
-use netstat::*;
 use super::types::*;
+use local_ip_address::local_ip;
+use netstat::*;
+use serde::Deserialize;
 use serde_json::Map;
 use serde_json::Value;
-
+use sysinfo::{ProcessExt, System, SystemExt, UserExt};
+use wmi::*;
 
 // retrieve windows features
 
@@ -155,11 +154,6 @@ fn port_from_inspect(port_map: &Option<&Map<String, Value>>) -> Box<[Box<str>]> 
     })
 }
 
-
-
-
-
-
 // Retrieve NetworkInfo
 impl OS for Host {
     fn ip() -> Box<str> {
@@ -181,11 +175,22 @@ impl OS for Host {
         let sys = System::new_all();
         let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
         let proto_flags = ProtocolFlags::TCP | ProtocolFlags::UDP;
-        let iterator = iterate_sockets_info(af_flags, proto_flags).expect("Failed to get socket information!");
-    
+        let iterator =
+            iterate_sockets_info(af_flags, proto_flags).expect("Failed to get socket information!");
+
         let mut sockets: Vec<NetworkConnection> = Vec::new();
-        let mut open_ports: Vec<OpenPort> = Vec::new();
-    
+        let mut open_ports_set: HashSet<OpenPort> = HashSet::new();
+
+        // Preprocess all_processes into a HashMap for O(1) access time
+        let all_processes = process_info(&sys)
+            .into_iter()
+            .map(|p| (p.pid, p))
+            .collect::<HashMap<_, _>>();
+
+        // Boxed strings for protocols to avoid repeated heap allocations
+        let tcp_protocol = "TCP".to_string().into_boxed_str();
+        let udp_protocol = "UDP".to_string().into_boxed_str();
+
         for info in iterator {
             let si = match info {
                 Ok(si) => si,
@@ -194,59 +199,61 @@ impl OS for Host {
                     continue;
                 }
             };
-    
-            // gather associated processes
-            let process_ids = si.associated_pids;
-            let mut processes: Vec<Process> = Vec::new();
-            let all_processes = process_info(&sys);
-            for pid in process_ids {
-                for process in &all_processes {
-                    if process.pid == pid {
-                        processes.push(Process {
-                            pid: process.pid,
-                            name: process.name.clone(),
-                        });
-                    }
-                }
-            }
-    
+
+            // Gather associated processes
+            let processes: Vec<Process> = si
+                .associated_pids
+                .into_iter()
+                .filter_map(|pid| all_processes.get(&pid))
+                .map(|process| Process {
+                    pid: process.pid,
+                    name: process.name.clone(),
+                })
+                .collect();
+
             match si.protocol_socket_info {
                 ProtocolSocketInfo::Tcp(tcp) => {
-                sockets.push(NetworkConnection {
-                    local_address: tcp.local_addr.to_string().into_boxed_str(),
-                    remote_address: Some(tcp.remote_addr.to_string().into_boxed_str()),
-                    protocol: "TCP".to_string().into_boxed_str(),
-                    state: Some(tcp.state.into()),
-                    process: processes.first().cloned(),
+                    let local_address = tcp.local_addr.to_string().into_boxed_str();
+                    let remote_address = tcp.remote_addr.to_string().into_boxed_str();
+                    let state = Some(tcp.state.into());
+                    let process = processes.first().cloned();
+
+                    sockets.push(NetworkConnection {
+                        local_address,
+                        remote_address: Some(remote_address.clone()),
+                        protocol: tcp_protocol.clone(),
+                        state: state.clone(),
+                        process: process.clone(),
                     });
-                    
 
                     let new_open_port = OpenPort {
-                        port: tcp.remote_port,
-                        protocol: "TCP".to_string().into_boxed_str(),
-                        process: processes.first().cloned(),
+                        port: tcp.local_port,
+                        protocol: tcp_protocol.clone(),
+                        process: process,
                         version: "".to_string().into_boxed_str(),
-                        state: Some(tcp.state.into()),
+                        state: state,
                     };
-            
-                    if !open_ports.iter().any(|existing_port| {
-                        existing_port.port == new_open_port.port && existing_port.protocol == new_open_port.protocol
-                    }) {
-                        open_ports.push(new_open_port);
-                    }
-                },
-                ProtocolSocketInfo::Udp(udp) => sockets.push(NetworkConnection {
-                    local_address: udp.local_addr.to_string().into_boxed_str(),
-                    remote_address: None,
-                    protocol: "UDP".to_string().into_boxed_str(),
-                    state: None,
-                    process: processes.first().cloned(),
-                }),
+
+                    // Use HashSet for efficient existence check
+                    open_ports_set.insert(new_open_port.clone());
+                }
+                ProtocolSocketInfo::Udp(udp) => {
+                    sockets.push(NetworkConnection {
+                        local_address: udp.local_addr.to_string().into_boxed_str(),
+                        remote_address: None,
+                        protocol: udp_protocol.clone(),
+                        state: None,
+                        process: processes.first().cloned(),
+                    });
+                }
             }
         }
         (
             sockets.into_boxed_slice(),
-            open_ports.into_boxed_slice(),
+            open_ports_set
+                .into_iter()
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
         )
     }
 
@@ -255,13 +262,14 @@ impl OS for Host {
             Ok(lib) => lib,
             _ => return Box::new([]), // or handle the error as appropriate
         };
-        
+
         let wmi_con = match WMIConnection::new(com_lib) {
             Ok(con) => con,
             _ => return Box::new([]), // or handle the error as appropriate
         };
-        
-        let results: Vec<HashMap<String, Variant>> = wmi_con.raw_query("SELECT * FROM Win32_Service").unwrap();
+
+        let results: Vec<HashMap<String, Variant>> =
+            wmi_con.raw_query("SELECT * FROM Win32_Service").unwrap();
         let mut services = Vec::new();
         for os in results {
             services.push(Service {
@@ -285,12 +293,24 @@ impl OS for Host {
                 },
 
                 start_mode: match os.get("StartMode").unwrap() {
-                    Variant::String(s) => if s == "Auto" { Some(ServiceStartType::Enabled) } else { Some(ServiceStartType::Disabled) } ,
+                    Variant::String(s) => {
+                        if s == "Auto" {
+                            Some(ServiceStartType::Enabled)
+                        } else {
+                            Some(ServiceStartType::Disabled)
+                        }
+                    }
                     _ => panic!("Unexpected type for StartMode"),
                 },
 
                 state: match os.get("Status").unwrap() {
-                    Variant::String(s) => if s == "OK" { s.to_string().into_boxed_str() } else { s.to_string().into_boxed_str() } ,
+                    Variant::String(s) => {
+                        if s == "OK" {
+                            s.to_string().into_boxed_str()
+                        } else {
+                            s.to_string().into_boxed_str()
+                        }
+                    }
                     _ => "".to_string().into_boxed_str(),
                 },
             });
@@ -303,13 +323,14 @@ impl OS for Host {
             Ok(lib) => lib,
             _ => return Box::new([]), // or handle the error as appropriate
         };
-        
+
         let wmi_con = match WMIConnection::new(com_lib) {
             Ok(con) => con,
             _ => return Box::new([]), // or handle the error as appropriate
         };
-        
-        let results: Vec<HashMap<String, Variant>> = wmi_con.raw_query("SELECT * FROM Win32_Share").unwrap();
+
+        let results: Vec<HashMap<String, Variant>> =
+            wmi_con.raw_query("SELECT * FROM Win32_Share").unwrap();
         let mut shares: Vec<Share> = Vec::new();
         for os in results {
             shares.push(Share {
@@ -322,10 +343,7 @@ impl OS for Host {
         }
         return shares.into_boxed_slice();
     }
-
 }
-
-
 
 // uint32 ID;
 // uint32 ParentID;
@@ -335,9 +353,7 @@ impl OS for Host {
 #[serde(rename_all = "PascalCase")]
 pub struct Win32ServerFeatures {
     name: String,
-
 }
-
 
 #[derive(Deserialize, Debug)]
 #[serde(rename = "Win32_OperatingSystem")]
@@ -352,29 +368,32 @@ impl ServerFeatures for Host {
             Ok(lib) => lib,
             _ => return Box::new([]), // or handle the error as appropriate
         };
-        
+
         let wmi_con = match WMIConnection::new(com_lib) {
             Ok(con) => con,
             _ => return Box::new([]), // or handle the error as appropriate
         };
 
         let results: Vec<OperatingSystem> = wmi_con.query().unwrap();
-    
+
         let mut is_server = false;
-        results.iter().filter(|os| {
-            os.caption.to_lowercase().contains("server")
-        }).for_each(|os| {
-            println!("Server: {}", os.caption);
-            is_server = true;
-        });
-    
+        results
+            .iter()
+            .filter(|os| os.caption.to_lowercase().contains("server"))
+            .for_each(|os| {
+                println!("Server: {}", os.caption);
+                is_server = true;
+            });
+
         if is_server == true {
             let server_features: Vec<Win32ServerFeatures> = wmi_con.query().unwrap();
-            return server_features.iter().map(|feature| {
-                feature.name.clone()
-            }).collect::<Vec<String>>().into_boxed_slice(); 
+            return server_features
+                .iter()
+                .map(|feature| feature.name.clone())
+                .collect::<Vec<String>>()
+                .into_boxed_slice();
         } else {
-            return Box::new([]);   
+            return Box::new([]);
         }
     }
 }
@@ -385,7 +404,6 @@ fn process_info(sys: &System) -> std::vec::Vec<Process> {
     let mut process_dump = vec![];
 
     for (pid, process_data) in processes {
-
         let value = Process {
             pid: pid.to_string().parse::<u32>().unwrap(),
             name: process_data.name().to_string().into_boxed_str(),
@@ -393,7 +411,7 @@ fn process_info(sys: &System) -> std::vec::Vec<Process> {
         process_dump.push(value);
     }
 
-    return process_dump
+    return process_dump;
 }
 
 fn get_rid_from_sid(sid: &str) -> Option<&str> {
@@ -419,7 +437,6 @@ fn get_domain_id_from_sid(sid: &str) -> Result<String, &'static str> {
     Ok(domain_identifier)
 }
 
-
 impl UserInfo for sysinfo::User {
     fn is_admin(&self) -> bool {
         // Check for sudoers group in groups or uid 0 (root)
@@ -430,23 +447,22 @@ impl UserInfo for sysinfo::User {
         // Get seperate list of users and filter for local admin
         let binding = sysinfo::System::new_all();
         let all_users = binding.users();
-        
+
         // Extract domain id from local admin
-        let domain_id = all_users.iter()
+        let domain_id = all_users
+            .iter()
             .filter_map(|user| {
                 let uid = &user.id().to_string();
                 match get_rid_from_sid(uid) {
-                    Some(rid) if rid == "500" => {
-                        match get_domain_id_from_sid(uid) {
-                            Ok(domain_id) => Some(domain_id),
-                            Err(_) => None,
-                        }
-                    }
+                    Some(rid) if rid == "500" => match get_domain_id_from_sid(uid) {
+                        Ok(domain_id) => Some(domain_id),
+                        Err(_) => None,
+                    },
                     _ => None,
                 }
             })
             .next();
-        
+
         // Compare local domain id to domain ids of current user
         let is_user_local = {
             if let Some(local_sid_value) = domain_id {
@@ -462,7 +478,6 @@ impl UserInfo for sysinfo::User {
         return is_user_local;
     }
 }
-
 
 impl Infect for Host {
     fn change_password(&self, magic: u8, schema: &str) {

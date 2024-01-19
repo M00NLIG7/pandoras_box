@@ -254,7 +254,6 @@ deprecation_notice() {
 	echo
 	printf   "Press \033[1mCtrl+C\033[0m now to abort this script, or wait for the installation to continue."
 	echo
-	sleep 10
 }
 
 get_distribution() {
@@ -378,7 +377,7 @@ do_install() {
 
 			You may press Ctrl+C now to abort this script.
 		EOF
-		( set -x; sleep 20 )
+		( set -x )
 	fi
 
 	user="$(id -un 2>/dev/null || true)"
@@ -415,7 +414,7 @@ do_install() {
 
 			You may press Ctrl+C now to abort this script.
 		EOF
-		( set -x; sleep 20 )
+		( set -x )
 	fi
 
 	case "$lsb_dist" in
@@ -666,7 +665,7 @@ do_install() {
 						Do you wish to continue?
 						You may press Ctrl+C now to abort this script.
 						EOF
-						( set -x; sleep 30 )
+						( set -x )
 				fi
 				opensuse_repo="https://download.opensuse.org/repositories/security:SELinux/$sles_version/security:SELinux.repo"
 				$sh_c "zypper addrepo $opensuse_repo"

