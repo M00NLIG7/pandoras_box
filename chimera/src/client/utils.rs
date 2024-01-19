@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::fs::Permissions;
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -54,6 +55,43 @@ impl CommandExecutor {
     }
 }
 
+#[cfg(target_os = "linux")]
+// Install docker
+pub fn install_docker() -> anyhow::Result<()> {
+    // Check if Docker is already installed
+    if Command::new("docker").output().is_ok() {
+        println!("Docker is already installed.");
+        return Ok(());
+    }
+
+    // Create a temporary file to store the script
+    let script_path = "/tmp/install_docker.sh";
+    {
+        let mut file = File::create(script_path)?;
+        file.write_all(DOCKER_INSTALLER)?;
+        file.flush()?;
+
+        // Make the script executable
+        let mut permissions = file.metadata()?.permissions();
+        permissions.set_mode(0o755);
+        file.set_permissions(permissions)?;
+    }
+
+    // Execute the script
+    let output = Command::new(script_path).output()?;
+
+    if !output.status.success() {
+        let error_message = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "Failed to install Docker: {}",
+            error_message
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 pub fn install_serial_scripter(api_key: &str, lifetime: u8) -> anyhow::Result<()> {
     // Write docker-compose to file at /tmp and execute it detatched
     let mut file = File::create("/tmp/docker-compose.yml")?;
@@ -67,9 +105,10 @@ pub fn install_serial_scripter(api_key: &str, lifetime: u8) -> anyhow::Result<()
 
     let mut command = Command::new("sh");
 
-    command
-        .arg("-c")
-        .arg(format!("{} -f /tmp/docker-compose.yml up -d", docker_compose_prefix));
+    command.arg("-c").arg(format!(
+        "{} -f /tmp/docker-compose.yml up -d",
+        docker_compose_prefix
+    ));
 
     // docker-compose up -d
     command.env("API_KEY", api_key);
@@ -104,10 +143,12 @@ pub fn is_docker_compatabile() -> bool {
         std::fs::remove_file(script_path).unwrap();
     }
 
-
     match write_docker_script() {
         Ok(_) => {
-            let output = Command::new("/tmp/install_docker.sh").arg("--dryrun").output().unwrap();
+            let output = Command::new("/tmp/install_docker.sh")
+                .arg("--dryrun")
+                .output()
+                .unwrap();
 
             if !output.status.success() {
                 return false;
@@ -148,7 +189,7 @@ pub fn install_docker() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    write_docker_script()?; 
+    write_docker_script()?;
 
     // Execute the script
     let output = Command::new("/tmp/install_docker.sh").output()?;
@@ -156,11 +197,10 @@ pub fn install_docker() -> anyhow::Result<()> {
     if !output.status.success() {
         let error_message = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow::anyhow!(
-                "Failed to install Docker: {}",
-                error_message
-                ));
+            "Failed to install Docker: {}",
+            error_message
+        ));
     }
 
     Ok(())
 }
-
