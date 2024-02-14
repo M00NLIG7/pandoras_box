@@ -133,6 +133,7 @@ pub fn install_serial_scripter(api_key: &str, lifetime: u8) -> anyhow::Result<()
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 pub fn is_docker_compatabile() -> bool {
     if which::which("docker").is_ok() {
         return true;
@@ -165,6 +166,7 @@ pub fn is_docker_compatabile() -> bool {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn write_docker_script() -> anyhow::Result<()> {
     let script_path = Path::new("/tmp/install_docker.sh");
 
@@ -182,6 +184,7 @@ fn write_docker_script() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 // Install docker
 pub fn install_docker() -> anyhow::Result<()> {
     // Check if Docker is already installed
