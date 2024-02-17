@@ -2,7 +2,7 @@
 mod api;
 // mod init;
 mod net;
-use clap::{arg, command, value_parser, Command};
+use clap::{arg as carg, command, value_parser};
 
 use std::collections::BinaryHeap;
 use std::sync::{Arc, Mutex};
@@ -51,12 +51,10 @@ fn decompress_data(compressed_data: &[u8]) -> Vec<u8> {
 async fn main() {
 
     let matches = command!()
-        .arg(arg!(-r, --range <IP_RANGE>)
-            .about("IP Range to scan")
+        .arg(carg!(-r --range <IP_RANGE>)
             .required(true)
             .value_parser(value_parser!(String)))
-        .arg(arg!(-p, --password <PASSWORD>)
-            .about("Default password")
+        .arg(carg!(-p --password <PASSWORD>)
             .required(true)
             .value_parser(value_parser!(String))).get_matches();
 
