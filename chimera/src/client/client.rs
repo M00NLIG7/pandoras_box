@@ -1,4 +1,8 @@
-use crate::client::types::{Disk, Host, Infect, User, UserInfo, OS, ServerFeatures};
+use crate::client::types::{Disk, Host, Infect, User, UserInfo, OS};
+
+#[cfg(target_os = "windows")]
+use crate::client::types::ServerFeatures;
+
 use anyhow::Result;
 use rand::{thread_rng, Rng};
 use reqwest::{

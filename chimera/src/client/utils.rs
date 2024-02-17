@@ -32,6 +32,7 @@ impl CommandExecutor {
         if let Some(inputs) = stdin_inputs {
             if let Some(mut stdin) = child.stdin.take() {
                 for input in inputs {
+                    println!("writing: {}", input);
                     stdin.write_all(input.as_bytes())?;
                     stdin.write_all(b"\n")?;
                 }
@@ -56,7 +57,6 @@ impl CommandExecutor {
 }
 
 #[cfg(target_os = "linux")]
-// Install docker
 pub fn install_docker() -> anyhow::Result<()> {
     // Check if Docker is already installed
     if Command::new("docker").output().is_ok() {
@@ -179,28 +179,5 @@ fn write_docker_script() -> anyhow::Result<()> {
         permissions.set_mode(0o755);
         file.set_permissions(permissions)?;
     }
-    Ok(())
-}
-
-// Install docker
-pub fn install_docker() -> anyhow::Result<()> {
-    // Check if Docker is already installed
-    if which::which("docker").is_ok() {
-        return Ok(());
-    }
-
-    write_docker_script()?;
-
-    // Execute the script
-    let output = Command::new("/tmp/install_docker.sh").output()?;
-
-    if !output.status.success() {
-        let error_message = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!(
-            "Failed to install Docker: {}",
-            error_message
-        ));
-    }
-
     Ok(())
 }
