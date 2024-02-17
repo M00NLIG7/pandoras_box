@@ -87,9 +87,9 @@ impl Host {
             .open(log_path)?;
 
         let inventory = self.to_json();
-        let url = format!("http://{}:3000/api/v1/inventory", ip);
+        let url = format!("http://{}:8967/api/v1/inventory", ip);
 
-        if Self::wait_for_server_ready(&format!("http://{}:3000", ip), Duration::from_secs(30)) {
+        if Self::wait_for_server_ready(&format!("http://{}:8967", ip), Duration::from_secs(30)) {
             let mut headers = HeaderMap::new();
             headers.insert("x-api-key", api_key.parse()?);
             headers.insert("content-type", "application/json".parse()?);

@@ -184,26 +184,3 @@ fn write_docker_script() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-// Install docker
-pub fn install_docker() -> anyhow::Result<()> {
-    // Check if Docker is already installed
-    if which::which("docker").is_ok() {
-        return Ok(());
-    }
-
-    write_docker_script()?;
-
-    // Execute the script
-    let output = Command::new("/tmp/install_docker.sh").output()?;
-
-    if !output.status.success() {
-        let error_message = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!(
-            "Failed to install Docker: {}",
-            error_message
-        ));
-    }
-
-    Ok(())
-}

