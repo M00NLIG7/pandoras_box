@@ -8,6 +8,8 @@ use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::Map;
 use serde_json::Value;
+use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt, ProcessExt};
+use wmi::{COMLibrary, Variant, WMIConnection};
 
 static LOCAL_DOMAIN_ID: Lazy<String> = Lazy::new(|| {
     // Get seperate list of users and filter for local admin
