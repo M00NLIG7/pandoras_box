@@ -1,10 +1,7 @@
 [workspace]
 members = [
     "pandoras_box",
-    "chimera",
-    "lasso",
-    "test",
-    "local-ip"
 ]
+
 resolver = "2"
 
