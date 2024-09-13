@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "pandoras_box",
+    "rustrc",
+    "rustrc/download_embed_macro"
 ]
 
 resolver = "2"
