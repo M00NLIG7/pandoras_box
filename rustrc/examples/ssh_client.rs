@@ -13,7 +13,7 @@ async fn main() -> rustrc::Result<()> {
 
     let mut client = Client::connect(ssh_config).await?;
 
-    let out = client.exec(cmd!("ls -la")).await?;
+    let out = client.exec(&cmd!("ls -la")).await?;
 
     println!("{:?}", out.stdout);
 

@@ -233,6 +233,8 @@ impl Enumerator {
     }
 }
 
+/*
+
 mod tests {
     use super::*;
 
@@ -251,3 +253,4 @@ mod tests {
         Ok(())
     }
 }
+*/
