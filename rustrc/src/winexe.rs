@@ -479,3 +479,29 @@ impl Session for WinexeContainer {
         })
     }
 }
+
+// End of the module
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::Client;
+    use crate::cmd;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_winexe_container() {
+        let socket = "139.182.180.178";
+        let config =
+            WinexeConfig::password("", socket, "", Duration::from_secs(10))
+                .await
+                .unwrap();
+
+        let client = Client::connect(config).await.unwrap();
+
+        let output = client.exec(&cmd!("echo", "TESTING")).await.unwrap();
+
+        let str_output = String::from_utf8_lossy(&output.stdout);
+
+        dbg!(str_output);
+    }
+}

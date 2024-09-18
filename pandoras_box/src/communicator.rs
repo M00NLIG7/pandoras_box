@@ -1,124 +1,170 @@
-use crate::enumerator::Host;
-use crate::error::Error;
-use crate::Result;
-use crate::OS;
-use std::sync::Arc;
+use futures::future::{join_all, BoxFuture};
 use rustrc::client::{Client, Command, CommandOutput, Config};
 use rustrc::ssh::SSHConfig;
 use rustrc::winexe::WinexeConfig;
+use std::pin::Pin;
+use std::time::Duration;
+use crate::Result;
 
-pub enum DynamicClient {
-    Windows(Client<WinexeConfig>),
-    Unix(Client<SSHConfig>),
-    Unknown(Client<SSHConfig>),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OS {
+    Windows,
+    Unix,
+    Unknown,
 }
 
-impl DynamicClient {
-    async fn new(host: Host) -> Result<Self> {
-        match host.os {
-            OS::Windows => {
-                // TODO: Implement Windows client creation
-                todo!("Implement Windows client creation")
-            }
-            OS::Unix => {
-                // TODO: Implement Unix client creation
-                todo!("Implement Unix client creation")
-            }
-            OS::Unknown => {
-                // TODO: Handle unknown OS type
-                todo!("Handle unknown OS type")
-            }
+pub enum OSConfig {
+    Windows(WinexeConfig),
+    Unix(SSHConfig),
+    Unknown(SSHConfig),
+}
+
+impl OSConfig {
+    pub fn os_type(&self) -> OS {
+        match self {
+            OSConfig::Windows(_) => OS::Windows,
+            OSConfig::Unix(_) => OS::Unix,
+            OSConfig::Unknown(_) => OS::Unknown,
         }
     }
 
-    async fn disconnect(&mut self) -> Result<()> {
+    pub async fn connect(self) -> Result<(OS, Box<dyn ClientWrapper>)> {
         match self {
-            DynamicClient::Windows(client) => client.disconnect().await,
-            DynamicClient::Unix(client) => client.disconnect().await,
-            DynamicClient::Unknown(client) => client.disconnect().await,
+            OSConfig::Windows(config) => {
+                let client = Client::connect(config).await?;
+                Ok((
+                    OS::Windows,
+                    Box::new(WindowsClientWrapper(client)) as Box<dyn ClientWrapper>,
+                ))
+            }
+            OSConfig::Unix(config) => {
+                let client = Client::connect(config).await?;
+                Ok((
+                    OS::Unix,
+                    Box::new(UnixClientWrapper(client)) as Box<dyn ClientWrapper>,
+                ))
+            }
+            OSConfig::Unknown(config) => {
+                let client = Client::connect(config).await?;
+                Ok((
+                    OS::Unknown,
+                    Box::new(UnknownClientWrapper(client)) as Box<dyn ClientWrapper>,
+                ))
+            }
         }
-        .map_err(Error::from)
-    }
-
-    async fn exec(&self, cmd: &Command) -> Result<CommandOutput> {
-        match self {
-            DynamicClient::Windows(client) => client.exec(cmd).await,
-            DynamicClient::Unix(client) => client.exec(cmd).await,
-            DynamicClient::Unknown(client) => client.exec(cmd).await,
-        }
-        .map_err(Error::from)
     }
 }
+
+pub trait ClientWrapper: Send + Sync {
+    fn exec<'a>(&'a self, cmd: &'a Command) -> BoxFuture<'a, Result<CommandOutput>>;
+    fn disconnect<'a>(&'a mut self) -> BoxFuture<'a, Result<()>>;
+}
+
+macro_rules! impl_client_wrapper {
+    ($name:ident, $config:ty) => {
+        struct $name(Client<$config>);
+
+        impl ClientWrapper for $name {
+            fn exec<'a>(&'a self, cmd: &'a Command) -> BoxFuture<'a, Result<CommandOutput>> {
+                Box::pin(async move { self.0.exec(cmd).await.map_err(Into::into) })
+            }
+
+            fn disconnect<'a>(&'a mut self) -> BoxFuture<'a, Result<()>> {
+                Box::pin(async move { self.0.disconnect().await.map_err(Into::into) })
+            }
+        }
+    };
+}
+
+impl_client_wrapper!(WindowsClientWrapper, WinexeConfig);
+impl_client_wrapper!(UnixClientWrapper, SSHConfig);
+impl_client_wrapper!(UnknownClientWrapper, SSHConfig);
 
 pub struct Communicator {
-    clients: Vec<DynamicClient>,
+    clients: Vec<(OS, Box<dyn ClientWrapper>)>,
 }
 
 impl Communicator {
-    pub async fn new(hosts: Vec<Host>) -> Result<Self> {
-        let mut clients = Vec::new();
-
-        for host in hosts {
-            let client = DynamicClient::new(host).await?;
-            clients.push(client);
-        }
-
+    pub async fn new(configs: Vec<OSConfig>) -> Result<Self> {
+        let clients = join_all(configs.into_iter().map(OSConfig::connect))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
         Ok(Communicator { clients })
     }
 
     pub async fn disconnect_all(&mut self) -> Result<()> {
-        for client in &mut self.clients {
-            client.disconnect().await?;
-        }
+        let futures: Vec<_> = self
+            .clients
+            .iter_mut()
+            .map(|(_, client)| client.disconnect())
+            .collect();
+        join_all(futures)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
         Ok(())
     }
 
-    pub async fn exec_by_os(&self, cmd: &Command, os: OS) -> Vec<Result<CommandOutput>> {
-        let results = self.clients.iter().filter(|client| match client {
-            DynamicClient::Windows(_) if os == OS::Windows => true,
-            DynamicClient::Unix(_) if os == OS::Unix => true,
-            _ => false,
-        }).map(|client| client.exec(cmd)).collect::<Vec<_>>();
-
-        futures::future::join_all(results).await
+    pub async fn exec_by_os(&self, cmd: &Command, os_type: OS) -> Vec<Result<CommandOutput>> {
+        let futures: Vec<_> = self
+            .clients
+            .iter()
+            .filter(|(client_os, _)| *client_os == os_type)
+            .map(|(_, client)| client.exec(cmd))
+            .collect();
+        join_all(futures).await
     }
 
     pub async fn exec_all(&self, cmd: &Command) -> Vec<Result<CommandOutput>> {
-        let mut results = Vec::new();
-        for client in &self.clients {
-            results.push(client.exec(cmd));
-        }
-
-        futures::future::join_all(results).await
+        let futures: Vec<_> = self
+            .clients
+            .iter()
+            .map(|(_, client)| client.exec(cmd))
+            .collect();
+        join_all(futures).await
     }
 }
 
-// TODO: Implement specific client types (e.g., WindowsClient, UnixClient)
-// TODO: Implement corresponding Config types for each client type
-
-/*
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::Client;
-    use crate::cmd;
-    use std::time::Duration;
+    use rustrc::cmd;
 
     #[tokio::test]
-    async fn test_winexe_container() {
-        let socket = "139.182.180.178";
-        let config =
-            WinexeConfig::password("sfs15-ultron", socket, "sfs15", Duration::from_secs(10))
+    async fn test_communicator() {
+        let configs = vec![
+            OSConfig::Unix(
+                SSHConfig::password(
+                    "m00nl1g7",
+                    "139.182.180.243:22",
+                    "",
+                    Duration::from_secs(30),
+                )
                 .await
-                .unwrap();
+                .unwrap(),
+            ),
+            OSConfig::Windows(
+                WinexeConfig::password(
+                    "",
+                    "139.182.180.178",
+                    "",
+                    Duration::from_secs(30),
+                )
+                .await
+                .unwrap(),
+            ),
+        ];
 
-        let client = Client::connect(config).await.unwrap();
+        let communicator = Communicator::new(configs).await.unwrap();
 
-        let output = client.exec(cmd!("echo", "TESTING")).await.unwrap();
+        let unix_cmd = cmd!("ls", "-l");
+        let unix_results = communicator.exec_by_os(&unix_cmd, OS::Unix).await;
 
-        let str_output = String::from_utf8_lossy(&output.stdout);
+        let win_cmd = cmd!("dir");
+        let win_results = communicator.exec_by_os(&win_cmd, OS::Windows).await;
 
-        dbg!(str_output);
+        let all_cmd = cmd!("echo", "Hello, World!");
+        let all_results = communicator.exec_all(&all_cmd).await;
     }
 }
-*/
