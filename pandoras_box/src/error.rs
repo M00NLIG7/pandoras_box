@@ -16,6 +16,12 @@ pub enum Error {
 
     #[error("Failed to create client")]
     RemoteConnectionError(#[from] rustrc::Error),
+
+    #[error("Command error: {0}")]
+    CommandError(String),
+
+    #[error("Unknown OS")]
+    UnknownOS,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

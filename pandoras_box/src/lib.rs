@@ -1,17 +1,13 @@
 mod enumerator;
 mod error;
 mod orchestrator;
-mod propagator;
 mod config;
 mod communicator;
+mod logging;
 
+mod types;
+pub(crate) use types::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OS {
-    Unix,
-    Windows,
-    Unknown,
-}
 
 pub use error::Error;
 pub use error::Result;
