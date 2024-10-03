@@ -1,4 +1,6 @@
+use crate::Host;
 use crate::Result;
+use crate::OS;
 use futures::future::join_all;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::{Deref, DerefMut};
@@ -7,18 +9,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
-use crate::OS;
 
 const TIMEOUT_DURATION: Duration = Duration::from_secs(1);
 const TCP_PORTS: [u16; 2] = [139, 22];
-
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Host {
-    pub ip: String,
-    pub os: OS,
-    pub open_ports: Vec<u16>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ipv4AddrExt(Ipv4Addr);

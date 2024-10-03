@@ -1,13 +1,18 @@
+use crate::Result;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 /// Trait defining what a Session is.
 /// A session is a connection to the server.
 /// It can be used to execute commands and listen for lifecycle events.
 /// It can be killed by a Client
 pub trait Session {
-    fn disconnect(&mut self) -> impl std::future::Future<Output = crate::Result<()>> + Send;
+    fn disconnect(&mut self) -> impl std::future::Future<Output = Result<()>> + Send;
     fn exec(
         &self,
         cmd: &Command,
-    ) -> impl std::future::Future<Output = crate::Result<CommandOutput>> + Send;
+    ) -> impl std::future::Future<Output = Result<CommandOutput>> + Send;
+    fn transfer_file(&self, file: Arc<Vec<u8>>, destination: &str) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
 /// Trait defining the configuration for a client.
@@ -15,9 +20,8 @@ pub trait Config {
     #[allow(private_bounds)]
     type SessionType: Session;
 
-    fn create_session(
-        &self,
-    ) -> impl std::future::Future<Output = crate::Result<Self::SessionType>> + Send;
+    fn create_session(&self)
+        -> impl std::future::Future<Output = Result<Self::SessionType>> + Send;
 }
 
 /// Represents the output of a command execution.
@@ -139,22 +143,20 @@ pub struct Client<T: Config> {
 /// ```
 #[allow(unused)]
 impl<T: Config> Client<T> {
-    pub async fn connect(config: T) -> crate::Result<Self> {
+    pub async fn connect(config: T) -> Result<Self> {
         let session = config.create_session().await?;
         Ok(Client { session })
     }
 
-    pub async fn disconnect(&mut self) -> crate::Result<()> {
+    pub async fn disconnect(&mut self) -> Result<()> {
         self.session.disconnect().await
     }
 
-    pub async fn exec(&self, cmd: &Command) -> crate::Result<CommandOutput> {
+    pub async fn exec(&self, cmd: &Command) -> Result<CommandOutput> {
         self.session.exec(cmd).await
     }
+
+    pub async fn transfer_file(&self, file_data: Arc<Vec<u8>>, remote_dest: &str) -> Result<()> {
+        self.session.transfer_file(file_data, remote_dest).await
+    }
 }
-
-
-
-
-
-                

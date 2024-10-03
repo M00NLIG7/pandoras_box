@@ -3,11 +3,7 @@ use crate::client::{Command, CommandOutput, Config, Session};
 use async_trait::async_trait;
 use russh::client;
 use russh_keys::{key::PublicKey, load_secret_key};
-use std::{
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::{
     io::AsyncWriteExt,
     net::{lookup_host, ToSocketAddrs},
@@ -26,6 +22,7 @@ pub struct SSHSession {
 ///
 /// SSHConfig::Key is used to authenticate with a private key
 /// SSHConfig::Password is used to authenticate with a password
+#[derive(Debug, Clone)]
 pub enum SSHConfig {
     Key {
         username: String,
@@ -61,8 +58,8 @@ impl SSHConfig {
 
     pub async fn password<U: Into<String>, S: ToSocketAddrs, P: Into<String>>(
         username: U,
-        socket: S,
         password: P,
+        socket: S,
         inactivity_timeout: Duration,
     ) -> crate::Result<Self> {
         Ok(SSHConfig::Password {
@@ -120,6 +117,14 @@ impl Session for SSHSession {
             stderr,
             status_code: code,
         })
+    }
+
+    fn transfer_file(
+        &self,
+        file_contents: Arc<Vec<u8>>,
+        remote_dest: &str,
+    ) -> impl std::future::Future<Output = crate::Result<()>> + Send {
+        async move { Ok(()) }
     }
 }
 

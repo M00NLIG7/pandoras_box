@@ -18,6 +18,8 @@ pub enum Error {
     SocketError(#[from] std::io::Error),
     #[error("JSON Error: {0}")]
     JsonError(#[from] serde_json::Error),
+    #[error("File Transfer Error: {0}")]
+    FileTransferError(String),
 }
 
 impl From<russh::Error> for Error {

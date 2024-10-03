@@ -10,6 +10,12 @@ impl TryIntoIpAddr for IpAddr {
     }
 }
 
+impl TryIntoIpAddr for &String {
+    fn try_into_ip_addr(&self) -> crate::Result<IpAddr> {
+        self.as_str().try_into_ip_addr()
+    }
+}
+
 impl TryIntoIpAddr for &str {
     fn try_into_ip_addr(&self) -> crate::Result<IpAddr> {
         self.parse()

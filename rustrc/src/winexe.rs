@@ -4,22 +4,34 @@
 //! through a containerized Winexe implementation. It handles SMB protocol negotiation,
 //! container management, and command execution over SMB.
 
-use crate::client::*;
 use crate::client::{Command, CommandOutput, Config, Session};
+use crate::cmd;
 use crate::smb::negotiate_session;
 use crate::stateful_process::{Message, StatefulProcess};
+use crate::Result;
 use download_embed_macro::download_and_embed;
 use flate2::read::GzDecoder;
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use serde_json::Value;
+use std::convert::Infallible;
 use std::io::Read;
-use std::net::IpAddr;
+use std::net::{SocketAddr, ToSocketAddrs, IpAddr};
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tar::Archive;
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command as TokioCommand};
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::time::Duration;
+use bytes::Bytes;
 
 /// Signature byte for SMB version 3 protocol
 const SMB_3_SIGNATURE: u8 = 0xFE;
@@ -89,10 +101,10 @@ impl WinexeConfig {
     /// Returns a Result containing the WinexeConfig if successful, or an error if the IP address is invalid
     pub async fn password<U: Into<String>, I: crate::TryIntoIpAddr, P: Into<String>>(
         username: U,
-        ip_input: I,
         password: P,
+        ip_input: I,
         inactivity_timeout: Duration,
-    ) -> crate::Result<Self> {
+    ) -> Result<Self> {
         let ip = ip_input
             .try_into_ip_addr()
             .map_err(|e| crate::Error::ConnectionError(format!("Invalid IP address: {}", e)))?;
@@ -127,7 +139,7 @@ impl WinexeConfig {
 impl Config for WinexeConfig {
     type SessionType = WinexeContainer;
 
-    async fn create_session(&self) -> crate::Result<Self::SessionType> {
+    async fn create_session(&self) -> Result<Self::SessionType> {
         WinexeContainer::new(self.clone()).await
     }
 }
@@ -150,7 +162,7 @@ impl WinexeContainer {
     /// # Returns
     ///
     /// Returns a Result containing the WinexeContainer if successful, or an error if setup fails
-    pub async fn new(config: WinexeConfig) -> crate::Result<Self> {
+    pub async fn new(config: WinexeConfig) -> Result<Self> {
         let runc_path = Self::ensure_runc_available().await?;
         Self::ensure_winexe_installed().await?;
 
@@ -182,7 +194,7 @@ impl WinexeContainer {
     /// # Returns
     ///
     /// Returns a Result containing the path to runc if successful, or an error if installation fails
-    async fn ensure_runc_available() -> crate::Result<String> {
+    async fn ensure_runc_available() -> Result<String> {
         if let Some(path) = Self::find_existing_runc().await {
             println!("Found existing runc at: {}", path);
             return Ok(path);
@@ -210,6 +222,10 @@ impl WinexeContainer {
         None
     }
 
+    fn ip(&self) -> &IpAddr {
+        self.config.ip()
+    }
+
     /// Checks if the runc at the given path is valid
     ///
     /// # Arguments
@@ -233,7 +249,7 @@ impl WinexeContainer {
     /// # Returns
     ///
     /// Returns Ok(()) if installation is successful, or an error if it fails
-    async fn ensure_winexe_installed() -> crate::Result<()> {
+    async fn ensure_winexe_installed() -> Result<()> {
         let winexe_path = Path::new(TMP_DIR).join("winexe");
         if !winexe_path.exists() {
             println!("Installing winexe to {}", TMP_DIR);
@@ -254,7 +270,7 @@ impl WinexeContainer {
     /// # Returns
     ///
     /// Returns a Result containing a boolean indicating whether the container is running
-    async fn is_container_running(&self) -> crate::Result<bool> {
+    async fn is_container_running(&self) -> Result<bool> {
         let output = TokioCommand::new(&self.runc_path)
             .arg("state")
             .arg("winexe-container")
@@ -280,7 +296,7 @@ impl WinexeContainer {
     /// # Returns
     ///
     /// Returns a Result containing the Child process of the started container
-    async fn start_container(&self) -> crate::Result<Child> {
+    async fn start_container(&self) -> Result<Child> {
         println!("Starting Container");
         Ok(TokioCommand::new(&self.runc_path)
             .arg("run")
@@ -296,7 +312,7 @@ impl WinexeContainer {
     /// # Returns
     ///
     /// Returns a Result containing a WinexeChannel if successful, or an error if opening fails
-    pub async fn open_channel(&self) -> crate::Result<WinexeChannel> {
+    pub async fn open_channel(&self) -> Result<WinexeChannel> {
         let ip = self.config.ip();
 
         println!("Getting SMB Version");
@@ -347,7 +363,7 @@ impl WinexeContainer {
     /// # Returns
     ///
     /// Returns a Result containing the detected SMBVersion, or an error if detection fails
-    async fn get_smb_version(server: &IpAddr) -> crate::Result<SMBVersion> {
+    async fn get_smb_version(server: &IpAddr) -> Result<SMBVersion> {
         for port in PORTS.iter() {
             match negotiate_session(server, *port, Duration::from_secs(2), true).await {
                 Ok(Some(dialect)) => {
@@ -401,7 +417,7 @@ impl WinexeChannel {
     /// # Returns
     ///
     /// Returns Ok(()) if the command is successfully sent, or an error if sending fails
-    pub async fn exec(&mut self, command: &Command) -> crate::Result<()> {
+    pub async fn exec(&mut self, command: &Command) -> Result<()> {
         let exit_bytes = b"&& exit\n";
         let mut command: Vec<u8> = command.into();
         command.extend_from_slice(exit_bytes);
@@ -413,7 +429,7 @@ impl WinexeChannel {
     /// # Returns
     ///
     /// Returns Ok(()) if the channel is successfully closed
-    pub async fn close(&mut self) -> crate::Result<()> {
+    pub async fn close(&mut self) -> Result<()> {
         Ok(())
     }
 }
@@ -429,7 +445,7 @@ impl Session for WinexeContainer {
     /// # Returns
     ///
     /// Returns Ok(()) if the disconnection is successful
-    async fn disconnect(&mut self) -> crate::Result<()> {
+    async fn disconnect(&mut self) -> Result<()> {
         // This method might not be directly applicable for WinexeContainer
         // You might want to close all open channels here
         Ok(())
@@ -444,7 +460,7 @@ impl Session for WinexeContainer {
     /// # Returns
     ///
     /// Returns a Result containing the CommandOutput if successful, or an error if execution fails
-    async fn exec(&self, command: &Command) -> crate::Result<CommandOutput> {
+    async fn exec(&self, command: &Command) -> Result<CommandOutput> {
         // Open a new channel for command execution
         let mut channel = self.open_channel().await?;
 
@@ -478,9 +494,93 @@ impl Session for WinexeContainer {
             status_code,
         })
     }
+
+    async fn transfer_file(&self, file_contents: Arc<Vec<u8>>, remote_destination: &str) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let server_handle = tokio::spawn(async move {
+            if let Err(e) = start_http_server(file_contents, tx).await {
+                eprintln!("Server error: {}", e);
+            }
+        });
+
+        // Wait for the server to start and get its address
+        let server_addr = rx.await.map_err(|_| {
+            crate::Error::FileTransferError("Failed to get server address".to_string())
+        })?;
+
+        // Use certutil to fetch the file
+        self.exec(&cmd!(
+            "certutil",
+            "-urlcache",
+            "-split",
+            "-f",
+            &server_addr,
+            remote_destination
+        ))
+        .await?;
+
+        // Signal the server to shut down (you might need to implement this)
+        // For now, we'll just abort the task
+        server_handle.abort();
+
+        println!("File transfer completed.");
+        Ok(())
+    }
+}
+async fn start_http_server(file_contents: Arc<Vec<u8>>, tx: oneshot::Sender<String>) -> Result<()> {
+    let addr: SocketAddr = ([0, 0, 0, 0], 0).into();
+    let listener = TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
+    let local_ip = crate::get_local_ip();
+    let server_url = format!("http://{}:{}", local_ip, local_addr.port());
+
+    tx.send(server_url)
+        .map_err(|_| crate::Error::FileTransferError("Failed to send server_url".to_string()))?;
+
+    println!("Listening on http://{}", local_addr);
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+
+        let file_contents = file_contents.clone();
+
+        tokio::task::spawn(async move {
+            if let Err(err) = http1::Builder::new()
+                .serve_connection(
+                    io,
+                    service_fn(move |req| handle_request(req, file_contents.clone())),
+                )
+                .await
+            {
+                eprintln!("Failed to serve connection: {:?}", err);
+            }
+        });
+    }
 }
 
-// End of the module
+async fn handle_request(
+    req: Request<hyper::body::Incoming>,
+    file_contents: Arc<Vec<u8>>,
+) -> Result<Response<BoxBody<Bytes, Infallible>>> {
+    match (req.method(), req.uri().path()) {
+        (&Method::GET, "/") => {
+            let body = Full::new(Bytes::from(file_contents.to_vec())).boxed();
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .body(body)
+                .unwrap())
+        }
+        _ => {
+            let body = Full::new(Bytes::from("Not Found")).boxed();
+            Ok(Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(body)
+                .unwrap())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,16 +592,21 @@ mod tests {
     async fn test_winexe_container() {
         let socket = "139.182.180.178";
         let config =
-            WinexeConfig::password("", socket, "", Duration::from_secs(10))
+            WinexeConfig::password("", socket, "", Duration::from_secs(120))
                 .await
                 .unwrap();
 
         let client = Client::connect(config).await.unwrap();
 
-        let output = client.exec(&cmd!("echo", "TESTING")).await.unwrap();
+        let ee = client
+            .exec(&cmd!("echo", "Hello, World", ">", "C:\\Temp\\rer"))
+            .await
+            .unwrap();
 
-        let str_output = String::from_utf8_lossy(&output.stdout);
+        let aaa = include_bytes!("/home/m00nl1g7/Downloads/SideloadlySetup64.exe");
 
-        dbg!(str_output);
+        let t = client
+            .transfer_file(aaa.to_vec(), "C:\\Temp\\test.txt")
+            .await;
     }
 }
