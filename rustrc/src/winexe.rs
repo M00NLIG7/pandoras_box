@@ -7,8 +7,11 @@
 use crate::client::{Command, CommandOutput, Config, Session};
 use crate::cmd;
 use crate::smb::negotiate_session;
+use crate::ssh::SSHConfig;
 use crate::stateful_process::{Message, StatefulProcess};
 use crate::Result;
+use byteorder::{BigEndian, WriteBytesExt};
+use bytes::Bytes;
 use download_embed_macro::download_and_embed;
 use flate2::read::GzDecoder;
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
@@ -19,7 +22,7 @@ use hyper_util::rt::TokioIo;
 use serde_json::Value;
 use std::convert::Infallible;
 use std::io::Read;
-use std::net::{SocketAddr, ToSocketAddrs, IpAddr};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,7 +34,6 @@ use tokio::process::{Child, Command as TokioCommand};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::Duration;
-use bytes::Bytes;
 
 /// Signature byte for SMB version 3 protocol
 const SMB_3_SIGNATURE: u8 = 0xFE;
@@ -63,6 +65,35 @@ const RUNC_COMMON_PATHS: &[&str] = &[
     "/usr/sbin/runc",
     "/usr/local/sbin/runc",
 ];
+
+impl std::fmt::Debug for WinexeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WinexeConfig::NoPassword {
+                username,
+                ip,
+                inactivity_timeout,
+            } => f
+                .debug_struct("WinexeConfig")
+                .field("username", username)
+                .field("ip", ip)
+                .field("inactivity_timeout", inactivity_timeout)
+                .finish(),
+            WinexeConfig::Password {
+                username,
+                ip,
+                password,
+                inactivity_timeout,
+            } => f
+                .debug_struct("WinexeConfig")
+                .field("username", username)
+                .field("ip", ip)
+                .field("password", password)
+                .field("inactivity_timeout", inactivity_timeout)
+                .finish(),
+        }
+    }
+}
 
 /// Enum representing different SMB protocol versions
 pub enum SMBVersion {
@@ -185,6 +216,8 @@ impl WinexeContainer {
 
             println!("Container Started");
         }
+
+        container.write_transfer_helper().await?;
 
         Ok(container)
     }
@@ -383,6 +416,40 @@ impl WinexeContainer {
         println!("SMB Version DEFAULTING");
         Ok(SMBVersion::V1)
     }
+
+    async fn write_transfer_helper(&self) -> Result<()> {
+        // Check if file exists
+        let check = self
+            .exec(&cmd!("if exist C:\\Temp\\transfer_file.bat echo TRUE"))
+            .await?;
+
+        let check_stdout = String::from_utf8_lossy(&check.stdout);
+
+        // Check if TRUE shows up twice in the output
+        if check_stdout.matches("TRUE").count() > 1 {
+            println!("Transfer Helper Already Exists");
+            return Ok(());
+        }
+
+        // Write the entire content in one echo command
+        let transfer_helper = include_str!("../resources/transfer_file.bat");
+        let base64_content = base64::encode(transfer_helper);
+
+        // First write the base64 string
+        let echo_command = format!("echo {}> C:\\Temp\\transfer_file.b64", base64_content);
+        self.exec(&cmd!(echo_command)).await?;
+
+        // Then decode it into the batch file using certutil
+        self.exec(&cmd!(
+            "certutil -decode C:\\Temp\\transfer_file.b64 C:\\Temp\\transfer_file.bat"
+        ))
+        .await?;
+
+        // Clean up the temporary b64 file
+        self.exec(&cmd!("del C:\\Temp\\transfer_file.b64")).await?;
+
+        Ok(())
+    }
 }
 
 /// Struct representing a channel to a Winexe container
@@ -418,7 +485,7 @@ impl WinexeChannel {
     ///
     /// Returns Ok(()) if the command is successfully sent, or an error if sending fails
     pub async fn exec(&mut self, command: &Command) -> Result<()> {
-        let exit_bytes = b"&& exit\n";
+        let exit_bytes = b" && exit\n";
         let mut command: Vec<u8> = command.into();
         command.extend_from_slice(exit_bytes);
         self.process.exec(command).await
@@ -495,38 +562,59 @@ impl Session for WinexeContainer {
         })
     }
 
-    async fn transfer_file(&self, file_contents: Arc<Vec<u8>>, remote_destination: &str) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        let server_handle = tokio::spawn(async move {
-            if let Err(e) = start_http_server(file_contents, tx).await {
-                eprintln!("Server error: {}", e);
-            }
-        });
+    async fn transfer_file(
+        &self,
+        file_contents: Arc<Vec<u8>>,
+        remote_destination: &str,
+    ) -> Result<()> {
+        let port_number = 49152 + rand::random::<u16>() % 16384;
 
-        // Wait for the server to start and get its address
-        let server_addr = rx.await.map_err(|_| {
-            crate::Error::FileTransferError("Failed to get server address".to_string())
+        let start_helper = format!(
+            "cmd.exe /c wmic process call create 'C:\\Temp\\transfer_file.bat {} 0.0.0.0 {}'",
+            port_number, remote_destination
+        );
+        let helper = self.exec(&cmd!(start_helper)).await?;
+        let helper_stdout = String::from_utf8_lossy(&helper.stdout);
+
+        let socket = format!("{}:{}", self.ip(), port_number);
+
+        // Try to connect with retries
+        let mut stream = None;
+        for attempt in 0..5 {
+            match TcpStream::connect(&socket).await {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) => {
+                    if attempt < 4 {
+                        // Don't sleep on last attempt
+                        println!(
+                            "Connection attempt {} failed: {}. Retrying...",
+                            attempt + 1,
+                            e
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
+
+        let mut stream = stream.ok_or_else(|| {
+            crate::Error::FileTransferError("Failed to connect after 5 attempts".to_string())
         })?;
 
-        // Use certutil to fetch the file
-        self.exec(&cmd!(
-            "certutil",
-            "-urlcache",
-            "-split",
-            "-f",
-            &server_addr,
-            remote_destination
-        ))
-        .await?;
+        let file_size = file_contents.len() as u64;
+        let mut size_buffer = vec![];
+        WriteBytesExt::write_u64::<BigEndian>(&mut size_buffer, file_size)?;
 
-        // Signal the server to shut down (you might need to implement this)
-        // For now, we'll just abort the task
-        server_handle.abort();
+        stream.write_all(&size_buffer).await?;
+        stream.write_all(&file_contents).await?;
 
-        println!("File transfer completed.");
         Ok(())
     }
 }
+
 async fn start_http_server(file_contents: Arc<Vec<u8>>, tx: oneshot::Sender<String>) -> Result<()> {
     let addr: SocketAddr = ([0, 0, 0, 0], 0).into();
     let listener = TcpListener::bind(addr).await?;
@@ -584,29 +672,29 @@ async fn handle_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::Client;
+    use crate::client::Config;
     use crate::cmd;
     use std::time::Duration;
 
     #[tokio::test]
     async fn test_winexe_container() {
-        let socket = "139.182.180.178";
-        let config =
-            WinexeConfig::password("", socket, "", Duration::from_secs(120))
-                .await
-                .unwrap();
+        let config = WinexeConfig::Password {
+            username: "Administrator".to_string(),
+            password: "Cheesed2MeetU!".to_string(),
+            ip: "10.100.136.241".parse().unwrap(),
+            inactivity_timeout: Duration::from_secs(10),
+        };
 
-        let client = Client::connect(config).await.unwrap();
+        let mut session = config.create_session().await.unwrap();
+        let file_bytes = b"Hello, World!".to_vec();
 
-        let ee = client
-            .exec(&cmd!("echo", "Hello, World", ">", "C:\\Temp\\rer"))
+        session
+            .transfer_file(Arc::new(file_bytes), "C:\\Temp\\chimera")
             .await
             .unwrap();
 
-        let aaa = include_bytes!("/home/m00nl1g7/Downloads/SideloadlySetup64.exe");
+        let output = session.exec(&cmd!("dir C:\\Temp")).await.unwrap();
 
-        let t = client
-            .transfer_file(aaa.to_vec(), "C:\\Temp\\test.txt")
-            .await;
+        println!("{}", String::from_utf8_lossy(&output.stdout));
     }
 }

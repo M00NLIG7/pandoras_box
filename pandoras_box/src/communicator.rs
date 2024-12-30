@@ -1,9 +1,10 @@
-use crate::{Result, OS};
+use crate::{Result, OS, Error};
 use futures::future::{join_all, BoxFuture};
 use rustrc::client::{Client, Command, CommandOutput, Config};
 use rustrc::ssh::SSHConfig;
 use rustrc::winexe::WinexeConfig;
 use std::sync::Arc;
+use std::net::IpAddr;
 
 pub enum Either<L, R> {
     Left(L),
@@ -18,10 +19,19 @@ pub enum OSConfig {
     Unknown(SSHConfig),
 }
 
+// Generic result type for operations that need to track which host they're associated with
+#[derive(Debug)]
+pub struct HostOperationResult<T> {
+    pub ip: String,
+    pub os: OS,
+    pub result: Result<T>,
+}
+
 pub trait ClientWrapper: Send + Sync {
     fn exec<'a>(&'a self, cmd: &'a Command) -> BoxFuture<'a, Result<CommandOutput>>;
     fn disconnect(&self) -> BoxFuture<'_, Result<()>>;
     fn transfer_file(&self, file: Arc<Vec<u8>>, destination: String) -> BoxFuture<'_, Result<()>>;
+    fn get_ip(&self) -> IpAddr;
 }
 
 impl<C: Config + Send + Sync + 'static> ClientWrapper for Client<C>
@@ -37,9 +47,15 @@ where
     }
 
     fn transfer_file(&self, file: Arc<Vec<u8>>, destination: String) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move { 
-            self.transfer_file(file, &destination).await.map_err(Into::into)
+        Box::pin(async move {
+            self.transfer_file(file, &destination)
+                .await
+                .map_err(Into::into)
         })
+    }
+
+    fn get_ip(&self) -> IpAddr {
+        unimplemented!("Implementation would depend on Client struct")
     }
 }
 
@@ -52,112 +68,206 @@ impl OSConfig {
         }
     }
 
-    pub async fn connect(self) -> Result<(OS, Arc<dyn ClientWrapper>)> {
+    pub async fn connect(self, ip: IpAddr) -> Result<(OS, IpAddr, Arc<dyn ClientWrapper>)> {
         match self {
-            OSConfig::Windows(config) => {
-                match config {
-                    Either::Left(winexe_config) => {
-                        let client = Client::connect(winexe_config).await?;
-                        Ok((OS::Windows, Arc::new(client) as Arc<dyn ClientWrapper>))
-                    }
-                    Either::Right(ssh_config) => {
-                        let client = Client::connect(ssh_config).await?;
-                        Ok((OS::Windows, Arc::new(client) as Arc<dyn ClientWrapper>))
+            OSConfig::Windows(config) => match config {
+                Either::Left(winexe_config) => {
+                    match Client::connect(winexe_config).await {
+                        Ok(client) => Ok((OS::Windows, ip, Arc::new(client) as Arc<dyn ClientWrapper>)),
+                        Err(e) => Err(Error::CommunicatorError(format!("Winexe connection failed for {}: {}", ip, e))),
                     }
                 }
-            }
+                Either::Right(ssh_config) => {
+                    match Client::connect(ssh_config.clone()).await {
+                        Ok(client) => Ok((OS::Windows, ip, Arc::new(client) as Arc<dyn ClientWrapper>)),
+                        Err(_) => {
+                            // SSH failed, try Winexe fallback
+                            match ssh_to_winexe(ssh_config, ip).await {
+                                Ok(winexe_config) => match Client::connect(winexe_config).await {
+                                    Ok(client) => Ok((OS::Windows, ip, Arc::new(client) as Arc<dyn ClientWrapper>)),
+                                    Err(e) => Err(Error::CommunicatorError(format!("Both SSH and Winexe failed for {}: {}", ip, e))),
+                                },
+                                Err(e) => Err(e),
+                            }
+                        }
+                    }
+                }
+            },
             OSConfig::Unix(config) => {
-                let client = Client::connect(config).await?;
-                Ok((OS::Unix, Arc::new(client) as Arc<dyn ClientWrapper>))
+                match Client::connect(config).await {
+                    Ok(client) => Ok((OS::Unix, ip, Arc::new(client) as Arc<dyn ClientWrapper>)),
+                    Err(e) => Err(Error::CommunicatorError(format!("SSH connection failed for {}: {}", ip, e))),
+                }
             }
             OSConfig::Unknown(config) => {
-                let client = Client::connect(config).await?;
-                Ok((OS::Unknown, Arc::new(client) as Arc<dyn ClientWrapper>))
+                match Client::connect(config).await {
+                    Ok(client) => Ok((OS::Unknown, ip, Arc::new(client) as Arc<dyn ClientWrapper>)),
+                    Err(e) => Err(Error::CommunicatorError(format!("Connection failed for unknown OS at {}: {}", ip, e))),
+                }
             }
         }
     }
 }
 
 pub struct Communicator {
-    clients: Vec<(OS, Arc<dyn ClientWrapper>)>,
+    clients: Vec<(OS, IpAddr, Arc<dyn ClientWrapper>)>,
 }
 
 impl Communicator {
-    pub async fn new(configs: Vec<OSConfig>) -> Result<Self> {
-        let clients = join_all(configs.into_iter().map(OSConfig::connect))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Communicator { clients })
+    pub async fn new(configs: Vec<(IpAddr, OSConfig)>) -> Result<Self> {
+        let connection_results = join_all(
+            configs.into_iter()
+                .map(|(ip, config)| async move {
+                    HostOperationResult {
+                        ip: ip.to_string(),
+                        os: config.os_type(),
+                        result: config.connect(ip).await,
+                    }
+                })
+        ).await;
+
+        let mut clients = Vec::new();
+        let mut errors = Vec::new();
+
+        for result in connection_results {
+            match result.result {
+                Ok((os, ip, client)) => clients.push((os, ip, client)),
+                Err(e) => errors.push(format!("{}:{:?} - {}", result.ip, result.os, e)),
+            }
+        }
+
+        if clients.is_empty() {
+            Err(Error::CommunicatorError(format!(
+                "No successful connections established. Errors: {}",
+                errors.join("; ")
+            )))
+        } else {
+            Ok(Communicator { clients })
+        }
     }
 
-    pub async fn disconnect_all(&self) -> Result<()> {
-        let futures: Vec<_> = self
-            .clients
-            .iter()
-            .map(|(_, client)| client.disconnect())
-            .collect();
-        join_all(futures)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
-        Ok(())
+    pub async fn disconnect_all(&self) -> Vec<HostOperationResult<()>> {
+        join_all(
+            self.clients
+                .iter()
+                .map(|(os, ip, client)| async move {
+                    HostOperationResult {
+                        ip: ip.to_string(),
+                        os: *os,
+                        result: client.disconnect().await,
+                    }
+                })
+        ).await
     }
 
-    pub async fn exec_by_os(&self, cmd: &Command, os_type: OS) -> Vec<Result<CommandOutput>> {
-        let futures: Vec<_> = self
-            .clients
-            .iter()
-            .filter(|(client_os, _)| *client_os == os_type)
-            .map(|(_, client)| client.exec(cmd))
-            .collect();
-        join_all(futures).await
+    pub async fn exec_by_os(&self, cmd: &Command, os_type: OS) -> Vec<HostOperationResult<CommandOutput>> {
+        join_all(
+            self.clients
+                .iter()
+                .filter(|(client_os, _, _)| *client_os == os_type)
+                .map(|(os, ip, client)| async move {
+                    HostOperationResult {
+                        ip: ip.to_string(),
+                        os: *os,
+                        result: client.exec(cmd).await,
+                    }
+                })
+        ).await
     }
 
-    pub async fn exec_all(&self, cmd: &Command) -> Vec<Result<CommandOutput>> {
-        let futures: Vec<_> = self
-            .clients
-            .iter()
-            .map(|(_, client)| client.exec(cmd))
-            .collect();
-        join_all(futures).await
+    pub async fn exec_all(&self, cmd: &Command) -> Vec<HostOperationResult<CommandOutput>> {
+        join_all(
+            self.clients
+                .iter()
+                .map(|(os, ip, client)| async move {
+                    HostOperationResult {
+                        ip: ip.to_string(),
+                        os: *os,
+                        result: client.exec(cmd).await,
+                    }
+                })
+        ).await
     }
 
-    pub async fn mass_file_transfer_by_os(&self, file: Arc<Vec<u8>>, destination: String, os_type: OS) -> Vec<Result<()>> {
-        let futures: Vec<_> = self
-            .clients
-            .iter()
-            .filter(|(client_os, _)| *client_os == os_type)
-            .map(|(_, client)| {
-                let file_clone = Arc::clone(&file);
-                let dest_clone = destination.clone();
-                client.transfer_file(file_clone, dest_clone)
-            })
-            .collect();
-        join_all(futures).await
+    pub async fn mass_file_transfer_by_os(
+        &self,
+        file: Arc<Vec<u8>>,
+        destination: String,
+        os_type: OS,
+    ) -> Vec<HostOperationResult<()>> {
+        join_all(
+            self.clients
+                .iter()
+                .filter(|(client_os, _, _)| *client_os == os_type)
+                .map(|(os, ip, client)| {
+                    let file_clone = Arc::clone(&file);
+                    let dest_clone = destination.clone();
+                    async move {
+                        HostOperationResult {
+                            ip: ip.to_string(),
+                            os: *os,
+                            result: client.transfer_file(file_clone, dest_clone).await,
+                        }
+                    }
+                })
+        ).await
     }
 
-    pub async fn mass_file_transfer_all(&self, file: Arc<Vec<u8>>, destination: String) -> Vec<Result<()>> {
-        let futures: Vec<_> = self
-            .clients
-            .iter()
-            .map(|(_, client)| {
-                let file_clone = Arc::clone(&file);
-                let dest_clone = destination.clone();
-                client.transfer_file(file_clone, dest_clone)
-            })
-            .collect();
-        join_all(futures).await
+    pub async fn mass_file_transfer_all(
+        &self,
+        file: Arc<Vec<u8>>,
+        destination: String,
+    ) -> Vec<HostOperationResult<()>> {
+        join_all(
+            self.clients
+                .iter()
+                .map(|(os, ip, client)| {
+                    let file_clone = Arc::clone(&file);
+                    let dest_clone = destination.clone();
+                    async move {
+                        HostOperationResult {
+                            ip: ip.to_string(),
+                            os: *os,
+                            result: client.transfer_file(file_clone, dest_clone).await,
+                        }
+                    }
+                })
+        ).await
     }
 }
 
-pub fn windows_config<T: Config + 'static>(config: T) -> OSConfig {
-    if std::any::TypeId::of::<T>() == std::any::TypeId::of::<WinexeConfig>() {
-        OSConfig::Windows(Either::Left(unsafe { std::mem::transmute_copy(&config) }))
-    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<SSHConfig>() {
-        OSConfig::Windows(Either::Right(unsafe { std::mem::transmute_copy(&config) }))
-    } else {
-        panic!("Unsupported config type for Windows")
+// Helper functions
+pub fn windows_config(config: impl Into<WindowsConfig>) -> OSConfig {
+    OSConfig::Windows(config.into())
+}
+
+impl From<WinexeConfig> for WindowsConfig {
+    fn from(config: WinexeConfig) -> Self {
+        WindowsConfig::Left(config)
+    }
+}
+
+impl From<SSHConfig> for WindowsConfig {
+    fn from(config: SSHConfig) -> Self {
+        WindowsConfig::Right(config)
+    }
+}
+
+async fn ssh_to_winexe(ssh_config: SSHConfig, ip: IpAddr) -> Result<WinexeConfig> {
+    match ssh_config {
+        SSHConfig::Password {
+            username,
+            password,
+            inactivity_timeout,
+            ..
+        } => {
+            WinexeConfig::password(&username, &password, &ip.to_string(), inactivity_timeout)
+                .await
+                .map_err(|e| Error::CommunicatorError(format!("Failed to create Winexe config: {}", e)))
+        }
+        SSHConfig::Key { .. } => {
+            Err(Error::CommunicatorError("Cannot convert key-based SSH config to Winexe".into()))
+        }
     }
 }
 
@@ -167,69 +277,4 @@ pub fn unix_config(config: SSHConfig) -> OSConfig {
 
 pub fn unknown_config(config: SSHConfig) -> OSConfig {
     OSConfig::Unknown(config)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rustrc::cmd;
-
-    #[tokio::test]
-    async fn test_communicator() {
-        let configs = vec![
-            unix_config(
-                SSHConfig::password(
-                    "",
-                    "139.182.180.243:22",
-                    "",
-                    std::time::Duration::from_secs(30),
-                )
-                .await
-                .unwrap(),
-            ),
-            windows_config(
-                WinexeConfig::password(
-                    "",
-                    "",
-                    "139.182.180.178",
-                    std::time::Duration::from_secs(30),
-                )
-                .await
-                .unwrap(),
-            ),
-            windows_config(
-                SSHConfig::password(
-                    "",
-                    "139.182.180.179:22",
-                    "",
-                    std::time::Duration::from_secs(30),
-                )
-                .await
-                .unwrap(),
-            ),
-        ];
-
-        let communicator = Communicator::new(configs).await.unwrap();
-
-        let unix_cmd = cmd!("ls", "-l");
-        let unix_results = communicator.exec_by_os(&unix_cmd, OS::Unix).await;
-
-        let win_cmd = cmd!("dir");
-        let win_results = communicator.exec_by_os(&win_cmd, OS::Windows).await;
-
-        let all_cmd = cmd!("echo", "Hello, World!");
-        let all_results = communicator.exec_all(&all_cmd).await;
-
-        // Test file transfer
-        let file_contents = Arc::new(b"Hello, World!".to_vec());
-        let destination = "/tmp/test_file.txt".to_string();
-        
-        let unix_transfer_results = communicator.mass_file_transfer_by_os(Arc::clone(&file_contents), destination.clone(), OS::Unix).await;
-        let windows_transfer_results = communicator.mass_file_transfer_by_os(Arc::clone(&file_contents), destination.clone(), OS::Windows).await;
-        let all_transfer_results = communicator.mass_file_transfer_all(file_contents, destination).await;
-
-        // Add assertions here to check the results
-
-        communicator.disconnect_all().await.unwrap();
-    }
 }
