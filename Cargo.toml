@@ -2,7 +2,8 @@
 members = [
     "pandoras_box",
     "rustrc",
-    "rustrc/download_embed_macro"
+    "rustrc/download_embed_macro",
+    "chimera",
 ]
 
 resolver = "2"

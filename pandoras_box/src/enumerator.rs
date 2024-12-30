@@ -54,6 +54,12 @@ impl From<Ipv4AddrExt> for IpAddr {
     }
 }
 
+impl std::fmt::Display for Ipv4AddrExt {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl FromStr for Ipv4AddrExt {
     type Err = std::net::AddrParseError;
 
@@ -71,6 +77,12 @@ impl From<String> for Subnet {
 impl From<&String> for Subnet {
     fn from(value: &String) -> Self {
         Subnet::try_from(value.as_str()).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Display for Subnet {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}/{}", self.ip, self.mask)
     }
 }
 
@@ -122,6 +134,7 @@ impl Enumerator {
             .subnet
             .iter_hosts()
             .map(|ip| tokio::spawn(async move { Self::tcp_check(ip).await }))
+
             .collect();
 
         let tcp_results: Vec<(Ipv4AddrExt, Vec<u16>)> = join_all(tcp_handles)
@@ -219,31 +232,9 @@ impl Enumerator {
 
     fn determine_os(ttl: u8) -> OS {
         match ttl {
-            60..=64 => OS::Unix,
-            120..=128 => OS::Windows,
+            55..=64 => OS::Unix,
+            110..=128 => OS::Windows,
             _ => OS::Unknown,
         }
     }
 }
-
-/*
-
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_scan() -> Result<()> {
-        let start_time = std::time::Instant::now();
-        let subnet = Subnet::try_from("139.182.180.0/24")?;
-        let enumerator = Enumerator::new(subnet);
-        let hosts = enumerator.sweep().await?;
-        println!("Found {} hosts", hosts.len());
-        for host in hosts {
-            println!("{:?}", host);
-        }
-
-        println!("Elapsed time: {:?}", start_time.elapsed());
-        Ok(())
-    }
-}
-*/
