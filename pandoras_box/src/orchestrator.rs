@@ -14,16 +14,15 @@ use futures::stream::StreamExt;
 
 use futures::future::join_all;
 use log::{error, info, warn};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
-use std::str::FromStr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::logging::{log_failure, log_output, log_results, log_skipped, log_success};
 
 // Constants for Chimera binaries (placeholder)
-static CHIMERA_UNIX: &[u8] = include_bytes!("/etc/passwd");
-static CHIMERA_WIN: &[u8] = include_bytes!("/etc/passwd");
+static CHIMERA_UNIX: &[u8] = include_bytes!("../resources/chimera");
+static CHIMERA_WIN: &[u8] = include_bytes!("../resources/chimera.exe");
 
 pub struct NetworkManager {
     enumerator: Enumerator,
@@ -312,33 +311,6 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn record_deployment_results<T>(
-        &self,
-        hosts: &[Arc<Host>],
-        results: Vec<Result<T>>,
-        operation: &str,
-    ) -> Vec<(Arc<Host>, Result<()>)> {
-        hosts
-            .iter()
-            .zip(results) // Here's where the mismatch can happen
-            .map(|(host, result)| match result {
-                Ok(_) => {
-                    log_success(
-                        &format!("Deployed Chimera - {}", operation),
-                        &host.ip.to_string(),
-                    );
-                    (Arc::clone(host), Ok(()))
-                }
-                Err(e) => {
-                    log_failure(operation, &host.ip.to_string(), &e);
-                    (
-                        Arc::clone(host),
-                        Err(Error::DeploymentError(format!("{} failed", operation))),
-                    )
-                }
-            })
-            .collect()
-    }
     async fn deploy_for_os(
         &self,
         communicator: &Communicator,
@@ -374,8 +346,10 @@ impl Orchestrator {
 
         // For Unix, we need to handle chmod on a per-host basis
         if matches!(os, OS::Unix) {
+            let chmod_cmd = format!("chmod +x {}", path);
+
             let chmod_results = communicator
-                .exec_by_os(&rustrc::cmd!("chmod", "+x", path), os)
+                .exec_by_os(&rustrc::cmd!(chmod_cmd), os)
                 .await;
 
             // Create a map of chmod results by IP
@@ -480,18 +454,6 @@ impl Orchestrator {
         all_results
     }
 
-    fn handle_unknown_hosts(&self, hosts: &[Arc<Host>]) -> Vec<(Arc<Host>, Result<()>)> {
-        hosts
-            .iter()
-            .filter(|h| matches!(h.os, OS::Unknown))
-            .map(|host| {
-                warn!("Skipping deployment to unknown OS host: {}", host.ip);
-                log_skipped("deploy", &host.ip.to_string(), "unknown OS");
-                (Arc::clone(host), Err(Error::UnknownOS))
-            })
-            .collect()
-    }
-
     fn handle_missing_communicator(&self, hosts: &[Arc<Host>]) -> Vec<(Arc<Host>, Result<()>)> {
         hosts
             .iter()
@@ -502,104 +464,6 @@ impl Orchestrator {
                 )
             })
             .collect()
-    }
-
-    async fn deploy_to_host(&self, host: Arc<Host>, communicator: &Communicator) -> Result<()> {
-        info!(
-            "Attempting to deploy to host: {} (OS: {:?})",
-            host.ip, host.os
-        );
-
-        match host.os {
-            OS::Unix => {
-                info!("Deploying Chimera to Unix host: {}", host.ip);
-
-                // Handle transfer results
-                let transfer_results = communicator
-                    .mass_file_transfer_by_os(
-                        Arc::new(CHIMERA_UNIX.to_vec()),
-                        "/tmp/chimera".to_string(),
-                        OS::Unix,
-                    )
-                    .await;
-
-                // Find the result for our specific host
-                let transfer_result = transfer_results
-                    .into_iter()
-                    .find(|r| r.ip == host.ip)
-                    .ok_or_else(|| {
-                        Error::DeploymentError("No transfer result found for host".into())
-                    })?;
-
-                if let Err(e) = transfer_result.result {
-                    log_failure("Failed to transfer Chimera", &host.ip.to_string(), &e);
-                    return Err(e);
-                }
-
-                log_success("Yay we transferred Chimera", &host.ip.to_string());
-
-                // Handle chmod results
-                let chmod_results = communicator
-                    .exec_by_os(&cmd!("chmod", "+x", "/tmp/chimera"), OS::Unix)
-                    .await;
-
-                // Find chmod result for our specific host
-                let chmod_result = chmod_results
-                    .into_iter()
-                    .find(|r| r.ip == host.ip)
-                    .ok_or_else(|| {
-                        Error::DeploymentError("No chmod result found for host".into())
-                    })?;
-
-                match chmod_result.result {
-                    Ok(output) => {
-                        log_output(&output.stdout, &output.stderr);
-                        log_success("set execute permissions", &host.ip.to_string());
-                        Ok(())
-                    }
-                    Err(e) => {
-                        log_failure("set execute permissions", &host.ip.to_string(), &e);
-                        Err(e)
-                    }
-                }
-            }
-            OS::Windows => {
-                info!("Deploying Chimera to Windows host: {}", host.ip);
-
-                // Handle transfer results
-                let transfer_results = communicator
-                    .mass_file_transfer_by_os(
-                        Arc::new(CHIMERA_WIN.to_vec()),
-                        "C:\\Temp\\chimera.exe".to_string(),
-                        OS::Windows,
-                    )
-                    .await;
-
-                // Find the result for our specific host
-                let transfer_result = transfer_results
-                    .into_iter()
-                    .find(|r| r.ip == host.ip)
-                    .ok_or_else(|| {
-                        Error::DeploymentError("No transfer result found for host".into())
-                    })?;
-
-                match transfer_result.result {
-                    Ok(_) => {
-                        log_success("transfer Chimera", &host.ip.to_string());
-                        Ok(())
-                    }
-                    Err(e) => {
-                        log_failure("transfer Chimera", &host.ip.to_string(), &e);
-                        Err(e)
-                    }
-                }
-            }
-            OS::Unknown => {
-                warn!("Skipping deployment to unknown OS host: {}", host.ip);
-                log_skipped("deploy", &host.ip.to_string(), "unknown OS");
-                Err(Error::UnknownOS)
-            }
-        }
     }
 
     async fn execute_chimera_modes(
@@ -644,9 +508,12 @@ impl Orchestrator {
             mode, host.ip, host.os
         );
 
+        let unix_cmd = format!("/tmp/chimera {} > chimera_inv.json", mode);
+        let win_cmd = format!("C:\\Temp\\chimera.exe {} > chimera_inv.json", mode);
+
         let command = match host.os {
-            OS::Unix => cmd!("/tmp/chimera", mode),
-            OS::Windows => cmd!("C:\\Temp\\chimera.exe", mode),
+            OS::Unix => cmd!(unix_cmd),
+            OS::Windows => cmd!(win_cmd),
             OS::Unknown => {
                 warn!("Skipping unknown OS host: {}", host.ip);
                 log_skipped("execute Chimera", &host.ip, "unknown OS");
@@ -701,4 +568,5 @@ async fn test_main() -> Result<()> {
     let mut orchestrator = Orchestrator::new(subnet);
 
     orchestrator.run("Cheesed2MeetU!").await
+
 }

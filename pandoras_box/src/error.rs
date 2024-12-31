@@ -23,7 +23,7 @@ pub enum Error {
     #[error("Argument error: {0}")]
     ArgumentError(String),
     
-    #[error("Failed to create client")]
+    #[error("Failed to create client: {0}")]
     RemoteConnectionError(#[from] rustrc::Error),
     
     #[error("Failed to create communicator: {0}")]

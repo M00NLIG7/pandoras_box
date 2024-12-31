@@ -7,20 +7,12 @@
 use crate::client::{Command, CommandOutput, Config, Session};
 use crate::cmd;
 use crate::smb::negotiate_session;
-use crate::ssh::SSHConfig;
 use crate::stateful_process::{Message, StatefulProcess};
 use crate::Result;
 use byteorder::{BigEndian, WriteBytesExt};
-use bytes::Bytes;
-use download_embed_macro::download_and_embed;
 use flate2::read::GzDecoder;
-use http_body_util::{combinators::BoxBody, BodyExt, Full};
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use download_embed_macro::download_and_embed;
 use serde_json::Value;
-use std::convert::Infallible;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::os::unix::fs::PermissionsExt;
@@ -612,60 +604,6 @@ impl Session for WinexeContainer {
         stream.write_all(&file_contents).await?;
 
         Ok(())
-    }
-}
-
-async fn start_http_server(file_contents: Arc<Vec<u8>>, tx: oneshot::Sender<String>) -> Result<()> {
-    let addr: SocketAddr = ([0, 0, 0, 0], 0).into();
-    let listener = TcpListener::bind(addr).await?;
-    let local_addr = listener.local_addr()?;
-    let local_ip = crate::get_local_ip();
-    let server_url = format!("http://{}:{}", local_ip, local_addr.port());
-
-    tx.send(server_url)
-        .map_err(|_| crate::Error::FileTransferError("Failed to send server_url".to_string()))?;
-
-    println!("Listening on http://{}", local_addr);
-
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let io = TokioIo::new(stream);
-
-        let file_contents = file_contents.clone();
-
-        tokio::task::spawn(async move {
-            if let Err(err) = http1::Builder::new()
-                .serve_connection(
-                    io,
-                    service_fn(move |req| handle_request(req, file_contents.clone())),
-                )
-                .await
-            {
-                eprintln!("Failed to serve connection: {:?}", err);
-            }
-        });
-    }
-}
-
-async fn handle_request(
-    req: Request<hyper::body::Incoming>,
-    file_contents: Arc<Vec<u8>>,
-) -> Result<Response<BoxBody<Bytes, Infallible>>> {
-    match (req.method(), req.uri().path()) {
-        (&Method::GET, "/") => {
-            let body = Full::new(Bytes::from(file_contents.to_vec())).boxed();
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(body)
-                .unwrap())
-        }
-        _ => {
-            let body = Full::new(Bytes::from("Not Found")).boxed();
-            Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(body)
-                .unwrap())
-        }
     }
 }
 

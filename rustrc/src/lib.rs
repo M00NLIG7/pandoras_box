@@ -9,6 +9,8 @@ pub mod client;
 pub mod traits;
 pub use traits::*;
 
+static TRANSFER_HELPER: &str = include_str!("../resources/transfer_file.bat");
+
 /// Gate behind ssh feature
 #[cfg(feature = "ssh")]
 pub mod ssh;
