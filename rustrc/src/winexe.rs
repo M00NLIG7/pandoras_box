@@ -10,8 +10,8 @@ use crate::smb::negotiate_session;
 use crate::stateful_process::{Message, StatefulProcess};
 use crate::Result;
 use byteorder::{BigEndian, WriteBytesExt};
-use flate2::read::GzDecoder;
 use download_embed_macro::download_and_embed;
+use flate2::read::GzDecoder;
 use serde_json::Value;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -192,21 +192,15 @@ impl WinexeContainer {
         let container = Self { config, runc_path };
 
         if !container.is_container_running().await? {
-            println!("Starting Container");
             let _ = container.start_container().await?;
-            println!("Container Started");
 
             // Wait for the container to start
             loop {
-                println!("Checking if container is running");
                 if container.is_container_running().await? {
                     break;
                 }
-                println!("Waiting for container to start");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-
-            println!("Container Started");
         }
 
         container.write_transfer_helper().await?;
@@ -221,11 +215,9 @@ impl WinexeContainer {
     /// Returns a Result containing the path to runc if successful, or an error if installation fails
     async fn ensure_runc_available() -> Result<String> {
         if let Some(path) = Self::find_existing_runc().await {
-            println!("Found existing runc at: {}", path);
             return Ok(path);
         }
 
-        println!("Installing runc to {}", RUNC_PATH);
         fs::create_dir_all(TMP_DIR).await?;
         fs::write(RUNC_PATH, RUNC).await?;
         fs::set_permissions(RUNC_PATH, std::fs::Permissions::from_mode(0o755)).await?;
@@ -277,7 +269,6 @@ impl WinexeContainer {
     async fn ensure_winexe_installed() -> Result<()> {
         let winexe_path = Path::new(TMP_DIR).join("winexe");
         if !winexe_path.exists() {
-            println!("Installing winexe to {}", TMP_DIR);
             fs::create_dir_all(TMP_DIR).await?;
 
             let mut decoder = GzDecoder::new(WINEXE_CONTAINER);
@@ -316,13 +307,83 @@ impl WinexeContainer {
         }
     }
 
+
+    async fn fetch_file(addr: &SocketAddr, local_path: &str) -> crate::Result<()> {
+        // Try connection with retries
+        let mut stream = {
+            let mut stream = None;
+            let mut last_error = None;
+
+            for attempt in 1..=5 {
+                match TcpStream::connect(&addr).await {
+                    Ok(s) => {
+                        stream = Some(s);
+                        break;
+                    }
+                    Err(e) => {
+                        last_error = Some(e);
+                        if attempt < 5 {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+            }
+
+            match stream {
+                Some(s) => s,
+                None => {
+                    return Err(crate::Error::ConnectionError(format!(
+                        "Failed to connect after 5 attempts: {}",
+                        last_error.unwrap()
+                    )))
+                }
+            }
+        };
+
+        // Read 8-byte size header
+        let mut size_buf = [0u8; 8];
+        stream.read_exact(&mut size_buf).await.map_err(|e| {
+            crate::Error::FileTransferError(format!("Failed to read size header: {}", e))
+        })?;
+
+        let file_size = size_buf.iter().fold(0u64, |acc, &b| (acc << 8) | b as u64);
+
+        // Create output file
+        let mut file = tokio::fs::File::create(local_path).await.map_err(|e| {
+            crate::Error::FileTransferError(format!("Failed to create output file: {}", e))
+        })?;
+
+        let mut received = 0u64;
+        let mut buffer = [0u8; 8192];
+
+        while received < file_size {
+            let to_read = std::cmp::min(8192, file_size - received) as usize;
+            let bytes_read = stream.read(&mut buffer[..to_read]).await.map_err(|e| {
+                crate::Error::FileTransferError(format!("Failed to read from stream: {}", e))
+            })?;
+
+            if bytes_read == 0 {
+                return Err(crate::Error::FileTransferError(
+                    "Connection closed before transfer completed".to_string(),
+                ));
+            }
+
+            file.write_all(&buffer[..bytes_read]).await.map_err(|e| {
+                crate::Error::FileTransferError(format!("Failed to write to file: {}", e))
+            })?;
+
+            received += bytes_read as u64;
+        }
+
+        Ok(())
+    }
+
     /// Starts the container
     ///
     /// # Returns
     ///
     /// Returns a Result containing the Child process of the started container
     async fn start_container(&self) -> Result<Child> {
-        println!("Starting Container");
         Ok(TokioCommand::new(&self.runc_path)
             .arg("run")
             .arg("-d")
@@ -340,7 +401,6 @@ impl WinexeContainer {
     pub async fn open_channel(&self) -> Result<WinexeChannel> {
         let ip = self.config.ip();
 
-        println!("Getting SMB Version");
         let smb_ver = match Self::get_smb_version(ip).await {
             Ok(SMBVersion::V1) => "./winexe-static",
             Ok(SMBVersion::V3) => "./winexe-static-2",
@@ -350,7 +410,6 @@ impl WinexeContainer {
                 ))
             }
         };
-        println!("SMB Version: {}", smb_ver);
 
         let mut cmd_args = vec!["exec", "winexe-container", smb_ver];
 
@@ -393,10 +452,8 @@ impl WinexeContainer {
             match negotiate_session(server, *port, Duration::from_secs(2), true).await {
                 Ok(Some(dialect)) => {
                     if !dialect.is_empty() && dialect[0] == SMB_3_SIGNATURE {
-                        println!("SMB Version 3");
                         return Ok(SMBVersion::V3);
                     } else if !dialect.is_empty() {
-                        println!("SMB Version 1");
                         return Ok(SMBVersion::V1);
                     }
                 }
@@ -405,7 +462,6 @@ impl WinexeContainer {
             }
         }
 
-        println!("SMB Version DEFAULTING");
         Ok(SMBVersion::V1)
     }
 
@@ -419,7 +475,7 @@ impl WinexeContainer {
 
         // Check if TRUE shows up twice in the output
         if check_stdout.matches("TRUE").count() > 1 {
-            println!("Transfer Helper Already Exists");
+            println!("Transfer helper already exists");
             return Ok(());
         }
 
@@ -429,7 +485,9 @@ impl WinexeContainer {
 
         // First write the base64 string
         let echo_command = format!("echo {}> C:\\Temp\\transfer_file.b64", base64_content);
-        self.exec(&cmd!(echo_command)).await?;
+        println!("echo command: {}", echo_command);
+        let echo_out =  self.exec(&cmd!(echo_command)).await?;
+        println!("cmd out{}", String::from_utf8_lossy(&echo_out.stdout));
 
         // Then decode it into the batch file using certutil
         self.exec(&cmd!(
@@ -554,15 +612,46 @@ impl Session for WinexeContainer {
         })
     }
 
+    async fn download_file(&self, remote_path: &str, local_path: &str) -> crate::Result<()> {
+        let port_number = 49152 + rand::random::<u16>() % 16384;
+        let rule = format!(
+            "cmd.exe /c netsh advfirewall firewall add rule name=\"Allow Port {}\" dir=in action=allow protocol=TCP localport={}",
+            port_number, port_number
+        );
+        let rule_output = self.exec(&cmd!(rule)).await?;
+
+        let start_helper = format!(
+            "cmd.exe /c wmic process call create 'C:\\Temp\\transfer_file.bat {} 0.0.0.0 {} serve'",
+            port_number, remote_path
+        );
+        let helper = self.exec(&cmd!(start_helper)).await?;
+
+        match format!("{}:{}", self.ip(), port_number).parse() {
+            Ok(socket) => Self::fetch_file(&socket, local_path).await,
+            Err(_) => {
+                self.exec(&crate::cmd!(format!(
+                    "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
+                    port_number
+                ))).await;
+                Err(crate::Error::ConnectionError("Invalid socket address".to_string()))
+            },
+        }
+    }
+
     async fn transfer_file(
         &self,
         file_contents: Arc<Vec<u8>>,
         remote_destination: &str,
     ) -> Result<()> {
         let port_number = 49152 + rand::random::<u16>() % 16384;
+        let rule = format!(
+            "cmd.exe /c netsh advfirewall firewall add rule name=\"Allow Port {}\" dir=in action=allow protocol=TCP localport={}",
+            port_number, port_number
+        );
+        let rule_output = self.exec(&cmd!(rule)).await?;
 
         let start_helper = format!(
-            "cmd.exe /c wmic process call create 'C:\\Temp\\transfer_file.bat {} 0.0.0.0 {}'",
+            "cmd.exe /c wmic process call create 'C:\\Temp\\transfer_file.bat {} 0.0.0.0 {} receive'",
             port_number, remote_destination
         );
         let helper = self.exec(&cmd!(start_helper)).await?;
@@ -581,29 +670,32 @@ impl Session for WinexeContainer {
                 Err(e) => {
                     if attempt < 4 {
                         // Don't sleep on last attempt
-                        println!(
-                            "Connection attempt {} failed: {}. Retrying...",
-                            attempt + 1,
-                            e
-                        );
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
             }
         }
 
-        let mut stream = stream.ok_or_else(|| {
-            crate::Error::FileTransferError("Failed to connect after 5 attempts".to_string())
-        })?;
+        match stream {
+            Some(mut stream) => {
+                let file_size = file_contents.len() as u64;
+                let mut size_buffer = vec![];
+                WriteBytesExt::write_u64::<BigEndian>(&mut size_buffer, file_size)?;
 
-        let file_size = file_contents.len() as u64;
-        let mut size_buffer = vec![];
-        WriteBytesExt::write_u64::<BigEndian>(&mut size_buffer, file_size)?;
-
-        stream.write_all(&size_buffer).await?;
-        stream.write_all(&file_contents).await?;
-
-        Ok(())
+                stream.write_all(&size_buffer).await?;
+                Ok(stream.write_all(&file_contents).await?)
+            }
+            None => {
+                self.exec(&crate::cmd!(format!(
+                    "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
+                    port_number
+                )))
+                .await?;
+                return Err(crate::Error::FileTransferError(
+                    "Failed to connect after 5 attempts".to_string(),
+                ));
+            }
+        }
     }
 }
 
@@ -630,6 +722,8 @@ mod tests {
             .transfer_file(Arc::new(file_bytes), "C:\\Temp\\chimera")
             .await
             .unwrap();
+        
+        session.download_file("C:\\Temp\\transfer_file.bat", "./transfer_file.bat").await.unwrap();
 
         let output = session.exec(&cmd!("dir C:\\Temp")).await.unwrap();
 

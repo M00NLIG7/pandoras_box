@@ -12,8 +12,11 @@ pub trait Session {
         &self,
         cmd: &Command,
     ) -> impl std::future::Future<Output = Result<CommandOutput>> + Send;
+    fn download_file(&self, remote_path: &str, local_path: &str) -> impl std::future::Future<Output = Result<()>> + Send;
     fn transfer_file(&self, file: Arc<Vec<u8>>, destination: &str) -> impl std::future::Future<Output = Result<()>> + Send;
 }
+
+
 
 /// Trait defining the configuration for a client.
 pub trait Config {

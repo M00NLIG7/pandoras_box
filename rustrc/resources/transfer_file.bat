@@ -1,126 +1,30 @@
 @if (@X)==(@Y) @end /* JScript comment
 @echo off
 setlocal enableDelayedExpansion
-
 if "x%1" == "x" goto usage_help
 if "x%3" == "x" goto usage_help
-
 for /f "tokens=* delims=" %%v in ('dir /b /s /a:-d /o:-n "%SystemRoot%\Microsoft.NET\Framework\*jsc.exe"') do (
    set "jsc=%%v"
 )
-
-IF exist %APPDATA%\listener.exe del %APPDATA%\listener.exe
-
-echo.Compiling the listener script using !jsc!
-"!jsc!" /nologo /out:"%APPDATA%\listener.exe" "%~dpsfnx0"
-
-IF exist %APPDATA%\listener.exe (
-    echo.Binary saved as %APPDATA%\listener.exe
-    echo.Launching the listener on %2 %1 with output to %3
-    %APPDATA%\listener.exe %*
+IF exist %APPDATA%\fileserver.exe del %APPDATA%\fileserver.exe
+echo.Compiling the file server script using !jsc!
+"!jsc!" /nologo /out:"%APPDATA%\fileserver.exe" "%~dpsfnx0"
+IF exist %APPDATA%\fileserver.exe (
+    echo.Binary saved as %APPDATA%\fileserver.exe
+    echo.Launching the server on %2 %1 with file %3 and mode %4
+    %APPDATA%\fileserver.exe %*
 ) else (
     echo.Unable to build polyglot code
 )
-
 goto end_of_batch_file
-
 :usage_help
 echo.Usage:
-echo.   %0 port ip filename
-
+echo.   %0 port ip filename [mode]
+echo.   mode: serve (default) or receive
 :end_of_batch_file
 endlocal & exit /b %errorlevel%
-
 */
-import System;
-import System.Net;
-import System.Net.Sockets;
-import System.Text;
-import System.IO;
-
-function StartListening(port, ipAddress:IPAddress, filename:String) {
-   var localEndPoint = new IPEndPoint(ipAddress, parseInt(port));  
-   var listener = new Socket(ipAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);  
-
-   try {  
-       listener.Bind(localEndPoint);  
-       listener.Listen(10);  
-
-       var headerBuf:byte[] = new byte[8];
-       var data:byte[] = new byte[8192];
-       
-       Console.WriteLine("Waiting for a TCP connection on {0}:{1}...", ipAddress, port);  
-       var handler = listener.Accept();  
-       Console.WriteLine("Connected to {0}", handler.RemoteEndPoint);  
-
-       try {
-           var sizeRead = handler.Receive(headerBuf);
-           if (sizeRead != 8) {
-               Console.WriteLine("Invalid header size");
-               return;
-           }
-           
-           var fileSize = 0;
-           for (var i = 0; i < 8; i++) {
-               fileSize = (fileSize << 8) | headerBuf[i];
-           }
-           
-           Console.WriteLine("Expecting file of size: " + fileSize + " bytes");
-           Console.WriteLine("Will save to: " + filename);
-
-           var fileStream = new FileStream(filename, FileMode.Create);
-           var totalReceived = 0;
-           var lastPercent = 0;
-
-           while (totalReceived < fileSize) {
-               var toRead = Math.min(8192, fileSize - totalReceived);
-               var bytesRec = handler.Receive(data, toRead, SocketFlags.None);
-               if (bytesRec <= 0) break;
-               
-               fileStream.Write(data, 0, bytesRec);
-               totalReceived += bytesRec;
-               
-               var percent = Math.floor((totalReceived / fileSize) * 100);
-               if (percent > lastPercent) {
-                   Console.WriteLine("Received: " + percent + "%");
-                   lastPercent = percent;
-               }
-           }
-
-           fileStream.Close();
-           Console.WriteLine("File saved as: " + filename);
-
-       } finally {
-           Console.WriteLine("\nDisconnected\n");
-           handler.Shutdown(SocketShutdown.Both);  
-           handler.Close();
-       }
-       
-       listener.Close();
-
-   } catch (e) {  
-       Console.WriteLine(e.ToString());  
-   }  
-}
-
-function GetThisHostIPv4Address() {
-   var ipAddress = IPAddress.Parse("127.0.0.1");
-   var ipHostInfo = Dns.GetHostEntry(Dns.GetHostName());  
-
-   for(var i=0; i<ipHostInfo.AddressList.length; ++i) {
-       if (ipHostInfo.AddressList[i].AddressFamily == AddressFamily.InterNetwork) {
-          ipAddress = ipHostInfo.AddressList[i];
-          break;
-        }
-   }
-
-   return ipAddress;
-}
-
-var arguments:String[] = Environment.GetCommandLineArgs();
-
-if (arguments.length == 4) {
-    StartListening(arguments[1], IPAddress.Parse(arguments[2]), arguments[3]);
-} else {
-    Console.WriteLine("Usage: listener port ip filename");
-}
+import System;import System.Net;import System.Net.Sockets;import System.Text;import System.IO;
+function s(p,a:IPAddress,f:String){var e=new IPEndPoint(a,parseInt(p)),l=new Socket(a.AddressFamily,SocketType.Stream,ProtocolType.Tcp);try{l.Bind(e);l.Listen(10);var h=l.Accept();try{var i=new FileInfo(f);if(!i.Exists){Console.WriteLine("File not found: "+f);return}var z=i.Length,b:byte[]=new byte[8];for(var j=7;j>=0;j--){b[j]=z&0xFF;z>>=8}h.Send(b);var t=new FileStream(f,FileMode.Open,FileAccess.Read),r:byte[]=new byte[8192],n=0,p=0;while(true){var d=t.Read(r,0,r.length);if(d<=0)break;h.Send(r,d,SocketFlags.None);n+=d;var c=Math.floor(n/i.Length*100);if(c>p){Console.WriteLine("Sent: "+c+"%");p=c}}t.Close()}finally{h.Shutdown(SocketShutdown.Both);h.Close()}}catch(e){Console.WriteLine(e)}finally{l.Close()}}
+function r(p,a:IPAddress,f:String){var e=new IPEndPoint(a,parseInt(p)),l=new Socket(a.AddressFamily,SocketType.Stream,ProtocolType.Tcp);try{l.Bind(e);l.Listen(10);var b:byte[]=new byte[8],d:byte[]=new byte[8192],h=l.Accept();try{var s=h.Receive(b);if(s!=8)return;var z=0;for(var i=0;i<8;i++)z=(z<<8)|b[i];var t=new FileStream(f,FileMode.Create),n=0,p=0;while(n<z){var x=Math.min(8192,z-n),y=h.Receive(d,x,SocketFlags.None);if(y<=0)break;t.Write(d,0,y);n+=y;var c=Math.floor(n/z*100);if(c>p){Console.WriteLine("Received: "+c+"%");p=c}}t.Close()}finally{h.Shutdown(SocketShutdown.Both);h.Close()}}catch(e){Console.WriteLine(e)}finally{l.Close()}}
+var g=Environment.GetCommandLineArgs();if(g.length>=4){var m=g.length>=5?g[4].toLowerCase():"serve";m=="serve"?s(g[1],IPAddress.Parse(g[2]),g[3]):m=="receive"?r(g[1],IPAddress.Parse(g[2]),g[3]):Console.WriteLine("Invalid mode")}
