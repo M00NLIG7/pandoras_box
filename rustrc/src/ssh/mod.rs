@@ -104,13 +104,63 @@ impl Session for SSHSession {
     }
 
     async fn download_file(&self, remote_path: &str, local_path: &str) -> crate::Result<()> {
+        // Create parent directories if they don't exist
+        if let Some(parent) = Path::new(local_path).parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
         let sftp = self.create_sftp_session().await?;
-        let mut remote_file = sftp.open(remote_path).await?;
 
-        let mut local_file = tokio::fs::File::create(local_path).await?;
-        tokio::io::copy(&mut remote_file, &mut local_file).await?;
+        // Create temporary file for download
+        let temp_path = format!("{}.tmp", local_path);
+        let mut local_file = match tokio::fs::File::create(&temp_path).await {
+            Ok(file) => file,
+            Err(e) => {
+                return Err(crate::Error::FileTransferError(format!(
+                    "Failed to create local file: {}",
+                    e
+                )));
+            }
+        };
 
-        Ok(())
+        // Open remote file with error handling
+        let mut remote_file = match sftp.open(remote_path).await {
+            Ok(file) => file,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(crate::Error::FileTransferError(format!(
+                    "Failed to open remote file: {}",
+                    e
+                )));
+            }
+        };
+
+        // Copy with timeout
+        match tokio::time::timeout(
+            Duration::from_secs(300), // 5 minute timeout
+            tokio::io::copy(&mut remote_file, &mut local_file),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                // Ensure file is flushed
+                local_file.sync_all().await?;
+                // Rename temp file to target
+                tokio::fs::rename(temp_path, local_path).await?;
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                Err(crate::Error::FileTransferError(format!(
+                    "Copy failed: {}",
+                    e
+                )))
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                Err(crate::Error::FileTransferError("Download timed out".into()))
+            }
+        }
     }
 
     async fn transfer_file(
@@ -187,11 +237,13 @@ impl SSHSession {
             }
         };
 
-        match remote_file.write_all(file_contents).await{
-            Ok(_) => {},
+        match remote_file.write_all(file_contents).await {
+            Ok(_) => {}
             Err(e) => {
                 let _ = remote_file.shutdown().await;
-                return Err(crate::Error::FileTransferError("Failed to write file contents".to_string()));
+                return Err(crate::Error::FileTransferError(
+                    "Failed to write file contents".to_string(),
+                ));
             }
         };
 
@@ -253,7 +305,7 @@ impl SSHSession {
         Ok(())
     }
 
-   pub async fn batch_transfer_file(
+    pub async fn batch_transfer_file(
         &self,
         file_contents: Arc<Vec<u8>>,
         remote_destination: &str,
@@ -273,13 +325,14 @@ impl SSHSession {
         let helper = self.exec(&crate::cmd!(start_helper)).await?;
         let helper_output = String::from_utf8_lossy(&helper.stdout);
 
-
         match self.connect_with_retry(port_number).await {
-            Ok(stream) => {
-                self.send_file_data(stream, &file_contents).await
-            }
+            Ok(stream) => self.send_file_data(stream, &file_contents).await,
             Err(e) => {
-                self.exec(&crate::cmd!(format!("cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"", port_number))).await?;
+                self.exec(&crate::cmd!(format!(
+                    "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
+                    port_number
+                )))
+                .await?;
                 return Err(e);
             }
         }
@@ -413,7 +466,7 @@ mod tests {
         let config = SSHConfig::password(
             "Administrator",
             "Cheesed2MeetU!",
-            "10.100.136.132:22",
+            "10.100.136.7:22",
             Duration::from_secs(60),
         )
         .await
@@ -424,14 +477,21 @@ mod tests {
         let chimera = include_bytes!("../../chimera.exe");
 
         session
-            .transfer_file(Arc::new(chimera.into()), "C:\\Temp\\womp.exe")
+            .transfer_file(Arc::new(chimera.into()), "C:\\Temp\\chimera.exe")
             .await
             .unwrap();
-        let output = session.exec(&Command::new("dir C:\\Temp")).await.unwrap();
 
-        session.download_file("C:\\Temp\\womp.exe", "womp.exe")
+
+        let output = session.exec(&crate::cmd!("dir C:\\temp")).await.unwrap();
+        println!("{:?}\n{}", output.status_code, String::from_utf8_lossy(&output.stdout));
+
+        let output = session.exec(&crate::cmd!("C:\\Temp\\chimera.exe inventory > C:\\Temp\\chimera_inventory.json")).await.unwrap();
+
+        println!("{:?}\n", output.status_code);
+
+        session
+            .download_file("C:\\Temp\\chimera_inventory.json", "inv")
             .await
             .unwrap();
-        println!("{:?}", output);
     }
 }

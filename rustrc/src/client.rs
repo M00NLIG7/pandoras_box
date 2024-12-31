@@ -162,4 +162,8 @@ impl<T: Config> Client<T> {
     pub async fn transfer_file(&self, file_data: Arc<Vec<u8>>, remote_dest: &str) -> Result<()> {
         self.session.transfer_file(file_data, remote_dest).await
     }
+
+    pub async fn download_file(&self, remote_path: &str, local_path: &str) -> Result<()> {
+        self.session.download_file(remote_path, local_path).await
+    }
 }

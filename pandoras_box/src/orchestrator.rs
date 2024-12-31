@@ -348,9 +348,7 @@ impl Orchestrator {
         if matches!(os, OS::Unix) {
             let chmod_cmd = format!("chmod +x {}", path);
 
-            let chmod_results = communicator
-                .exec_by_os(&rustrc::cmd!(chmod_cmd), os)
-                .await;
+            let chmod_results = communicator.exec_by_os(&rustrc::cmd!(chmod_cmd), os).await;
 
             // Create a map of chmod results by IP
             let chmod_map: std::collections::HashMap<String, Result<()>> = chmod_results
@@ -508,8 +506,8 @@ impl Orchestrator {
             mode, host.ip, host.os
         );
 
-        let unix_cmd = format!("/tmp/chimera {} > chimera_inv.json", mode);
-        let win_cmd = format!("C:\\Temp\\chimera.exe {} > chimera_inv.json", mode);
+        let unix_cmd = format!("/tmp/chimera {0} > /tmp/chimera_{0}.json", mode);
+        let win_cmd = format!("C:\\Temp\\chimera.exe {0} > C:\\Temp\\chimera_{0}.json", mode);
 
         let command = match host.os {
             OS::Unix => cmd!(unix_cmd),
@@ -547,6 +545,14 @@ impl Orchestrator {
             }
         }
 
+        let win_remote_path = format!("C:\\Temp\\chimera_{}.json", mode);
+
+        communicator.mass_file_download_by_os(win_remote_path, "./".to_string(), OS::Windows).await;
+
+        let unix_remote_path = format!("/tmp/chimera_{}.json", mode);
+        
+        communicator.mass_file_download_by_os(unix_remote_path, "./".to_string(), OS::Unix).await;
+
         // Return the result for this specific host
         results
             .into_iter()
@@ -568,5 +574,4 @@ async fn test_main() -> Result<()> {
     let mut orchestrator = Orchestrator::new(subnet);
 
     orchestrator.run("Cheesed2MeetU!").await
-
 }
