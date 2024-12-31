@@ -20,6 +20,8 @@ pub enum Error {
     JsonError(#[from] serde_json::Error),
     #[error("File Transfer Error: {0}")]
     FileTransferError(String),
+    #[error("SFTP Error: {0}")]
+    SftpError(#[from] russh_sftp::client::error::Error),
 }
 
 impl From<russh::Error> for Error {

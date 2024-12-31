@@ -1,0 +1,174 @@
+2024-12-30 17:17:42 [ INFO] Logging initialized to ./pandoras_box20241230_171742.log
+2024-12-30 17:17:42 [ INFO] Starting application with range: 10.100.136.0/24
+2024-12-30 17:17:42 [ INFO] Created subnet: 10.100.136.0/24
+2024-12-30 17:17:42 [ INFO] Initializing Orchestrator for subnet 10.100.136.0/24
+2024-12-30 17:17:42 [ INFO] Starting Orchestrator run
+2024-12-30 17:17:42 [ INFO] Starting network enumeration
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.7 (OS: Windows, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.10 (OS: Unix, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.30 (OS: Unix, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.43 (OS: Unix, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.66 (OS: Unix, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.69 (OS: Unknown, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.73 (OS: Unix, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.84 (OS: Unix, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.85 (OS: Unix, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.111 (OS: Windows, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.121 (OS: Unix, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.132 (OS: Windows, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.203 (OS: Unix, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Enumerated host: 10.100.136.241 (OS: Windows, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Successfully enumerated 14 hosts
+2024-12-30 17:17:46 [ INFO] Starting communication initialization for 14 hosts
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.7 (OS: Windows, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.10 (OS: Unix, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.30 (OS: Unix, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.43 (OS: Unix, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.66 (OS: Unix, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.69 (OS: Unknown, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.73 (OS: Unix, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.84 (OS: Unix, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.85 (OS: Unix, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.111 (OS: Windows, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.121 (OS: Unix, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.132 (OS: Windows, Open ports: [139, 22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.203 (OS: Unix, Open ports: [22])
+2024-12-30 17:17:46 [ INFO] Creating config for host 10.100.136.241 (OS: Windows, Open ports: [139, 22])
+2024-12-30 17:17:48 [ INFO] Successfully initialized communicator with 14/14 hosts
+2024-12-30 17:17:48 [ INFO] Communication initialized successfully for 14/14 hosts
+2024-12-30 17:17:58 [ INFO] Successfully Deployment complete: 10.100.136.10
+2024-12-30 17:17:58 [ INFO] Successfully Deployment complete: 10.100.136.30
+2024-12-30 17:17:58 [ERROR] Failed to file transfer: 10.100.136.43. Error: Failed to create client: File Transfer Error: Failed to create SFTP session
+2024-12-30 17:17:58 [ INFO] Successfully Deployment complete: 10.100.136.66
+2024-12-30 17:17:58 [ INFO] Successfully Deployment complete: 10.100.136.73
+2024-12-30 17:17:58 [ INFO] Successfully Deployment complete: 10.100.136.84
+2024-12-30 17:17:58 [ INFO] Successfully Deployment complete: 10.100.136.121
+2024-12-30 17:18:01 [ INFO] Successfully Deployment complete: 10.100.136.7
+2024-12-30 17:18:01 [ INFO] Successfully Deployment complete: 10.100.136.111
+2024-12-30 17:18:01 [ERROR] Failed to file transfer: 10.100.136.132. Error: Failed to create client: File Transfer Error: Failed to write to remote file: Failure: Failure
+2024-12-30 17:18:01 [ERROR] Failed to file transfer: 10.100.136.241. Error: Failed to create client: File Transfer Error: Failed to write to remote file: Failure: Failure
+2024-12-30 17:18:01 [ERROR] Failed to deploy to 10.100.136.43: Failed to create client: File Transfer Error: Failed to create SFTP session
+2024-12-30 17:18:01 [ERROR] Failed to deploy to 10.100.136.132: Failed to create client: File Transfer Error: Failed to write to remote file: Failure: Failure
+2024-12-30 17:18:01 [ERROR] Failed to deploy to 10.100.136.241: Failed to create client: File Transfer Error: Failed to write to remote file: Failure: Failure
+2024-12-30 17:18:01 [ INFO] Executing Chimera modes on 8 hosts
+2024-12-30 17:18:01 [ INFO] Executing inventory mode on host: 10.100.136.10 (OS: Unix)
+2024-12-30 17:18:01 [ INFO] Executing inventory mode on host: 10.100.136.30 (OS: Unix)
+2024-12-30 17:18:01 [ INFO] Executing inventory mode on host: 10.100.136.66 (OS: Unix)
+2024-12-30 17:18:01 [ INFO] Executing inventory mode on host: 10.100.136.73 (OS: Unix)
+2024-12-30 17:18:01 [ INFO] Executing inventory mode on host: 10.100.136.84 (OS: Unix)
+2024-12-30 17:18:01 [ INFO] Executing inventory mode on host: 10.100.136.121 (OS: Unix)
+2024-12-30 17:18:01 [ INFO] Executing inventory mode on host: 10.100.136.7 (OS: Windows)
+2024-12-30 17:18:01 [ INFO] Executing inventory mode on host: 10.100.136.111 (OS: Windows)
+2024-12-30 17:18:03 [ INFO] Successfully executed inventory mode on 10.100.136.7
+2024-12-30 17:18:03 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.7
+2024-12-30 17:18:03 [ INFO] Successfully executed inventory mode on 10.100.136.111
+2024-12-30 17:18:03 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.111
+2024-12-30 17:18:03 [ INFO] Successfully executed inventory mode on 10.100.136.132
+2024-12-30 17:18:03 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.132
+2024-12-30 17:18:03 [ INFO] Successfully executed inventory mode on 10.100.136.241
+2024-12-30 17:18:03 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.241
+2024-12-30 17:18:04 [ INFO] Successfully executed inventory mode on 10.100.136.7
+2024-12-30 17:18:04 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.7
+2024-12-30 17:18:04 [ INFO] Successfully executed inventory mode on 10.100.136.111
+2024-12-30 17:18:04 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.111
+2024-12-30 17:18:04 [ INFO] Successfully executed inventory mode on 10.100.136.132
+2024-12-30 17:18:04 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.132
+2024-12-30 17:18:04 [ INFO] Successfully executed inventory mode on 10.100.136.241
+2024-12-30 17:18:04 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.241
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.43
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.43
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.43
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.43
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.43
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.43
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.43
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.43
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.43
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.43
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.43
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.43
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully executed inventory mode on 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully execute Chimera in inventory mode: 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully executed Chimera on 10.100.136.10
+2024-12-30 17:18:08 [ INFO] Successfully executed Chimera on 10.100.136.30
+2024-12-30 17:18:08 [ INFO] Successfully executed Chimera on 10.100.136.66
+2024-12-30 17:18:08 [ INFO] Successfully executed Chimera on 10.100.136.73
+2024-12-30 17:18:08 [ INFO] Successfully executed Chimera on 10.100.136.84
+2024-12-30 17:18:08 [ INFO] Successfully executed Chimera on 10.100.136.121
+2024-12-30 17:18:08 [ INFO] Successfully executed Chimera on 10.100.136.7
+2024-12-30 17:18:08 [ INFO] Successfully executed Chimera on 10.100.136.111
+2024-12-30 17:18:08 [ INFO] Orchestrator run completed. Summary:
+Total hosts: 14
+Successfully connected: 14
+Successfully deployed: 8
+2024-12-30 17:18:08 [ INFO] Orchestrator completed successfully

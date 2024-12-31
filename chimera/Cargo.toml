@@ -31,3 +31,10 @@ procfs = "0.17.0"
 windows-sys = { version= "0.59.0", features = ["Win32_NetworkManagement", "Win32_NetworkManagement_NetManagement"] }
 wmi = "0.14.2"
 netstat = "0.7.0"
+
+[profile.release]
+opt-level = 3  # Optimize for size.
+strip = true  # Automatically strip symbols from the binary.
+lto = true
+codegen-units = 1
+
