@@ -1,10 +1,10 @@
 [workspace]
 members = [
     "pandoras_box",
+    "rustrc",
+    "rustrc/download_embed_macro",
     "chimera",
-    "lasso",
-    "test",
-    "local-ip"
 ]
+
 resolver = "2"
 

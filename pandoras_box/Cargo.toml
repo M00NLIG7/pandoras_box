@@ -2,34 +2,21 @@
 name = "pandoras_box"
 version = "0.1.0"
 edition = "2021"
-build = "build.rs"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-actix-web = "4.4.0"
-anyhow = "1.0.75"
-async-trait = "0.1.74"
-base64 = "0.21.5"
-flate2 = "1.0.27"
-futures = "0.3.29"
-rand = "0.8.5"
-reqwest = {version="0.11.20",default-features = false, features = ["blocking", "rustls-tls"]}
-russh = "0.40.2"
-russh-keys = "0.40.1"
-russh-sftp = "2.0.0-beta.4"
-serde = {version = "1.0.193", features = ["derive"]}
-serde_json = "1.0.108"
+clap = {version = "4.5.17", features = ["cargo"]}
+flate2 = "1.0.33"
+futures = "0.3.30"
 surge-ping = "0.5.2"
-tar = "0.4.40"
-tempfile = "3.8.0"
-tokio = {version = "1.35.0", features = ["fs", "io-std"]}
-local-ip = { path = "../local-ip" }
-clap = {version = "4.4.11", features = ["cargo"]}
-
-[build-dependencies]
-base64 = "0.21.5"
-flate2 = "1.0.27"
+thiserror = "1.0.63"
+tokio = {version = "1.40.0"}
+rustrc = { path = "../rustrc" }
+log = "0.4.22"
+env_logger = "0.11.5"
+chrono = "0.4.39"
 
 [profile.release]
-opt-level = 3
+opt-level = 3  # Optimize for size.
+strip = true  # Automatically strip symbols from the binary.
+lto = true
+codegen-units = 1
