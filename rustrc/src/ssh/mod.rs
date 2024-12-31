@@ -103,16 +103,31 @@ impl Session for SSHSession {
         self.process_channel_output(&mut channel).await
     }
 
+    async fn download_file(&self, remote_path: &str, local_path: &str) -> crate::Result<()> {
+        let sftp = self.create_sftp_session().await?;
+        let mut remote_file = sftp.open(remote_path).await?;
+
+        let mut local_file = tokio::fs::File::create(local_path).await?;
+        tokio::io::copy(&mut remote_file, &mut local_file).await?;
+
+        Ok(())
+    }
+
     async fn transfer_file(
         &self,
         file_contents: Arc<Vec<u8>>,
         remote_dest: &str,
     ) -> crate::Result<()> {
         let sftp = self.create_sftp_session().await?;
-        
-        match self.try_direct_file_transfer(&sftp, &file_contents, remote_dest).await {
+
+        match self
+            .try_direct_file_transfer(&sftp, &file_contents, remote_dest)
+            .await
+        {
             Ok(()) => Ok(()),
-            Err(_) => {
+            Err(e) => {
+                let _ = sftp.remove_file(remote_dest).await;
+
                 self.ensure_transfer_helper(&sftp).await?;
                 self.batch_transfer_file(file_contents, remote_dest).await
             }
@@ -172,8 +187,16 @@ impl SSHSession {
             }
         };
 
-        remote_file.write_all(file_contents).await?;
+        match remote_file.write_all(file_contents).await{
+            Ok(_) => {},
+            Err(e) => {
+                let _ = remote_file.shutdown().await;
+                return Err(crate::Error::FileTransferError("Failed to write file contents".to_string()));
+            }
+        };
+
         remote_file.shutdown().await?;
+
         Ok(())
     }
 
@@ -215,7 +238,10 @@ impl SSHSession {
         Ok(())
     }
 
-    async fn ensure_transfer_helper(&self, sftp: &russh_sftp::client::SftpSession) -> crate::Result<()> {
+    async fn ensure_transfer_helper(
+        &self,
+        sftp: &russh_sftp::client::SftpSession,
+    ) -> crate::Result<()> {
         if !sftp
             .try_exists("C:\\Temp\\transfer_file.bat")
             .await
@@ -227,27 +253,41 @@ impl SSHSession {
         Ok(())
     }
 
-    pub async fn batch_transfer_file(
+   pub async fn batch_transfer_file(
         &self,
         file_contents: Arc<Vec<u8>>,
         remote_destination: &str,
     ) -> crate::Result<()> {
         let port_number = 49152 + rand::random::<u16>() % 16384;
+
+        let rule = format!(
+            "cmd.exe /c netsh advfirewall firewall add rule name=\"Allow Port {}\" dir=in action=allow protocol=TCP localport={}",
+            port_number, port_number
+        );
+
+        let rule_output = self.exec(&crate::cmd!(rule)).await?;
         let start_helper = format!(
-            "cmd.exe /c wmic process call create 'C:\\Temp\\transfer_file.bat {} 0.0.0.0 {}'",
+            "cmd.exe /c wmic process call create 'C:\\Temp\\transfer_file.bat {} 0.0.0.0 {} receive'",
             port_number, remote_destination
         );
-        self.exec(&crate::cmd!(start_helper)).await?;
+        let helper = self.exec(&crate::cmd!(start_helper)).await?;
+        let helper_output = String::from_utf8_lossy(&helper.stdout);
 
-        let stream = self.connect_with_retry(port_number).await?;
-        self.send_file_data(stream, &file_contents).await?;
 
-        Ok(())
+        match self.connect_with_retry(port_number).await {
+            Ok(stream) => {
+                self.send_file_data(stream, &file_contents).await
+            }
+            Err(e) => {
+                self.exec(&crate::cmd!(format!("cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"", port_number))).await?;
+                return Err(e);
+            }
+        }
     }
 
     async fn connect_with_retry(&self, port_number: u16) -> crate::Result<TcpStream> {
         let socket = format!("{}:{}", self.config.ip(), port_number);
-        
+
         for attempt in 0..5 {
             match TcpStream::connect(&socket).await {
                 Ok(stream) => return Ok(stream),
@@ -257,19 +297,24 @@ impl SSHSession {
                 Err(_) => break,
             }
         }
-        
+
         Err(crate::Error::FileTransferError(
             "Failed to connect after 5 attempts".to_string(),
         ))
     }
 
-    async fn send_file_data(&self, mut stream: TcpStream, file_contents: &[u8]) -> crate::Result<()> {
+    async fn send_file_data(
+        &self,
+        mut stream: TcpStream,
+        file_contents: &[u8],
+    ) -> crate::Result<()> {
         let file_size = file_contents.len() as u64;
         let mut size_buffer = vec![];
         WriteBytesExt::write_u64::<BigEndian>(&mut size_buffer, file_size)?;
 
         stream.write_all(&size_buffer).await?;
         stream.write_all(file_contents).await?;
+
         Ok(())
     }
 }
@@ -286,7 +331,7 @@ impl Config for SSHConfig {
                 socket,
             } => {
                 let mut session = get_handle(*socket, *inactivity_timeout).await?;
-                
+
                 let key_pair = load_secret_key(key_path, None)?;
                 let auth_res = session
                     .authenticate_publickey(
@@ -350,7 +395,10 @@ struct Handler {}
 impl client::Handler for Handler {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, _key: &PublicKey) -> std::result::Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        _key: &PublicKey,
+    ) -> std::result::Result<bool, Self::Error> {
         Ok(true)
     }
 }
@@ -365,7 +413,7 @@ mod tests {
         let config = SSHConfig::password(
             "Administrator",
             "Cheesed2MeetU!",
-            "10.100.136.241:22",
+            "10.100.136.132:22",
             Duration::from_secs(60),
         )
         .await
@@ -380,6 +428,10 @@ mod tests {
             .await
             .unwrap();
         let output = session.exec(&Command::new("dir C:\\Temp")).await.unwrap();
+
+        session.download_file("C:\\Temp\\womp.exe", "womp.exe")
+            .await
+            .unwrap();
         println!("{:?}", output);
     }
 }
