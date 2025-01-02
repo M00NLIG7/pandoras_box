@@ -9,7 +9,10 @@ use log::{debug, error, info};
 pub struct BaselineMode;
 
 impl ModeExecutor for BaselineMode {
-    async fn execute(&self) -> ExecutionResult {
+    type Args = ();
+    type ArgRequirement = super::Optional; // This executor does not require args
+
+    async fn execute(&self, _args: Option<Self::Args>) -> ExecutionResult {
         if let Err(e) = platform::establish_baseline().await {
             error!("Failed to establish baseline: {}", e);
             return ExecutionResult::new(
