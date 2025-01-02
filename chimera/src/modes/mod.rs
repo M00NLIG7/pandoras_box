@@ -1,5 +1,6 @@
 pub mod inventory;
 pub mod credentials;
+pub mod baseline;
 
 use crate::error::{Result, Error};
 

@@ -8,6 +8,7 @@ use crate::modes::inventory::fetch_inventory;
 
 use crate::types::ExecutionResult;
 use crate::modes::credentials::CredentialsMode;
+use crate::modes::baseline::BaselineMode;
 use crate::modes::ModeExecutor;
 
 use clap::{arg, command, Command};
@@ -25,7 +26,7 @@ async fn main() {
         .subcommand(Command::new("inventory").about("Perform system inventory"))
         .subcommand(Command::new("credentials").about("Manage system credentials"))
         .subcommand(Command::new("update").about("Perform system updates"))
-        .subcommand(Command::new("config").about("Perform OS-specific configurations"))
+        .subcommand(Command::new("baseline").about("Perform OS-specific configurations"))
         .get_matches();
 
     match matches.subcommand() {
@@ -48,7 +49,16 @@ async fn main() {
         Some(("update", _)) => {
             // Handle system update
         }
-        Some(("config", _)) => {
+        Some(("baseline", _)) => {
+            let mode = BaselineMode;
+            if let ExecutionResult {
+                success: false,
+                message,
+                ..
+            } = mode.execute().await
+            {
+                error!("Baseline configuration failed: {}", message);
+            }
             #[cfg(target_os = "windows")]
             { /* Windows specific tasks */ }
             #[cfg(target_os = "linux")]

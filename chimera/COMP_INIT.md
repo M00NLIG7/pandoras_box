@@ -7,6 +7,7 @@ All:
 5. OS Specific task
 
 Windows:
+1. Setup SSH
 1. Disable SMBv1
 2. Mitigate Zerologon
 3. Mitigate kerbroasting
