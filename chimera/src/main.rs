@@ -1,17 +1,18 @@
 mod error;
-mod modes;
 mod logging;
-mod utils;
+mod modes;
 mod types;
+mod utils;
 
-use crate::modes::inventory::fetch_inventory;
+//use crate::modes::inventory::fetch_inventory;
 
-use crate::types::ExecutionResult;
-use crate::modes::credentials::CredentialsMode;
 use crate::modes::baseline::BaselineMode;
+use crate::modes::credentials::{CredentialsMode, Magic};
+use crate::modes::inventory::InventoryMode;
 use crate::modes::ModeExecutor;
+use crate::types::ExecutionResult;
 
-use clap::{arg, command, Command};
+use clap::{arg, command, value_parser, Command};
 use log::error;
 
 #[tokio::main]
@@ -24,24 +25,51 @@ async fn main() {
 
     let matches = command!()
         .subcommand(Command::new("inventory").about("Perform system inventory"))
-        .subcommand(Command::new("credentials").about("Manage system credentials"))
+        .subcommand(
+            Command::new("credentials")
+                .about("Manage system credentials")
+                .arg(
+                    arg!(-m --magic <VALUE> "Magic number for credentials")
+                        .required(true)
+                        .value_parser(value_parser!(u16)),
+                ),
+        )
         .subcommand(Command::new("update").about("Perform system updates"))
         .subcommand(Command::new("baseline").about("Perform OS-specific configurations"))
         .get_matches();
 
     match matches.subcommand() {
         Some(("inventory", _)) => {
-            // inventory JSON
-            println!("{}", serde_json::to_string_pretty(&fetch_inventory().await).unwrap());
+            let mode = InventoryMode::new();
+            match mode.execute(None).await {
+                ExecutionResult {
+                    success: true,
+                    message,
+                    ..
+                } => {
+                    println!("{}", message);
+                }
+                ExecutionResult {
+                    success: false,
+                    message,
+                    ..
+                } => {
+                    error!("Inventory failed: {}", message);
+                }
+            }
         }
-        Some(("credentials", _)) => {
-            // Handle credential management
+        Some(("credentials", sub_matches)) => {
+            let magic_value = sub_matches
+                .get_one::<u16>("magic")
+                .copied()
+                .expect("Required argument");
+
             let mode = CredentialsMode;
             if let ExecutionResult {
                 success: false,
                 message,
                 ..
-            } = mode.execute().await
+            } = mode.execute(Magic(magic_value)).await
             {
                 error!("Credential management failed: {}", message);
             }
@@ -55,7 +83,7 @@ async fn main() {
                 success: false,
                 message,
                 ..
-            } = mode.execute().await
+            } = mode.execute(None).await
             {
                 error!("Baseline configuration failed: {}", message);
             }
