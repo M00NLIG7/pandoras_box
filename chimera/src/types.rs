@@ -68,7 +68,7 @@ pub enum ExecutionMode {
    /// * Install and configure rsyslog
    /// * Set up Auditd logging
    /// * Configure fail2ban
-   Config,
+   Baseline,
 }
 
 /// Result of an execution operation
@@ -116,7 +116,7 @@ impl ExecutionMode {
            ExecutionMode::Credentials => "Manages system credentials and account security",
            ExecutionMode::Inventory => "Performs system inventory and asset discovery",
            ExecutionMode::Update => "Handles system updates and patch management",
-           ExecutionMode::Config => "Implements OS-specific security configurations",
+           ExecutionMode::Baseline => "Implements OS-specific security configurations",
        }
    }
 
@@ -127,7 +127,7 @@ impl ExecutionMode {
            ExecutionMode::Credentials => "CREDS",
            ExecutionMode::Inventory => "INVEN",
            ExecutionMode::Update => "UPDATE",
-           ExecutionMode::Config => "CONFIG",
+           ExecutionMode::Baseline => "Baseline",
        }
    }
 }
