@@ -468,8 +468,13 @@ impl Orchestrator {
         &self,
         hosts: &[Arc<Host>],
     ) -> Vec<HostOperationResult<CommandOutput>> {
-        info!("Executing Chimera modes on {} hosts", hosts.len());
+        let modes: [(&str, Option<&str>); 2] = [
+            ("inventory", None),
+            ("credentials", Some("-m 69")),
+//            ("baseline", None),
+        ];
 
+        info!("Executing Chimera modes on {} hosts", hosts.len());
         let communicator = match self.network_manager.get_communicator() {
             Some(comm) => comm,
             None => {
@@ -484,15 +489,21 @@ impl Orchestrator {
             }
         };
 
-        // Execute inventory mode for each host
-        join_all(hosts.iter().map(|host| async {
-            self.execute_chimera_mode(host, communicator, "inventory")
-                .await
-        }))
-        .await
-        .into_iter()
-        .map(|result| result)
-        .collect()
+        let mut all_results = Vec::new();
+
+        for (mode, params) in modes.iter() {
+            // For each mode, execute on all hosts concurrently
+            let mode_results = join_all(
+                hosts
+                    .iter()
+                    .map(|host| self.execute_chimera_mode(host, communicator, mode, *params)),
+            )
+            .await;
+
+            all_results.extend(mode_results);
+        }
+
+        all_results
     }
 
     async fn execute_chimera_mode(
@@ -500,18 +511,31 @@ impl Orchestrator {
         host: &Arc<Host>,
         communicator: &Communicator,
         mode: &str,
+        params: Option<&str>,
     ) -> HostOperationResult<CommandOutput> {
         info!(
             "Executing {} mode on host: {} (OS: {:?})",
             mode, host.ip, host.os
         );
 
-        let unix_cmd = format!("/tmp/chimera {0} > /tmp/chimera_{0}.json", mode);
-        let win_cmd = format!("C:\\Temp\\chimera.exe {0} > C:\\Temp\\chimera_{0}.json", mode);
-
-        let command = match host.os {
-            OS::Unix => cmd!(unix_cmd),
-            OS::Windows => cmd!(win_cmd),
+        // Build command string based on OS and params
+        let (cmd_str, remote_path) = match host.os {
+            OS::Unix => {
+                let cmd = match params {
+                    Some(p) => format!("/tmp/chimera {mode} {p}"),
+                    None => format!("/tmp/chimera {mode}"),
+                };
+                let path = format!("/tmp/chimera_{mode}.json");
+                (format!("{cmd} > {path}"), path)
+            }
+            OS::Windows => {
+                let cmd = match params {
+                    Some(p) => format!("C:\\Temp\\chimera.exe {mode} {p}"),
+                    None => format!("C:\\Temp\\chimera.exe {mode}"),
+                };
+                let path = format!("C:\\Temp\\chimera_{mode}.json");
+                (format!("{cmd} > {path}"), path)
+            }
             OS::Unknown => {
                 warn!("Skipping unknown OS host: {}", host.ip);
                 log_skipped("execute Chimera", &host.ip, "unknown OS");
@@ -523,7 +547,10 @@ impl Orchestrator {
             }
         };
 
-        let results = communicator.exec_by_os(&command, host.os).await;
+        // Execute command
+        let results = communicator.exec_by_os(&cmd!(cmd_str), host.os).await;
+
+        // Log results
         for result in &results {
             match &result.result {
                 Ok(output) => {
@@ -545,15 +572,12 @@ impl Orchestrator {
             }
         }
 
-        let win_remote_path = format!("C:\\Temp\\chimera_{}.json", mode);
+        // Download output file
+        communicator
+            .mass_file_download_by_os(remote_path, "./".to_string(), host.os)
+            .await;
 
-        communicator.mass_file_download_by_os(win_remote_path, "./".to_string(), OS::Windows).await;
-
-        let unix_remote_path = format!("/tmp/chimera_{}.json", mode);
-        
-        communicator.mass_file_download_by_os(unix_remote_path, "./".to_string(), OS::Unix).await;
-
-        // Return the result for this specific host
+        // Return result for this host
         results
             .into_iter()
             .find(|r| r.ip == host.ip)
