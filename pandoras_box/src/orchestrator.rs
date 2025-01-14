@@ -20,9 +20,33 @@ use std::time::Duration;
 
 use crate::logging::{log_failure, log_output, log_results, log_skipped, log_success};
 
-// Constants for Chimera binaries (placeholder)
 static CHIMERA_UNIX: &[u8] = include_bytes!("../resources/chimera");
 static CHIMERA_WIN: &[u8] = include_bytes!("../resources/chimera.exe");
+
+// Define a struct for mode configuration
+#[derive(Debug, Clone)]
+struct ModeConfig<'a> {
+    name: &'a str,
+    args: Option<&'a str>,
+}
+
+// Define the available modes with their optional arguments
+const CHIMERA_MODES: [ModeConfig; 2] = [
+    ModeConfig {
+        name: "inventory",
+        args: None,
+    },
+    /*
+    ModeConfig {
+        name: "baseline",
+        args: None,
+    },
+    */
+    ModeConfig {
+        name: "credentials",
+        args: Some("-m 1234"),
+    }, // Example magic number
+];
 
 pub struct NetworkManager {
     enumerator: Enumerator,
@@ -85,15 +109,29 @@ impl NetworkManager {
         hosts: &[Arc<Host>],
         password: &str,
     ) -> Result<Vec<(Arc<Host>, Result<OSConfig>)>> {
-        // Changed return type to match what we need
-        Ok(stream::iter(hosts)
+        // Filter out Unix/Unknown hosts without port 22 first
+        let filtered_hosts: Vec<Arc<Host>> = hosts
+            .iter()
+            .filter(|host| {
+                if matches!(host.os, OS::Unix | OS::Unknown) && !host.open_ports.contains(&22) {
+                    log_skipped("config creation", &host.ip, "port 22 not open");
+                    false
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+
+        // Process the filtered hosts as before
+        Ok(stream::iter(filtered_hosts)
             .map(|host| async move {
-                match self.create_single_config(host, password).await {
+                match self.create_single_config(&host, password).await {
                     Ok((config, maybe_updated_host)) => (
-                        maybe_updated_host.unwrap_or_else(|| Arc::clone(host)),
+                        maybe_updated_host.unwrap_or_else(|| Arc::clone(&host)),
                         Ok(config),
                     ),
-                    Err(e) => (Arc::clone(host), Err(e)),
+                    Err(e) => (Arc::clone(&host), Err(e)),
                 }
             })
             .buffer_unordered(32)
@@ -160,7 +198,7 @@ impl NetworkManager {
             return Err(Error::NoSSHPort);
         }
 
-        match SSHConfig::password("root", password, socket_addr, Duration::from_secs(30)).await {
+        match SSHConfig::password("root", password, socket_addr, Duration::from_secs(300)).await {
             Ok(config) => {
                 let updated_host = if host.os == OS::Unknown {
                     // Create new Host with Unix OS
@@ -203,7 +241,7 @@ impl NetworkManager {
             "Administrator",
             password,
             socket_addr,
-            Duration::from_secs(30),
+            Duration::from_secs(300),
         )
         .await
         .map(windows_config)
@@ -211,13 +249,18 @@ impl NetworkManager {
     }
 
     async fn try_windows_winexe(&self, host: &Arc<Host>, password: &str) -> Result<OSConfig> {
-        WinexeConfig::password("Administrator", password, &host.ip, Duration::from_secs(30))
-            .await
-            .map(windows_config)
-            .map_err(|e| {
-                warn!("Failed to create WinExe config for {}: {}", host.ip, e);
-                e.into()
-            })
+        WinexeConfig::password(
+            "Administrator",
+            password,
+            &host.ip,
+            Duration::from_secs(300),
+        )
+        .await
+        .map(windows_config)
+        .map_err(|e| {
+            warn!("Failed to create WinExe config for {}: {}", host.ip, e);
+            e.into()
+        })
     }
 }
 
@@ -464,62 +507,157 @@ impl Orchestrator {
             .collect()
     }
 
+    async fn execute_mode_windows(
+        &self,
+        communicator: &Communicator,
+        mode: &ModeConfig<'_>,
+    ) -> Vec<HostOperationResult<CommandOutput>> {
+        let output_file = format!("C:\\Temp\\chimera_{}.json", mode.name);
+        let cmd = Self::build_command("C:\\Temp\\chimera.exe", mode, &output_file);
+
+        info!(
+            "Executing {} mode for Windows hosts {}",
+            mode.name,
+            mode.args.unwrap_or("")
+        );
+        communicator.exec_by_os(&cmd!(cmd), OS::Windows).await
+    }
+
+    async fn execute_mode_unix(
+        &self,
+        communicator: &Communicator,
+        mode: &ModeConfig<'_>,
+    ) -> Vec<HostOperationResult<CommandOutput>> {
+        let output_file = format!("/tmp/chimera_{}.json", mode.name);
+        let cmd = Self::build_command("/tmp/chimera", mode, &output_file);
+
+        info!(
+            "Executing {} mode for Unix hosts {}",
+            mode.name,
+            mode.args.unwrap_or("")
+        );
+        communicator.exec_by_os(&cmd!(cmd), OS::Unix).await
+    }
+
+    async fn download_results_windows(&self, communicator: &Communicator, mode: &str) {
+        let remote_path = format!("C:\\Temp\\chimera_{}.json", mode);
+        let local_prefix = format!("./chimera_{}_", mode);
+
+        info!("Downloading {} mode results from Windows hosts", mode);
+        let results = communicator
+            .mass_file_download_by_os(remote_path, local_prefix, OS::Windows)
+            .await;
+
+        for result in &results {
+            match &result.result {
+                Ok(_) => info!(
+                    "Successfully downloaded {} results from {}",
+                    mode, result.ip
+                ),
+                Err(e) => error!(
+                    "Failed to download {} results from {}: {}",
+                    mode, result.ip, e
+                ),
+            }
+        }
+    }
+
+    async fn download_results_unix(&self, communicator: &Communicator, mode: &str) {
+        let remote_path = format!("/tmp/chimera_{}.json", mode);
+        let local_prefix = format!("./chimera_{}_", mode);
+
+        info!("Downloading {} mode results from Unix hosts", mode);
+        let results = communicator
+            .mass_file_download_by_os(remote_path, local_prefix, OS::Unix)
+            .await;
+
+        for result in &results {
+            match &result.result {
+                Ok(_) => info!(
+                    "Successfully downloaded {} results from {}",
+                    mode, result.ip
+                ),
+                Err(e) => error!(
+                    "Failed to download {} results from {}: {}",
+                    mode, result.ip, e
+                ),
+            }
+        }
+    }
+
+    fn handle_missing_communicator_results(
+        &self,
+        hosts: &[Arc<Host>],
+    ) -> Vec<HostOperationResult<CommandOutput>> {
+        hosts
+            .iter()
+            .map(|host| HostOperationResult {
+                ip: host.ip.to_string(),
+                os: host.os,
+                result: Err(Error::CommandError("Communicator not initialized".into())),
+            })
+            .collect()
+    }
+
+    fn build_command(binary_path: &str, mode: &ModeConfig, output_file: &str) -> String {
+        match mode.args {
+            Some(args) => format!("{} {} {} > {}", binary_path, mode.name, args, output_file),
+            None => format!("{} {} > {}", binary_path, mode.name, output_file),
+        }
+    }
+
     async fn execute_chimera_modes(
         &self,
         hosts: &[Arc<Host>],
     ) -> Vec<HostOperationResult<CommandOutput>> {
-        let modes: [(&str, Option<&str>); 2] = [
-            ("inventory", None),
-            ("credentials", Some("-m 69")),
-//            ("baseline", None),
-        ];
-
         info!("Executing Chimera modes on {} hosts", hosts.len());
+
         let communicator = match self.network_manager.get_communicator() {
             Some(comm) => comm,
             None => {
-                return hosts
-                    .iter()
-                    .map(|host| HostOperationResult {
-                        ip: host.ip.to_string(),
-                        os: host.os,
-                        result: Err(Error::CommandError("Communicator not initialized".into())),
-                    })
-                    .collect();
+                return self.handle_missing_communicator_results(hosts);
             }
         };
 
         let mut all_results = Vec::new();
 
-        for (mode, params) in modes.iter() {
-            // For each mode, execute on all hosts concurrently
-            let mode_results = join_all(
-                hosts
-                    .iter()
-                    .map(|host| self.execute_chimera_mode(host, communicator, mode, *params)),
-            )
-            .await;
+        // Execute each mode for both Windows and Unix hosts
+        for mode in CHIMERA_MODES.iter() {
+            info!("Processing mode: {} {}", mode.name, mode.args.unwrap_or(""));
 
-            all_results.extend(mode_results);
+            // Windows execution
+            if hosts.iter().any(|h| h.os == OS::Windows) {
+                let results = self.execute_mode_windows(communicator, mode).await;
+                all_results.extend(results);
+
+                // Download results for this mode
+                self.download_results_windows(communicator, mode.name).await;
+            }
+
+            // Unix execution
+            if hosts.iter().any(|h| h.os == OS::Unix) {
+                let results = self.execute_mode_unix(communicator, mode).await;
+                all_results.extend(results);
+
+                // Download results for this mode
+                self.download_results_unix(communicator, mode.name).await;
+            }
         }
 
         all_results
     }
 
-    async fn execute_chimera_mode(
+    async fn execute_chimera_mode_for_os(
         &self,
-        host: &Arc<Host>,
+        os_type: OS,
         communicator: &Communicator,
         mode: &str,
         params: Option<&str>,
-    ) -> HostOperationResult<CommandOutput> {
-        info!(
-            "Executing {} mode on host: {} (OS: {:?})",
-            mode, host.ip, host.os
-        );
+    ) -> Vec<HostOperationResult<CommandOutput>> {
+        info!("Executing {} mode for OS type: {:?}", mode, os_type);
 
-        // Build command string based on OS and params
-        let (cmd_str, remote_path) = match host.os {
+        // Build command string based on OS
+        let (cmd_str, remote_path) = match os_type {
             OS::Unix => {
                 let cmd = match params {
                     Some(p) => format!("/tmp/chimera {mode} {p}"),
@@ -536,19 +674,11 @@ impl Orchestrator {
                 let path = format!("C:\\Temp\\chimera_{mode}.json");
                 (format!("{cmd} > {path}"), path)
             }
-            OS::Unknown => {
-                warn!("Skipping unknown OS host: {}", host.ip);
-                log_skipped("execute Chimera", &host.ip, "unknown OS");
-                return HostOperationResult {
-                    ip: host.ip.clone(),
-                    os: host.os,
-                    result: Err(Error::UnknownOS),
-                };
-            }
+            OS::Unknown => return Vec::new(),
         };
 
-        // Execute command
-        let results = communicator.exec_by_os(&cmd!(cmd_str), host.os).await;
+        // Execute command for all hosts of this OS type
+        let results = communicator.exec_by_os(&cmd!(cmd_str), os_type).await;
 
         // Log results
         for result in &results {
@@ -572,20 +702,7 @@ impl Orchestrator {
             }
         }
 
-        // Download output file
-        communicator
-            .mass_file_download_by_os(remote_path, "./".to_string(), host.os)
-            .await;
-
-        // Return result for this host
         results
-            .into_iter()
-            .find(|r| r.ip == host.ip)
-            .unwrap_or_else(|| HostOperationResult {
-                ip: host.ip.clone(),
-                os: host.os,
-                result: Err(Error::CommandError("No result found for host".into())),
-            })
     }
 }
 

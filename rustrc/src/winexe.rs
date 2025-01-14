@@ -479,9 +479,20 @@ impl WinexeContainer {
             return Ok(());
         }
 
+        let check = self
+            .exec(&cmd!("if not exist C:\\Temp\\ echo TRUE"))
+            .await?;
+
+        let check_stdout = String::from_utf8_lossy(&check.stdout);
+
+        if check_stdout.matches("TRUE").count() > 1 {
+            self.exec(&cmd!("mkdir C:\\Temp")).await?;
+        }
+
         // Write the entire content in one echo command
         let transfer_helper = include_str!("../resources/transfer_file.bat");
         let base64_content = base64::encode(transfer_helper);
+
 
         // First write the base64 string
         let echo_command = format!("echo {}> C:\\Temp\\transfer_file.b64", base64_content);

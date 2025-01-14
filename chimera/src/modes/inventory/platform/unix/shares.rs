@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
-use serde::{Deserialize, Serialize};
 use crate::types::{Share, ShareType};
 
 pub fn read_smb_shares() -> io::Result<Vec<Share>> {

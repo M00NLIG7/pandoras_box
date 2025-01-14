@@ -1,6 +1,6 @@
 use crate::types::{ConnectionState, NetworkConnection, OpenPort, Process as ProcessInfo};
 use procfs::net::{TcpNetEntry, TcpState, UdpNetEntry, UdpState};
-use procfs::process::{FDTarget, Process, Stat};
+use procfs::process::{FDTarget, Stat};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -186,7 +186,7 @@ pub async fn conn_info() -> (Vec<NetworkConnection>, Vec<OpenPort>) {
     let _ = tokio::join!(tcp_task, udp_task, tcp6_task, udp6_task);
     let _ = collector.await;
 
-    let mut connections = Arc::try_unwrap(connections).unwrap().into_inner();
+    let connections = Arc::try_unwrap(connections).unwrap().into_inner();
     let mut open_ports = Arc::try_unwrap(open_ports).unwrap().into_inner();
 
     open_ports.sort_by_key(|p| (p.port, p.protocol.clone()));

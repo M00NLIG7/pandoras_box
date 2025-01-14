@@ -5,9 +5,8 @@ use crate::error::Result;
 use crate::types::{ExecutionMode, ExecutionResult};
 use include_crypt::{include_crypt, EncryptedFile};
 use local_ip_address::local_ip;
-use log::{debug, error, info};
+use log::{debug, error};
 use std::net::IpAddr;
-use std::process::Output;
 
 const PASSWORD_SCHEMA: EncryptedFile = include_crypt!(".password");
 

@@ -1,10 +1,8 @@
 mod platform;
 
 use super::ModeExecutor;
-use crate::error::Result;
 use crate::types::{ExecutionMode, ExecutionResult};
-use include_crypt::{include_crypt, EncryptedFile};
-use log::{debug, error, info};
+use log::error;
 
 pub struct BaselineMode;
 

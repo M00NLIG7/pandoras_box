@@ -34,6 +34,11 @@ pub struct CommandOutput {
     pub stderr: Vec<u8>,
     pub status_code: Option<u32>,
 }
+/*
+let command_str: String = cmd.into();
+    |                                       ^^^^ the trait `From<&client::Command>` is not implemented for `std::string::String`, which is required by `&client::Command: Into<_>`
+
+*/
 
 /// Enum representing the connection state.
 pub enum ConnectionState {
@@ -43,10 +48,22 @@ pub enum ConnectionState {
 }
 
 /// Struct representing a command that can be executed on the server.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Command {
     pub cmd: String,
     pub args: Vec<String>,
+}
+
+impl From<&Command> for String {
+    fn from(command: &Command) -> Self {
+        std::iter::once(command.cmd.as_str()) // Convert the command into a byte slice wrapped in an iterator
+            .chain(command.args.iter().flat_map(
+                |arg| // For each arg, create an iterator of the space and the arg bytes
+                std::iter::once(" ").chain(std::iter::once(arg.as_str())),
+            ))
+            .collect::<Vec<&str>>()
+            .join("")
+    }
 }
 
 impl From<Command> for Vec<u8> {
