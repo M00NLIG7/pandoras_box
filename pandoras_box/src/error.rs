@@ -35,6 +35,11 @@ pub enum Error {
     #[error("Deployment error: {0}")]
     DeploymentError(String),
 
+    #[error("File Transfer error: {0}")]
+    FileTransferError(String),
+
+    #[error("Invalid Subnet: {0}")]
+    InvalidSubnet(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

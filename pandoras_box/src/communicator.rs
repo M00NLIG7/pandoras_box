@@ -1,10 +1,14 @@
 use crate::{Error, Result, OS};
 use futures::future::{join_all, BoxFuture};
+use futures::StreamExt;
+use log::{debug, error, info};
 use rustrc::client::{Client, Command, CommandOutput, Config};
 use rustrc::ssh::SSHConfig;
 use rustrc::winexe::WinexeConfig;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub enum Either<L, R> {
     Left(L),
@@ -181,6 +185,8 @@ impl Communicator {
         cmd: &Command,
         os_type: OS,
     ) -> Vec<HostOperationResult<CommandOutput>> {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
         join_all(
             self.clients
                 .iter()
@@ -213,6 +219,8 @@ impl Communicator {
         local_path: String,
         os_type: OS,
     ) -> Vec<HostOperationResult<()>> {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
         join_all(
             self.clients
                 .iter()
@@ -222,11 +230,97 @@ impl Communicator {
                     let local_dir = local_path.clone();
                     async move {
                         let local_path = format!("{}{}", local_dir, ip);
-                        println!("Downloading from {} to {}", dest_clone, local_path);
+
+                        // First verify the remote file
+                        let verify_cmd = match os {
+                            OS::Windows => format!("cmd.exe /c dir \"{}\"", dest_clone),
+                            OS::Unix => format!("ls -l \"{}\"", dest_clone),
+                            OS::Unknown => {
+                                return HostOperationResult {
+                                    ip: ip.to_string(),
+                                    os: *os,
+                                    result: Err(Error::UnknownOS),
+                                }
+                            }
+                        };
+
+                        match client.exec(&rustrc::cmd!(verify_cmd)).await {
+                            Ok(output) => {
+                                let output_str = String::from_utf8_lossy(&output.stdout);
+                                debug!("File verification output for {}: {}", ip, output_str);
+
+                                if output_str.contains("not found")
+                                    || output_str.contains("No such file")
+                                {
+                                    error!("Remote file not found on {}: {}", ip, dest_clone);
+                                    return HostOperationResult {
+                                        ip: ip.to_string(),
+                                        os: *os,
+                                        result: Err(Error::FileTransferError(format!(
+                                            "Remote file not found on {}",
+                                            ip
+                                        ))),
+                                    };
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to verify file on {}: {}", ip, e);
+                                return HostOperationResult {
+                                    ip: ip.to_string(),
+                                    os: *os,
+                                    result: Err(e),
+                                };
+                            }
+                        }
+
+                        info!("Downloading from {} to {}", dest_clone, local_path);
+
+                        // Try the download with detailed error logging
+                        let result = match client
+                            .download_file(dest_clone.clone(), local_path.clone())
+                            .await
+                        {
+                            Ok(_) => {
+                                // Verify the downloaded file
+                                match tokio::fs::metadata(&local_path).await {
+                                    Ok(metadata) => {
+                                        if metadata.len() == 0 {
+                                            error!("Downloaded empty file for {}", ip);
+                                            Err(Error::FileTransferError(format!(
+                                                "Downloaded empty file from {}",
+                                                ip
+                                            )))
+                                        } else {
+                                            info!(
+                                                "Successfully downloaded {}B from {}",
+                                                metadata.len(),
+                                                ip
+                                            );
+                                            Ok(())
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "Failed to verify downloaded file for {}: {}",
+                                            ip, e
+                                        );
+                                        Err(Error::FileTransferError(format!(
+                                            "Failed to verify downloaded file: {}",
+                                            e
+                                        )))
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Download failed for {}: {}", ip, e);
+                                Err(e)
+                            }
+                        };
+
                         HostOperationResult {
                             ip: ip.to_string(),
                             os: *os,
-                            result: client.download_file(dest_clone, local_path).await,
+                            result,
                         }
                     }
                 }),
@@ -240,6 +334,9 @@ impl Communicator {
         destination: String,
         os_type: OS,
     ) -> Vec<HostOperationResult<()>> {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Use join_all like exec_by_os for sequential processing
         join_all(
             self.clients
                 .iter()
@@ -248,6 +345,7 @@ impl Communicator {
                     let file_clone = Arc::clone(&file);
                     let dest_clone = destination.clone();
                     async move {
+                        debug!("Starting transfer for {}", ip);
                         HostOperationResult {
                             ip: ip.to_string(),
                             os: *os,
@@ -334,8 +432,22 @@ async fn test_communicator() {
     let socket_1 = format!("{}:{}", ip1, 22);
     let socket_2 = format!("{}:{}", ip2, 22);
 
-    let config_1 = SSHConfig::password("Administrator", "Cheesed2MeetU!", socket_1, std::time::Duration::from_secs(60)).await.unwrap();
-    let config_2 = SSHConfig::password("Administrator", "Cheesed2MeetU!", socket_2, std::time::Duration::from_secs(60)).await.unwrap();
+    let config_1 = SSHConfig::password(
+        "Administrator",
+        "Cheesed2MeetU!",
+        socket_1,
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    let config_2 = SSHConfig::password(
+        "Administrator",
+        "Cheesed2MeetU!",
+        socket_2,
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
 
     let communicator = Communicator::new(vec![
         (ip1, windows_config(config_1.clone())),
@@ -344,18 +456,36 @@ async fn test_communicator() {
     .await
     .unwrap();
 
-    let chimera_exe = include_bytes!("../../../../../chimera.exe");
-    let results = communicator.mass_file_transfer_by_os(Arc::new(chimera_exe.to_vec()), "C:\\temp\\chimera.exe".into(), OS::Windows).await;
+    let chimera_exe = include_bytes!("../resources/chimera.exe");
+    let results = communicator
+        .mass_file_transfer_by_os(
+            Arc::new(chimera_exe.to_vec()),
+            "C:\\temp\\chimera.exe".into(),
+            OS::Windows,
+        )
+        .await;
     for result in results {
         println!("{:?}", result);
     }
 
-    let results = communicator.exec_by_os(&rustrc::cmd!("C:\\temp\\chimera.exe inventory > C:\\temp\\inventory.json"), OS::Windows).await;
+    let results = communicator
+        .exec_by_os(
+            &rustrc::cmd!("C:\\temp\\chimera.exe inventory > C:\\temp\\inventory.json"),
+            OS::Windows,
+        )
+        .await;
+
     for result in results {
         println!("{:?}", result);
     }
 
-    let results = communicator.mass_file_download_by_os("C:\\temp\\inventory.json".into(), "./inventory".into(), OS::Windows).await;
+    let results = communicator
+        .mass_file_download_by_os(
+            "C:\\temp\\inventory.json".into(),
+            "./inventory".into(),
+            OS::Windows,
+        )
+        .await;
 
     for result in results {
         println!("{:?}", result);

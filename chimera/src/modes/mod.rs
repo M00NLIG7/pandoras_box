@@ -2,11 +2,8 @@ pub mod baseline;
 pub mod credentials;
 pub mod inventory;
 
-use crate::error::{Error, Result};
 
-use crate::types::{ExecutionMode, ExecutionResult};
-use log::{debug, error, info};
-use std::future::Future;
+use crate::types::ExecutionResult;
 
 pub trait ModeExecutor {
     type Args;

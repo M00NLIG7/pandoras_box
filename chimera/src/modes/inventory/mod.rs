@@ -13,7 +13,7 @@ use local_ip_address::local_ip;
 use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt};
 use serde_json::{Map, Value};
 use futures::future::join_all;
-use log::{debug, error, info};
+use log::{debug, error};
 
 pub struct InventoryMode {
     system: System,

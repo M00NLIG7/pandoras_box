@@ -3,14 +3,9 @@
 //! This module contains the core types used for system automation
 //! across both Windows and Linux systems.
 
-use std::ops::{Deref, DerefMut};
-use std::fmt;
-use zeroize::{Zeroize, Zeroizing};
-use std::mem::ManuallyDrop;
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
 use chrono::{DateTime, Utc};
-use log::{debug, error, info, warn};
+use log::{error, info};
 
 
 
