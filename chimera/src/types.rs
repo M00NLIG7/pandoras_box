@@ -64,6 +64,9 @@ pub enum ExecutionMode {
    /// * Set up Auditd logging
    /// * Configure fail2ban
    Baseline,
+
+   /// Serve inventory and log
+   Serve,
 }
 
 /// Result of an execution operation
@@ -112,6 +115,7 @@ impl ExecutionMode {
            ExecutionMode::Inventory => "Performs system inventory and asset discovery",
            ExecutionMode::Update => "Handles system updates and patch management",
            ExecutionMode::Baseline => "Implements OS-specific security configurations",
+           ExecutionMode::Serve => "Serves inventory and log",
        }
    }
 
@@ -122,7 +126,8 @@ impl ExecutionMode {
            ExecutionMode::Credentials => "CREDS",
            ExecutionMode::Inventory => "INVEN",
            ExecutionMode::Update => "UPDATE",
-           ExecutionMode::Baseline => "Baseline",
+           ExecutionMode::Baseline => "BASELINE",
+           ExecutionMode::Serve => "SERVE",
        }
    }
 }

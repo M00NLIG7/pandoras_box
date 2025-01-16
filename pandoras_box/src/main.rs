@@ -2,12 +2,9 @@ use chrono::Local;
 use clap::{arg as carg, command, value_parser};
 use log::{debug, error, info, warn};
 use pandoras_box::*;
-use std::collections::BinaryHeap;
 use std::fs::OpenOptions;
-use std::io::Read;
 use std::process::Command;
-use std::sync::{Arc, Mutex, Once};
-use tokio::sync::watch;
+use std::sync::Once;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 

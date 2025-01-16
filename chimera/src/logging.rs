@@ -2,7 +2,7 @@ use std::io::Write;
 use log::SetLoggerError;
 use chrono::Local;
 
-const DEFAULT_LOG_FILE: &str = "application.log";
+const DEFAULT_LOG_FILE: &str = "./output/application.log";
 
 pub struct MultiWriter {
     writers: Vec<Box<dyn Write + Send + Sync>>
@@ -25,6 +25,9 @@ impl Write for MultiWriter {
 }
 
 pub fn init_logging() -> Result<(), SetLoggerError> {
+    // Create ./output directory if it doesn't exist
+    std::fs::create_dir_all("./output").expect("Failed to create output directory");
+
     let env = env_logger::Env::default().default_filter_or("info");
     
     env_logger::Builder::from_env(env)

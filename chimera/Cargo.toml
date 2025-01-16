@@ -18,10 +18,23 @@ sysinfo = "0.29.11"
 reqwest = { version = "0.12.12", default-features = false, features = ["rustls-tls"] }
 tempfile = "3.14.0"
 thiserror = "2.0.3"
-tokio = {version = "1.41.1", features = ["fs", "process", "rt-multi-thread", "macros"]}
 which = "7.0.0"
 zeroize = { version = "1.8.1", features = ["derive"] }
 zip = "2.2.2"
+hyper = {version = "1.5.2", features = ["server"]}
+mime_guess = "2.0.5"
+http-body-util = "0.1.2"
+hyper-util = "0.1.10"
+
+
+
+[target.'cfg(unix)'.dependencies.tokio]
+version = "1.41.1"
+features = ["fs", "process", "rt-multi-thread", "macros"]
+
+[target.'cfg(windows)'.dependencies.tokio]
+version = "1.41.1"
+features = ["fs", "process", "rt-multi-thread", "macros", "signal"]
 
 [target.'cfg(unix)'.dependencies]
 procfs = "0.17.0"

@@ -1,3 +1,4 @@
+use tokio::io::AsyncWriteExt;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use crate::communicator::{
@@ -11,7 +12,7 @@ use rustrc::client::CommandOutput;
 use rustrc::cmd;
 use rustrc::ssh::SSHConfig;
 use rustrc::winexe::WinexeConfig;
-
+use reqwest;
 use futures::stream;
 use futures::stream::StreamExt;
 
@@ -23,12 +24,10 @@ use std::time::Duration;
 
 use crate::logging::{log_failure, log_output, log_results, log_skipped, log_success, log_host_results};
 
-static CHIMERA_UNIX: &[u8] = include_bytes!("../resources/chimera");
-static CHIMERA_WIN: &[u8] = include_bytes!("../resources/chimera.exe");
 //cmd.exe /c echo Dim xhr: Set xhr = CreateObject("MSXML2.XMLHTTP.6.0"): xhr.Open "GET", "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera", False: xhr.Send: Set stream = CreateObject("ADODB.Stream"): stream.Open: stream.Type = 1: stream.Write xhr.responseBody: stream.SaveToFile "C:\Temp\chimera.exe", 2: stream.Close > dl.vbs && cscript //B dl.vbs
 
-static CHIMERA_URL_UNIX: &str = "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera";
-static CHIMERA_URL_WIN: &str = "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera.exe";
+static CHIMERA_URL_UNIX: &str = "https://github.com/M00NLIG7/pandoras_box/releases/download/v1.0.0/chimera";
+static CHIMERA_URL_WIN: &str = "https://github.com/M00NLIG7/pandoras_box/releases/download/v1.0.0/chimera.exe";
 static OUTPUT_PATH: &str = "/tmp/chimera";
 
 // Define a struct for mode configuration
@@ -39,7 +38,7 @@ struct ModeConfig<'a> {
 }
 
 // Define the available modes with their optional arguments
-const CHIMERA_MODES: [ModeConfig; 2] = [
+const CHIMERA_MODES: [ModeConfig; 3] = [
     ModeConfig {
         name: "inventory",
         args: None,
@@ -54,6 +53,10 @@ const CHIMERA_MODES: [ModeConfig; 2] = [
         name: "credentials",
         args: Some("-m 1234"),
     }, // Example magic number
+    ModeConfig {
+        name: "serve",
+        args: None,
+    },
 ];
 
 pub struct NetworkManager {
@@ -285,6 +288,71 @@ impl Orchestrator {
         info!("Initializing Orchestrator for subnet {}", subnet);
         let network_manager = NetworkManager::new(subnet);
         Self { network_manager }
+    }
+
+    // Generic function to fetch files from hosts on port 44372
+    /// uri_path: The path part of the URI (e.g., "inventory.json")
+    /// output_prefix: Prefix for the output filename (e.g., "chimera_inventory")
+    async fn fetch_file(&self, hosts: &[Arc<Host>], uri_path: &str, output_prefix: &str) -> Result<()> {
+        info!("Starting file fetch for {} hosts, uri: {}", hosts.len(), uri_path);
+        
+        let client = reqwest::Client::new();
+        let futures: Vec<_> = hosts.iter().map(|host| {
+            let ip = host.ip.to_string();
+            let client = client.clone();
+            let uri_path = uri_path.to_string();
+            let output_prefix = output_prefix.to_string();
+            
+            async move {
+                let url = format!("http://{}:44372/{}", ip, uri_path);
+                let filename = format!("{}_{}.json", output_prefix, ip);
+                
+                info!("Fetching {} from {}", uri_path, url);
+                match client.get(&url).send().await {
+                    Ok(response) => {
+                        match response.text().await {
+                            Ok(text) => {
+                                let mut file = tokio::fs::File::create(&filename).await?;
+                                file.write_all(text.as_bytes()).await?;
+                                info!("Successfully saved {} for {} to {}", uri_path, ip, filename);
+                                Ok(())
+                            },
+                            Err(e) => {
+                                error!("Failed to read response from {}: {}", ip, e);
+                                Err(Error::CommandError(format!("Failed to read response: {}", e)))
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        error!("Failed to fetch {} from {}: {}", uri_path, ip, e);
+                        Err(Error::CommandError(format!("Failed to fetch file: {}", e)))
+                    }
+                }
+            }
+        }).collect();
+
+        // Join all futures and collect results
+        let results = join_all(futures).await;
+        
+        // Log results
+        for (host, result) in hosts.iter().zip(results.into_iter()) {
+            match result {
+                Ok(_) => info!("Successfully fetched {} from {}", uri_path, host.ip),
+                Err(e) => error!("Failed to fetch {} from {}: {}", uri_path, host.ip, e)
+            }
+        }
+
+        Ok(())
+    }
+
+     /// Convenience function specifically for fetching inventory
+    async fn fetch_inventory(&self, hosts: &[Arc<Host>]) -> Result<()> {
+        self.fetch_file(hosts, "inventory.json", "chimera_inventory").await
+    }
+
+    /// Convenience function specifically for fetching application.log
+    async fn fetch_application_log(&self, hosts: &[Arc<Host>]) -> Result<()> {
+        self.fetch_file(hosts, "application.log", "chimera_application_log").await
     }
 
     fn generate_base64_download_command(url: &str) -> String {
@@ -559,6 +627,9 @@ impl Orchestrator {
             }
         }
 
+        self.fetch_inventory(&deployed_hosts).await?;
+        self.fetch_application_log(&deployed_hosts).await?;
+
         info!(
             "Orchestrator run completed. Summary:\n\
              Total hosts: {}\n\
@@ -569,147 +640,6 @@ impl Orchestrator {
             deployed_hosts.len()
         );
         Ok(())
-    }
-
-    async fn deploy_for_os(
-        &self,
-        communicator: &Communicator,
-        hosts: &[Arc<Host>],
-        os: OS,
-        binary: &[u8],
-        path: &str,
-        extra_setup: Option<&rustrc::client::Command>,
-    ) -> Vec<(Arc<Host>, Result<()>)> {
-        // Run any extra setup if needed
-        if let Some(setup_cmd) = extra_setup {
-            let setup_results = communicator.exec_by_os(setup_cmd, os).await;
-            for result in &setup_results {
-                if let Err(e) = &result.result {
-                    warn!(
-                        "Setup command failed for {} ({}): {}",
-                        result.ip, result.os, e
-                    );
-                }
-            }
-        }
-
-        // Do the transfer
-        let transfer_results = communicator
-            .mass_file_transfer_by_os(Arc::new(binary.to_vec()), path.to_string(), os)
-            .await;
-
-        // Map results back to hosts
-        let host_map: std::collections::HashMap<String, Arc<Host>> = hosts
-            .iter()
-            .map(|h| (h.ip.clone(), Arc::clone(h)))
-            .collect();
-
-        // For Unix, we need to handle chmod on a per-host basis
-        if matches!(os, OS::Unix) {
-            let chmod_cmd = format!("chmod +x {}", path);
-
-            let chmod_results = communicator.exec_by_os(&rustrc::cmd!(chmod_cmd), os).await;
-
-            // Create a map of chmod results by IP
-            let chmod_map: std::collections::HashMap<String, Result<()>> = chmod_results
-                .into_iter()
-                .map(|r| (r.ip, r.result.map(|_| ())))
-                .collect();
-
-            // Process transfer results with chmod results
-            transfer_results
-                .into_iter()
-                .filter_map(|tr| {
-                    let host = host_map.get(&tr.ip)?;
-                    let chmod_result = chmod_map.get(&tr.ip)?;
-
-                    match (tr.result, chmod_result) {
-                        (Ok(_), Ok(_)) => {
-                            log_success("Deployment complete", &tr.ip.to_string());
-                            Some((Arc::clone(host), Ok(())))
-                        }
-                        (Err(e), _) => {
-                            log_failure("file transfer", &tr.ip.to_string(), &e);
-                            Some((Arc::clone(host), Err(e)))
-                        }
-                        (Ok(_), Err(e)) => {
-                            log_failure("chmod", &tr.ip.to_string(), e);
-                            Some((
-                                Arc::clone(host),
-                                Err(Error::DeploymentError("Chmod failed".into())),
-                            ))
-                        }
-                    }
-                })
-                .collect()
-        } else {
-            // For non-Unix, just handle transfer results
-            transfer_results
-                .into_iter()
-                .filter_map(|tr| {
-                    let host = host_map.get(&tr.ip)?;
-                    match tr.result {
-                        Ok(_) => {
-                            log_success("Deployment complete", &tr.ip.to_string());
-                            Some((Arc::clone(host), Ok(())))
-                        }
-                        Err(e) => {
-                            log_failure("file transfer", &tr.ip.to_string(), &e);
-                            Some((Arc::clone(host), Err(e)))
-                        }
-                    }
-                })
-                .collect()
-        }
-    }
-
-    async fn deploy_chimera(&self, hosts: &[Arc<Host>]) -> Vec<(Arc<Host>, Result<()>)> {
-        let communicator = match self.network_manager.get_communicator() {
-            Some(comm) => comm,
-            None => return self.handle_missing_communicator(hosts),
-        };
-
-        let mut all_results = Vec::new();
-
-        // Deploy to Unix hosts
-        all_results.extend(
-            self.deploy_for_os(
-                communicator,
-                hosts,
-                OS::Unix,
-                CHIMERA_UNIX,
-                "/tmp/chimera",
-                None,
-            )
-            .await,
-        );
-
-        // Deploy to Windows hosts
-        all_results.extend(
-            self.deploy_for_os(
-                communicator,
-                hosts,
-                OS::Windows,
-                CHIMERA_WIN,
-                "C:\\Temp\\chimera.exe",
-                Some(&rustrc::cmd!("md C:\\Temp")),
-            )
-            .await,
-        );
-
-        // Handle unknown OS hosts
-        all_results.extend(
-            hosts
-                .iter()
-                .filter(|h| matches!(h.os, OS::Unknown))
-                .map(|host| {
-                    warn!("Skipping deployment to unknown OS host: {}", host.ip);
-                    log_skipped("deploy", &host.ip.to_string(), "unknown OS");
-                    (Arc::clone(host), Err(Error::UnknownOS))
-                }),
-        );
-
-        all_results
     }
 
     fn handle_missing_communicator(&self, hosts: &[Arc<Host>]) -> Vec<(Arc<Host>, Result<()>)> {
@@ -729,8 +659,7 @@ impl Orchestrator {
         communicator: &Communicator,
         mode: &ModeConfig<'_>,
     ) -> Vec<HostOperationResult<CommandOutput>> {
-        let output_file = format!("C:\\Temp\\chimera_{}.json", mode.name);
-        let cmd = Self::build_command("C:\\Temp\\chimera.exe", mode, &output_file);
+        let cmd = Self::build_command("C:\\Temp\\chimera.exe", mode);
 
         info!(
             "Executing {} mode for Windows hosts {}",
@@ -745,8 +674,7 @@ impl Orchestrator {
         communicator: &Communicator,
         mode: &ModeConfig<'_>,
     ) -> Vec<HostOperationResult<CommandOutput>> {
-        let output_file = format!("/tmp/chimera_{}.json", mode.name);
-        let cmd = Self::build_command("/tmp/chimera", mode, &output_file);
+        let cmd = Self::build_command("/tmp/chimera", mode);
 
         info!(
             "Executing {} mode for Unix hosts {}",
@@ -816,10 +744,10 @@ impl Orchestrator {
             .collect()
     }
 
-    fn build_command(binary_path: &str, mode: &ModeConfig, output_file: &str) -> String {
+    fn build_command(binary_path: &str, mode: &ModeConfig) -> String {
         match mode.args {
-            Some(args) => format!("{} {} {} > {}", binary_path, mode.name, args, output_file),
-            None => format!("{} {} > {}", binary_path, mode.name, output_file),
+            Some(args) => format!("{} {} {}", binary_path, mode.name, args),
+            None => format!("{} {}", binary_path, mode.name),
         }
     }
 
@@ -848,7 +776,7 @@ impl Orchestrator {
                 all_results.extend(results);
 
                 // Download results for this mode
-                self.download_results_windows(communicator, mode.name).await;
+                //self.download_results_windows(communicator, mode.name).await;
             }
 
             // Unix execution
@@ -857,7 +785,7 @@ impl Orchestrator {
                 all_results.extend(results);
 
                 // Download results for this mode
-                self.download_results_unix(communicator, mode.name).await;
+                //self.download_results_unix(communicator, mode.name).await;
             }
         }
 
