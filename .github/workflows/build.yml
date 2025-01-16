@@ -17,51 +17,42 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-linux:
-    name: Build Linux Binary
+  build:
+    name: Build Binaries
     runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: i686-unknown-linux-musl
-    
-    - name: Install musl tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y musl-tools
-    
-    - name: Build Linux Target
-      run: |
-        cd chimera
-        cargo build --target i686-unknown-linux-musl --release
-    
-    - name: Upload Linux artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: chimera-linux-i686
-        path: chimera/target/i686-unknown-linux-musl/release/chimera
+    strategy:
+      matrix:
+        target: [i686-unknown-linux-musl, x86_64-pc-windows-gnu]
+        include:
+          - target: x86_64-pc-windows-gnu
+            extension: .exe
+          - target: i686-unknown-linux-musl
+            extension: ""
 
-  build-windows:
-    name: Build Windows Binary
-    runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        targets: x86_64-pc-windows-gnu
+        targets: ${{ matrix.target }}
     
-    - name: Build Windows Target
+    - name: Install cross
+      run: cargo install cross --git https://github.com/cross-rs/cross
+    
+    - name: Build Target
       run: |
         cd chimera
-        cargo build --target x86_64-pc-windows-gnu --release
+        cross build --target ${{ matrix.target }} --release
     
-    - name: Upload Windows artifact
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: chimera-windows-x64
-        path: chimera/target/x86_64-pc-windows-gnu/release/chimera.exe
+        name: chimera-${{ matrix.target }}
+        path: chimera/target/${{ matrix.target }}/release/chimera${{ matrix.extension }}
+
+    - name: Upload Release Assets
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v1
+      with:
+        files: chimera/target/${{ matrix.target }}/release/chimera${{ matrix.extension }}
