@@ -1,12 +1,12 @@
 name: Build Chimera Binary
 
 on:
-  release:
-    types: [created]
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
+    inputs:
+      version:
+        description: 'Version number (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,23 +16,16 @@ permissions:
 
 jobs:
   build:
-    name: Build Binaries
+    name: Build and Release
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [i686-unknown-linux-musl, x86_64-pc-windows-gnu]
-        include:
-          - target: x86_64-pc-windows-gnu
-            extension: .exe
-            name: chimera.exe
-            content_type: application/octet-stream
-          - target: i686-unknown-linux-musl
-            extension: ""
-            name: chimera
-            content_type: application/octet-stream
     
     steps:
     - uses: actions/checkout@v4
+    
+    - name: Create Tag
+      run: |
+        git tag ${{ github.event.inputs.version }}
+        git push origin ${{ github.event.inputs.version }}
     
     - name: Create Release
       id: create_release
@@ -40,36 +33,51 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ github.ref }}
+        tag_name: ${{ github.event.inputs.version }}
+        release_name: Release ${{ github.event.inputs.version }}
         draft: false
         prerelease: false
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        targets: ${{ matrix.target }}
+        targets: [i686-unknown-linux-musl, x86_64-pc-windows-gnu]
     
     - name: Install cross
       run: cargo install cross --git https://github.com/cross-rs/cross
     
-    - name: Build Target
+    # Linux Build
+    - name: Build Linux Target
       run: |
         cd chimera
-        cross build --target ${{ matrix.target }} --release
-        
-    - name: Prepare Release Binary
-      run: |
+        cross build --target i686-unknown-linux-musl --release
         mkdir -p release-artifacts
-        # Find the chimera binary and copy it with the desired name
-        find . -type f -name "chimera${{ matrix.extension }}" -exec cp {} release-artifacts/${{ matrix.name }} \;
-        
-    - name: Upload Release Asset
+        find . -type f -name "chimera" -exec cp {} release-artifacts/chimera \;
+    
+    - name: Upload Linux Binary
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./release-artifacts/${{ matrix.name }}
-        asset_name: ${{ matrix.name }}
-        asset_content_type: ${{ matrix.content_type }}
+        asset_path: ./release-artifacts/chimera
+        asset_name: chimera
+        asset_content_type: application/octet-stream
+    
+    # Windows Build
+    - name: Build Windows Target
+      run: |
+        cd chimera
+        cross build --target x86_64-pc-windows-gnu --release
+        mkdir -p release-artifacts
+        find . -type f -name "chimera.exe" -exec cp {} release-artifacts/chimera.exe \;
+    
+    - name: Upload Windows Binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./release-artifacts/chimera.exe
+        asset_name: chimera.exe
+        asset_content_type: application/octet-stream
