@@ -1,0 +1,50 @@
+name: Build Chimera Binary
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build Binary
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [i686-unknown-linux-musl, x86_64-pc-windows-gnu]
+        include:
+          - target: x86_64-pc-windows-gnu
+            extension: .exe
+          - target: i686-unknown-linux-musl
+            extension: ""
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+    
+    - name: Install cross
+      run: cargo install cross
+    
+    - name: Build Target
+      run: |
+        cd chimera
+        cross build --target ${{ matrix.target }} --release
+    
+    - name: Rename binary
+      run: |
+        cd chimera/target/${{ matrix.target }}/release
+        mv chimera${{ matrix.extension }} chimera-${{ matrix.target }}${{ matrix.extension }}
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: chimera-${{ matrix.target }}
+        path: chimera/target/${{ matrix.target }}/release/chimera-${{ matrix.target }}${{ matrix.extension }}
