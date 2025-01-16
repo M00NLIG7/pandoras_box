@@ -1,4 +1,10 @@
+use crate::communicator::HostOperationResult;
 use crate::error::Error;
+use crate::Host;
+use rustrc::client::CommandOutput;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use log::{error, info, warn};
 use std::fmt::Display; // Make sure to import your specific Error type
 
@@ -6,7 +12,7 @@ pub fn log_success<T: Display, U: Display>(operation: T, target: U) {
     info!("Successfully {}: {}", operation, target);
 }
 
-pub fn log_failure<T: Display, U: Display, E: Display>(operation: T, target: U, error: E) {
+pub fn log_failure<T: Display, U: Display, E: Display>(operation: T, target: U, error: &E) {
     error!("Failed to {}: {}. Error: {}", operation, target, error);
 }
 
@@ -23,6 +29,46 @@ pub fn log_output(stdout: &[u8], stderr: &[u8]) {
     }
 }
 
+/*
+        let mut results: Vec<_> = mkdir_results.into_iter().filter_map(|md| {
+            let host = host_map.get(&md.ip).unwrap();
+
+            match md.result {
+                Ok(_) => {
+                    log_success("Directory created", &md.ip.to_string());
+                    Some((Arc::clone(host), Ok(())))
+                }
+                Err(e) => {
+                    log_failure("Directory creation failed: ", &md.ip.to_string(), &e);
+                    Some((Arc::clone(host), Err(e)))
+                }
+            }
+        }).collect();
+
+*/
+pub fn log_host_results(
+    results: Vec<HostOperationResult<CommandOutput>>,
+    host_map: &HashMap<String, Arc<Host>>,
+    operation: &str,
+) -> Vec<(Arc<Host>, crate::Result<()>)> {
+    results
+        .into_iter()
+        .filter_map(|md| {
+            let host = host_map.get(&md.ip).unwrap();
+            match md.result {
+                Ok(_) => {
+                    log_success(format!("{} on", operation), &host);
+                    Some((Arc::clone(host), Ok(())))
+                }
+                Err(e) => {
+                    log_failure(format!("{} on", operation), &host, &e);
+                    Some((Arc::clone(host), Err(e)))
+                }
+            }
+        })
+        .collect()
+}
+
 pub fn log_results<T, I>(results: I, operation: &str, target: &str)
 where
     I: IntoIterator<Item = Result<T, Error>>,
@@ -30,9 +76,7 @@ where
     for (index, result) in results.into_iter().enumerate() {
         match result {
             Ok(_) => log_success(format!("{} ({})", operation, index), target),
-            Err(e) => log_failure(format!("{} ({})", operation, index), target, e),
+            Err(e) => log_failure(format!("{} ({})", operation, index), target, &e),
         }
     }
 }
-
-

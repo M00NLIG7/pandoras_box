@@ -5,6 +5,12 @@ pub struct Host {
     pub open_ports: Vec<u16>,
 }
 
+impl std::fmt::Display for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.ip, self.os)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OS {
     Unix,

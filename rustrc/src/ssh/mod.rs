@@ -352,7 +352,7 @@ impl SSHSession {
         let mut stderr = vec![];
         let mut consecutive_empty_reads = 0;
         const MAX_EMPTY_READS: u32 = 3;
-        const CHANNEL_TIMEOUT: Duration = Duration::from_secs(20);
+        const CHANNEL_TIMEOUT: Duration = Duration::from_secs(30);
 
         debug!("Starting to process channel output");
 
@@ -534,11 +534,36 @@ impl SSHSession {
         file_contents: Arc<Vec<u8>>,
         remote_dest: &str,
     ) -> crate::Result<()> {
-        let mut last_error = None;
         let is_windows = remote_dest.starts_with("C:\\") || remote_dest.starts_with("c:\\");
 
+        // For Windows paths, try SFTP once and then immediately try batch transfer
+        if is_windows {
+            match self
+                .try_sftp_transfer(file_contents.clone(), remote_dest)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(sftp_err) => {
+                    debug!("SFTP failed for Windows path, attempting batch transfer");
+                    match self
+                        .try_batch_transfer(file_contents.clone(), remote_dest)
+                        .await
+                    {
+                        Ok(()) => return Ok(()),
+                        Err(batch_err) => {
+                            return Err(crate::Error::FileTransferError(
+                            format!("All transfer methods failed. SFTP error: {}. Batch transfer error: {}", 
+                                sftp_err, batch_err)
+                        ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // For non-Windows paths, use existing retry logic with SFTP only
+        let mut last_error = None;
         for attempt in 0..2 {
-            // Try SFTP first
             match self
                 .try_sftp_transfer(file_contents.clone(), remote_dest)
                 .await
@@ -546,23 +571,6 @@ impl SSHSession {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     last_error = Some(e);
-
-                    // For Windows, immediately try batch transfer if SFTP fails
-                    if is_windows {
-                        match self
-                            .try_batch_transfer(file_contents.clone(), remote_dest)
-                            .await
-                        {
-                            Ok(()) => return Ok(()),
-                            Err(e) => {
-                                last_error = Some(crate::Error::FileTransferError(
-                                    format!("All transfer methods failed. SFTP error: {}. Batch transfer error: {}", 
-                                        last_error.unwrap(), e)
-                                ));
-                            }
-                        }
-                    }
-
                     if attempt < 1 {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }
@@ -620,20 +628,33 @@ impl SSHSession {
         file_contents: Arc<Vec<u8>>,
         remote_dest: &str,
     ) -> crate::Result<()> {
-        let sftp = self.create_sftp_session_with_retry().await?;
-        self.ensure_transfer_helper(&sftp).await?;
+        let sftp = self.create_sftp_session_with_retry().await.map_err(|e| {
+            crate::Error::FileTransferError(format!(
+                "Failed to create SFTP session for batch transfer: {}",
+                e
+            ))
+        })?;
 
-        self.batch_transfer_file(file_contents, remote_dest).await?;
+        self.ensure_transfer_helper(&sftp).await.map_err(|e| {
+            crate::Error::FileTransferError(format!("Failed to ensure transfer helper: {}", e))
+        })?;
 
-        // Give a short delay for the file to be written
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        self.batch_transfer_file(file_contents, remote_dest)
+            .await
+            .map_err(|e| {
+                crate::Error::FileTransferError(format!("Batch transfer failed: {}", e))
+            })?;
 
-        // Check if file exists
+        // Verify file exists after transfer
         match self.verify_file_exists(remote_dest).await {
             Ok(true) => Ok(()),
-            _ => Err(crate::Error::FileTransferError(
-                "Failed to verify batch file transfer".into(),
+            Ok(false) => Err(crate::Error::FileTransferError(
+                "Failed to verify batch file transfer - file not found".into(),
             )),
+            Err(e) => Err(crate::Error::FileTransferError(format!(
+                "Failed to verify batch file transfer: {}",
+                e
+            ))),
         }
     }
 
@@ -1012,7 +1033,8 @@ impl SSHSession {
 
     async fn connect_with_retry(&self, port_number: u16) -> crate::Result<TcpStream> {
         let socket = format!("{}:{}", self.config.ip(), port_number);
-        tokio::time::sleep(Duration::from_secs(100)).await;
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
 
         // Reduce number of attempts and delay
         for attempt in 0..5 {

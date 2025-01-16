@@ -31,7 +31,7 @@ async fn main() {
                 .arg(
                     arg!(-m --magic <VALUE> "Magic number for credentials")
                         .required(true)
-                        .value_parser(value_parser!(u16)),
+                        .value_parser(value_parser!(u32)),
                 ),
         )
         .subcommand(Command::new("update").about("Perform system updates"))
@@ -60,7 +60,7 @@ async fn main() {
         }
         Some(("credentials", sub_matches)) => {
             let magic_value = sub_matches
-                .get_one::<u16>("magic")
+                .get_one::<u32>("magic")
                 .copied()
                 .expect("Required argument");
 
