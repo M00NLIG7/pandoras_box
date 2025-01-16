@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 chrono = {version = "0.4.38", features = ["serde"]}
 clap = {version = "4.5.20", features = ["cargo"]}
-env = "0.1.0"
 env_logger = "0.11.5"
 futures = "0.3.31"
 include-crypt = "0.1.1"

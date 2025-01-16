@@ -11,6 +11,27 @@ pub fn change_password(username: &str, new_password: &mut str) -> Result<()> {
         return Err(err);
     }
 
+    // Quick check for Kerberos using .output() which won't hang
+    let output = Command::new("passwd")
+        .arg(username)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+
+    let combined_output = format!(
+        "{}{}", 
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ).to_lowercase();
+    
+    if combined_output.contains("kerberos") {
+        let err = Error::PasswordChange("Cannot change Kerberos-linked passwords".into());
+        err.log();
+        println!("Error: {:?}", err);
+        return Err(err);
+    }
+
+    // Regular password change
     let mut child = Command::new("passwd")
         .arg(username)
         .stdin(Stdio::piped())
@@ -28,6 +49,7 @@ pub fn change_password(username: &str, new_password: &mut str) -> Result<()> {
     if !status.success() {
         let err = Error::PasswordChange("Password change failed".into());
         err.log();
+        println!("Error: {:?}", err);
         Err(err)
     } else {
         log::info!("Successfully changed password for user: {}", username);

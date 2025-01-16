@@ -1,0 +1,974 @@
+use crate::client::{Command, CommandOutput, Config, Session};
+use crate::smb::negotiate_session;
+use crate::stateful_process::{Message, StatefulProcess};
+use crate::{Error, Result};
+use byteorder::{BigEndian, WriteBytesExt};
+use download_embed_macro::download_and_embed;
+use log::{debug, error, info, warn};
+use std::net::{IpAddr, SocketAddr};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::process::Command as TokioCommand;
+use tokio::sync::mpsc;
+use tokio::time::Duration;
+
+// Constants for configuration
+const MAX_RETRY_ATTEMPTS: u32 = 3;
+const RETRY_DELAY: Duration = Duration::from_secs(1);
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+
+// Path constants
+const WINEXE_PATH: &str = "/tmp/winexe_container/winexe";
+const TEMP_DIR: &str = "/tmp/winexe_container";
+const RUNC_PATH: &str = "/tmp/winexe_container/runc";
+
+// SMB-related constants
+const SMB_3_SIGNATURE: u8 = 0xFE;
+static PORTS: &[u16] = &[445, 139];
+
+/// Embedded binary data for the runc container runtime
+static RUNC: &[u8] = download_and_embed!(
+    "https://github.com/opencontainers/runc/releases/download/v1.2.0-rc.3/runc.386"
+);
+
+// External resource bytes
+static WINEXE_CONTAINER: &[u8] = include_bytes!("../img/winexe-static.tar.gz");
+//static WINEXE_CONTAINER: &[u8] = include_bytes!("../resources/winexe-static.tar.gz");
+static TRANSFER_HELPER: &[u8] = include_bytes!("../resources/transfer_file.bat");
+
+#[derive(Debug, Clone)]
+pub enum WinexeConfig {
+    NoPassword {
+        username: String,
+        ip: IpAddr,
+        inactivity_timeout: Duration,
+    },
+    Password {
+        username: String,
+        ip: IpAddr,
+        password: String,
+        inactivity_timeout: Duration,
+    },
+}
+
+impl WinexeConfig {
+    pub async fn password<U: Into<String>, P: Into<String>>(
+        username: U,
+        password: P,
+        ip_str: &str,
+        inactivity_timeout: Duration,
+    ) -> Result<Self> {
+        let ip = ip_str
+            .parse()
+            .map_err(|e| Error::ConnectionError(format!("Invalid IP address: {}", e)))?;
+
+        Ok(Self::Password {
+            username: username.into(),
+            ip,
+            password: password.into(),
+            inactivity_timeout,
+        })
+    }
+
+    fn ip(&self) -> &IpAddr {
+        match self {
+            Self::NoPassword { ip, .. } => ip,
+            Self::Password { ip, .. } => ip,
+        }
+    }
+
+    fn credentials(&self) -> (&str, Option<&str>) {
+        match self {
+            Self::NoPassword { username, .. } => (username, None),
+            Self::Password {
+                username, password, ..
+            } => (username, Some(password)),
+        }
+    }
+
+    fn inactivity_timeout(&self) -> Duration {
+        match self {
+            Self::NoPassword {
+                inactivity_timeout, ..
+            } => *inactivity_timeout,
+            Self::Password {
+                inactivity_timeout, ..
+            } => *inactivity_timeout,
+        }
+    }
+}
+
+/// Enum representing different SMB protocol versions
+#[derive(Debug, Clone, Copy)]
+pub enum SMBVersion {
+    V1,
+    V3,
+}
+
+#[derive(Debug)]
+pub struct WinexeContainer {
+    config: WinexeConfig,
+    runc_path: String,
+    smb_version: SMBVersion,
+}
+
+#[derive(Debug)]
+pub struct WinexeChannel {
+    process: StatefulProcess,
+    receiver: mpsc::UnboundedReceiver<Message>,
+    inactivity_timeout: Duration,
+}
+
+impl WinexeContainer {
+    pub async fn new(config: WinexeConfig) -> Result<Self> {
+        let runc_path = match Self::find_runc().await {
+            Some(path) => path,
+            None => {
+                debug!("runc not found in system path, using embedded version");
+                Self::install_runc().await?
+            }
+        };
+
+        Self::extract_winexe().await?;
+        let smb_version = Self::detect_smb_version(config.ip()).await?;
+
+        let container = Self {
+            config,
+            runc_path,
+            smb_version,
+        };
+
+        if !container.check_container_status().await? {
+            let _ = container.start_container_with_retry().await?;
+        }
+
+        container.ensure_transfer_helper().await?;
+        Ok(container)
+    }
+
+    async fn ensure_transfer_helper(&self) -> Result<()> {
+        let check_cmd = Command::new("cmd.exe /c if exist C:\\Temp\\transfer_file.bat echo EXISTS");
+
+        match self.exec(&check_cmd).await {
+            Ok(output) => {
+                if !String::from_utf8_lossy(&output.stdout).contains("EXISTS") {
+                    self.write_transfer_helper().await?;
+                }
+            }
+            Err(_) => {
+                self.write_transfer_helper().await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn write_transfer_helper(&self) -> Result<()> {
+        // Create Temp directory if it doesn't exist
+        let mkdir_cmd = Command::new("cmd.exe /c mkdir C:\\Temp");
+        let _ = self.exec(&mkdir_cmd).await; // Ignore error if directory exists
+
+        // Write the helper script using base64 encoding to avoid cmd escaping issues
+        let helper_content = String::from_utf8_lossy(TRANSFER_HELPER);
+        let base64_content = base64::encode(helper_content.as_bytes());
+
+        // Write base64 content to temporary file
+        let echo_cmd = Command::new(&format!(
+            "cmd.exe /c echo {} > C:\\Temp\\transfer_file.b64",
+            base64_content
+        ));
+        self.exec(&echo_cmd).await?;
+
+        // Decode the base64 content to the final batch file
+        let decode_cmd = Command::new(
+            "cmd.exe /c certutil -decode C:\\Temp\\transfer_file.b64 C:\\Temp\\transfer_file.bat",
+        );
+        self.exec(&decode_cmd).await?;
+
+        // Clean up temporary base64 file
+        let cleanup_cmd = Command::new("cmd.exe /c del C:\\Temp\\transfer_file.b64");
+        self.exec(&cleanup_cmd).await?;
+
+        Ok(())
+    }
+
+    async fn find_runc() -> Option<String> {
+        for path in ["/usr/bin/runc", "/usr/local/bin/runc", "/usr/sbin/runc"] {
+            if tokio::fs::metadata(path).await.is_ok() {
+                return Some(path.to_string());
+            }
+        }
+        None
+    }
+
+    async fn install_runc() -> Result<String> {
+        tokio::fs::create_dir_all(TEMP_DIR)
+            .await
+            .map_err(|e| Error::CommandError(format!("Failed to create temp directory: {}", e)))?;
+
+        tokio::fs::write(RUNC_PATH, RUNC)
+            .await
+            .map_err(|e| Error::CommandError(format!("Failed to write runc binary: {}", e)))?;
+
+        tokio::fs::set_permissions(RUNC_PATH, std::fs::Permissions::from_mode(0o755))
+            .await
+            .map_err(|e| Error::CommandError(format!("Failed to set permissions: {}", e)))?;
+
+        Ok(RUNC_PATH.to_string())
+    }
+
+    async fn extract_winexe() -> Result<()> {
+        let winexe_dir = Path::new(TEMP_DIR);
+        if !winexe_dir.exists() {
+            tokio::fs::create_dir_all(winexe_dir).await.map_err(|e| {
+                Error::CommandError(format!("Failed to create winexe directory: {}", e))
+            })?;
+
+            // Use flate2 and tar to extract
+            use flate2::read::GzDecoder;
+            use std::io::Read;
+            use tar::Archive;
+
+            let mut decoder = GzDecoder::new(WINEXE_CONTAINER);
+            let mut decompressed = Vec::new();
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|e| Error::CommandError(format!("Failed to decompress winexe: {}", e)))?;
+
+            let mut archive = Archive::new(&decompressed[..]);
+            archive
+                .unpack(TEMP_DIR)
+                .map_err(|e| Error::CommandError(format!("Failed to extract winexe: {}", e)))?;
+        }
+        Ok(())
+    }
+
+    async fn check_container_status(&self) -> Result<bool> {
+        let output = TokioCommand::new(&self.runc_path)
+            .arg("state")
+            .arg("winexe-container")
+            .output()
+            .await
+            .map_err(|e| Error::CommandError(format!("Failed to check container state: {}", e)))?;
+
+        if !output.status.success() {
+            return Ok(false);
+        }
+
+        let state: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|e| Error::JsonError(e))?;
+
+        Ok(state
+            .get("status")
+            .and_then(|s| s.as_str())
+            .map(|s| s == "running")
+            .unwrap_or(false))
+    }
+
+    async fn execute_single_attempt(&self, command: &Command) -> Result<CommandOutput> {
+        let mut channel = self.open_channel().await?;
+        channel.exec(command).await?;
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut status_code = None;
+
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                Message::Data(data) => stdout.extend_from_slice(&data),
+                Message::Stderr(data) => stderr.extend_from_slice(&data),
+                Message::ExitStatus(code) => status_code = code,
+            }
+        }
+
+        channel.close().await?;
+        Ok(CommandOutput {
+            stdout,
+            stderr,
+            status_code,
+        })
+    }
+
+    async fn setup_transfer_port(&self, port: u16) -> Result<()> {
+        let rule = format!(
+            "netsh advfirewall firewall add rule name=\"Allow Port {}\" \
+             dir=in action=allow protocol=TCP localport={}",
+            port, port
+        );
+
+        self.exec(&Command::new(&format!("cmd.exe /c {}", rule)))
+            .await?;
+        Ok(())
+    }
+
+    async fn cleanup_transfer_port(&self, port: u16) -> Result<()> {
+        let rule = format!(
+            "netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
+            port
+        );
+
+        let _ = self
+            .exec(&Command::new(&format!("cmd.exe /c {}", rule)))
+            .await;
+        Ok(())
+    }
+
+    async fn start_transfer_server(&self, port: u16, path: &str, is_download: bool) -> Result<()> {
+        let mode = if is_download { "serve" } else { "receive" };
+        let command = format!(
+            "cmd.exe /c C:\\Temp\\transfer_file.bat {} 0.0.0.0 {} {}",
+            port, path, mode
+        );
+
+        let output = self.exec(&Command::new(&command)).await?;
+
+        // Verify the process started successfully
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !stdout.contains("ReturnValue = 0") {
+            return Err(Error::CommandError(
+                "Failed to start transfer helper process".to_string(),
+            ));
+        }
+
+        // Allow time for the process to start
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok(())
+    }
+
+    async fn perform_file_transfer(&self, port: u16, file_contents: &[u8]) -> Result<()> {
+        let mut stream = self.connect_with_retry(port).await?;
+
+        // Send file size header
+        let file_size = file_contents.len() as u64;
+        let mut size_buffer = vec![];
+        WriteBytesExt::write_u64::<BigEndian>(&mut size_buffer, file_size)
+            .map_err(|e| Error::FileTransferError(format!("Failed to write size header: {}", e)))?;
+
+        stream
+            .write_all(&size_buffer)
+            .await
+            .map_err(|e| Error::FileTransferError(format!("Failed to send size header: {}", e)))?;
+
+        // Send file contents
+        stream.write_all(file_contents).await.map_err(|e| {
+            Error::FileTransferError(format!("Failed to send file contents: {}", e))
+        })?;
+
+        Ok(())
+    }
+    async fn perform_file_download(&self, port: u16, local_path: &str) -> Result<()> {
+        let mut stream = self.connect_with_retry(port).await?;
+
+        // Read file size header
+        let mut size_buf = [0u8; 8];
+        stream
+            .read_exact(&mut size_buf)
+            .await
+            .map_err(|e| Error::FileTransferError(format!("Failed to read size header: {}", e)))?;
+
+        let file_size = u64::from_be_bytes(size_buf);
+
+        // Create temporary file
+        let temp_path = format!("{}.tmp", local_path);
+        let mut file = tokio::fs::File::create(&temp_path)
+            .await
+            .map_err(|e| Error::FileTransferError(format!("Failed to create local file: {}", e)))?;
+
+        // Copy data with progress tracking
+        let mut remaining = file_size;
+        let mut buffer = vec![0u8; 8192];
+
+        while remaining > 0 {
+            let to_read = std::cmp::min(remaining as usize, buffer.len());
+            let bytes_read = stream.read(&mut buffer[..to_read]).await.map_err(|e| {
+                Error::FileTransferError(format!("Failed to read from stream: {}", e))
+            })?;
+
+            if bytes_read == 0 {
+                return Err(Error::FileTransferError(
+                    "Unexpected end of stream".to_string(),
+                ));
+            }
+
+            file.write_all(&buffer[..bytes_read])
+                .await
+                .map_err(|e| Error::FileTransferError(format!("Failed to write to file: {}", e)))?;
+
+            remaining -= bytes_read as u64;
+        }
+
+        // Ensure all data is written
+        file.sync_all()
+            .await
+            .map_err(|e| Error::FileTransferError(format!("Failed to sync file: {}", e)))?;
+
+        // Rename temporary file to final destination
+        tokio::fs::rename(&temp_path, local_path)
+            .await
+            .map_err(|e| {
+                Error::FileTransferError(format!("Failed to rename temporary file: {}", e))
+            })?;
+
+        Ok(())
+    }
+
+    async fn connect_with_retry(&self, port: u16) -> Result<TcpStream> {
+        let addr = SocketAddr::new(*self.config.ip(), port);
+        let mut last_error = None;
+
+        for attempt in 1..=MAX_RETRY_ATTEMPTS {
+            match tokio::time::timeout(CONNECTION_TIMEOUT, TcpStream::connect(&addr)).await {
+                Ok(Ok(stream)) => return Ok(stream),
+                Ok(Err(e)) => {
+                    last_error = Some(e);
+                    if attempt < MAX_RETRY_ATTEMPTS {
+                        tokio::time::sleep(RETRY_DELAY).await;
+                    }
+                }
+                Err(_) => {
+                    last_error = Some(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Connection attempt timed out",
+                    ));
+                    if attempt < MAX_RETRY_ATTEMPTS {
+                        tokio::time::sleep(RETRY_DELAY).await;
+                    }
+                }
+            }
+        }
+
+        Err(Error::ConnectionError(format!(
+            "Failed to connect after {} attempts: {}",
+            MAX_RETRY_ATTEMPTS,
+            last_error.unwrap()
+        )))
+    }
+
+    async fn detect_smb_version(server: &IpAddr) -> Result<SMBVersion> {
+        for &port in PORTS {
+            match negotiate_session(server, port, CONNECTION_TIMEOUT, true).await {
+                Ok(Some(dialect)) if !dialect.is_empty() => {
+                    if dialect[0] == SMB_3_SIGNATURE {
+                        return Ok(SMBVersion::V3);
+                    }
+                    return Ok(SMBVersion::V1);
+                }
+                _ => continue,
+            }
+        }
+
+        // Default to V1 if detection fails
+        Ok(SMBVersion::V1)
+    }
+
+    async fn verify_connection(&self) -> Result<()> {
+        let mut channel = self.open_channel().await?;
+        let test_cmd = Command::new("echo connection_test");
+
+        match channel.exec(&test_cmd).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let error_msg = e.to_string().to_lowercase();
+                if error_msg.contains("nt_status_logon_failure") {
+                    return Err(Error::AuthenticationError(
+                        "Login failed - check credentials".to_string(),
+                    ));
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn start_container_with_retry(&self) -> Result<()> {
+        let mut last_error = None;
+
+        for attempt in 1..=MAX_RETRY_ATTEMPTS {
+            match self.start_container().await {
+                Ok(_) => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if self.check_container_status().await? {
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    warn!("Container start attempt {} failed: {}", attempt, e);
+                    last_error = Some(e);
+
+                    if attempt < MAX_RETRY_ATTEMPTS {
+                        tokio::time::sleep(RETRY_DELAY).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            Error::CommandError("Failed to start container after all retries".to_string())
+        }))
+    }
+
+    async fn start_container(&self) -> Result<()> {
+        TokioCommand::new(&self.runc_path)
+            .arg("run")
+            .arg("-d")
+            .arg("--bundle")
+            .arg(WINEXE_PATH)
+            .arg("winexe-container")
+            .output()
+            .await
+            .map_err(|e| Error::CommandError(format!("Failed to start container: {}", e)))?;
+
+        Ok(())
+    }
+
+    pub async fn open_channel(&self) -> Result<WinexeChannel> {
+        let (username, maybe_password) = self.config.credentials();
+        let connection_str = format!("//{}", self.config.ip());
+
+        let mut cmd_args = vec!["exec", "winexe-container"];
+
+        // Select appropriate winexe binary based on SMB version
+        cmd_args.push(match self.smb_version {
+            SMBVersion::V1 => "./winexe-static",
+            SMBVersion::V3 => "./winexe-static-2",
+        });
+
+        cmd_args.push("-U");
+
+        let auth_str = match maybe_password {
+            Some(password) => format!("{}%{}", username, password),
+            None => username.to_string(),
+        };
+
+        cmd_args.push(&auth_str);
+        cmd_args.push(&connection_str);
+        cmd_args.push("cmd.exe");
+
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        match StatefulProcess::new(&self.runc_path, cmd_args, tx).await {
+            Ok(process) => Ok(WinexeChannel {
+                process,
+                receiver: rx,
+                inactivity_timeout: self.config.inactivity_timeout(),
+            }),
+            Err(e) => {
+                if e.to_string()
+                    .to_lowercase()
+                    .contains("nt_status_logon_failure")
+                {
+                    Err(Error::AuthenticationError(
+                        "Login failed - check credentials".to_string(),
+                    ))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+}
+
+impl Session for WinexeContainer {
+    async fn disconnect(&mut self) -> Result<()> {
+        if self.check_container_status().await? {
+            let _ = TokioCommand::new(&self.runc_path)
+                .arg("kill")
+                .arg("winexe-container")
+                .output()
+                .await
+                .map_err(|e| Error::CommandError(format!("Failed to kill container: {}", e)))?;
+        }
+        Ok(())
+    }
+
+    async fn exec(&self, command: &Command) -> Result<CommandOutput> {
+        let mut attempts = 0;
+        let mut last_error = None;
+
+        while attempts < MAX_RETRY_ATTEMPTS {
+            match self.execute_single_attempt(command).await {
+                Ok(output) => {
+                    // Check stderr for authentication failures
+                    if let Ok(stderr_str) = String::from_utf8(output.stderr.clone()) {
+                        if stderr_str
+                            .to_lowercase()
+                            .contains("nt_status_logon_failure")
+                        {
+                            return Err(Error::AuthenticationError(
+                                "Authentication failed during command execution".to_string(),
+                            ));
+                        }
+                    }
+                    return Ok(output);
+                }
+                Err(e) => {
+                    if e.to_string()
+                        .to_lowercase()
+                        .contains("nt_status_logon_failure")
+                    {
+                        return Err(Error::AuthenticationError(
+                            "Authentication failed".to_string(),
+                        ));
+                    }
+
+                    last_error = Some(e);
+                    attempts += 1;
+
+                    if attempts < MAX_RETRY_ATTEMPTS {
+                        tokio::time::sleep(RETRY_DELAY).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            Error::CommandError("Command execution failed after all retries".to_string())
+        }))
+    }
+
+    async fn transfer_file(&self, file_contents: Arc<Vec<u8>>, remote_dest: &str) -> Result<()> {
+        let port = 49152 + rand::random::<u16>() % 16384;
+
+        // Setup firewall rule
+        self.setup_transfer_port(port).await?;
+
+        // Ensure cleanup
+        let cleanup = CleanupGuard::new(port);
+
+        // Start transfer helper
+        self.start_transfer_server(port, remote_dest, false).await?;
+
+        // Connect and transfer with timeout
+        match tokio::time::timeout(OPERATION_TIMEOUT, async {
+            let mut stream = self.connect_with_retry(port).await?;
+
+            // Send file size
+            let file_size = file_contents.len() as u64;
+            let mut size_buffer = vec![];
+            WriteBytesExt::write_u64::<BigEndian>(&mut size_buffer, file_size).map_err(|e| {
+                Error::FileTransferError(format!("Failed to prepare size header: {}", e))
+            })?;
+
+            stream.write_all(&size_buffer).await.map_err(|e| {
+                Error::FileTransferError(format!("Failed to send size header: {}", e))
+            })?;
+
+            // Send file contents with progress tracking
+            let mut sent = 0;
+            let chunk_size = 8192;
+            while sent < file_contents.len() {
+                let end = std::cmp::min(sent + chunk_size, file_contents.len());
+                let chunk = &file_contents[sent..end];
+
+                stream.write_all(chunk).await.map_err(|e| {
+                    Error::FileTransferError(format!(
+                        "Failed to send file chunk {}/{}: {}",
+                        sent,
+                        file_contents.len(),
+                        e
+                    ))
+                })?;
+
+                sent += chunk.len();
+            }
+
+            // Verify transfer
+            stream
+                .flush()
+                .await
+                .map_err(|e| Error::FileTransferError(format!("Failed to flush stream: {}", e)))?;
+
+            Result::<()>::Ok(())
+        })
+        .await
+        {
+            Ok(result) => {
+                std::mem::drop(cleanup); // Explicitly drop to ensure cleanup
+                result
+            }
+            Err(_) => Err(Error::FileTransferError(
+                "File transfer operation timed out".to_string(),
+            )),
+        }
+    }
+
+    async fn download_file(&self, remote_path: &str, local_path: &str) -> Result<()> {
+        let port = 49152 + rand::random::<u16>() % 16384;
+
+        // Setup firewall rule
+        self.setup_transfer_port(port).await?;
+
+        // Ensure cleanup
+        let cleanup = CleanupGuard::new(port);
+
+        // Start transfer helper
+        self.start_transfer_server(port, remote_path, true).await?;
+
+        // Create temporary file path
+        let temp_path = format!("{}.tmp", local_path);
+
+        // Perform download with timeout
+        match tokio::time::timeout(OPERATION_TIMEOUT, async {
+            let mut stream = self.connect_with_retry(port).await?;
+
+            // Read file size
+            let mut size_buf = [0u8; 8];
+            stream.read_exact(&mut size_buf).await.map_err(|e| {
+                Error::FileTransferError(format!("Failed to read size header: {}", e))
+            })?;
+
+            let file_size = u64::from_be_bytes(size_buf);
+
+            // Create temporary file
+            let mut file = tokio::fs::File::create(&temp_path).await.map_err(|e| {
+                Error::FileTransferError(format!("Failed to create local file: {}", e))
+            })?;
+
+            // Copy data with progress tracking
+            let mut received = 0u64;
+            let mut buffer = vec![0u8; 8192];
+
+            while received < file_size {
+                let to_read = std::cmp::min(buffer.len() as u64, file_size - received) as usize;
+                let bytes_read = stream.read(&mut buffer[..to_read]).await.map_err(|e| {
+                    Error::FileTransferError(format!("Failed to read from stream: {}", e))
+                })?;
+
+                if bytes_read == 0 {
+                    return Err(Error::FileTransferError(
+                        "Unexpected end of stream".to_string(),
+                    ));
+                }
+
+                file.write_all(&buffer[..bytes_read]).await.map_err(|e| {
+                    Error::FileTransferError(format!("Failed to write to file: {}", e))
+                })?;
+
+                received += bytes_read as u64;
+            }
+
+            // Ensure all data is written
+            file.sync_all()
+                .await
+                .map_err(|e| Error::FileTransferError(format!("Failed to sync file: {}", e)))?;
+
+            // Rename temporary file to final destination
+            tokio::fs::rename(&temp_path, local_path)
+                .await
+                .map_err(|e| {
+                    Error::FileTransferError(format!("Failed to rename temporary file: {}", e))
+                })?;
+
+            Ok(())
+        })
+        .await
+        {
+            Ok(result) => {
+                std::mem::drop(cleanup); // Explicitly drop to ensure cleanup
+                result
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                Err(Error::FileTransferError(
+                    "File download operation timed out".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+// Updated cleanup guard that doesn't try to clone the container
+struct CleanupGuard {
+    port: Option<u16>,
+}
+
+impl CleanupGuard {
+    fn new(port: u16) -> Self {
+        Self { port: Some(port) }
+    }
+}
+
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        if let Some(port) = self.port.take() {
+            // Log cleanup attempt without trying to perform it
+            warn!("Firewall rule for port {} should be cleaned up", port);
+        }
+    }
+}
+impl WinexeChannel {
+    pub async fn wait(&mut self) -> Option<Message> {
+        match tokio::time::timeout(self.inactivity_timeout, self.receiver.recv()).await {
+            Ok(Some(msg)) => {
+                // Check for error messages indicating authentication failure
+                if let Message::Stderr(ref data) = msg {
+                    if let Ok(error_str) = String::from_utf8(data.clone()) {
+                        if error_str.to_lowercase().contains("nt_status_logon_failure") {
+                            error!("Authentication failure detected in channel");
+                            return None;
+                        }
+                    }
+                }
+                Some(msg)
+            }
+            _ => None,
+        }
+    }
+
+    pub async fn exec(&mut self, command: &Command) -> Result<()> {
+        let mut command_bytes: Vec<u8> = command.into();
+        command_bytes.extend_from_slice(b" && exit\n");
+
+        match self.process.exec(command_bytes).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let error_str = e.to_string().to_lowercase();
+                if error_str.contains("nt_status_logon_failure") {
+                    Err(Error::AuthenticationError(
+                        "Authentication failed during command execution".to_string(),
+                    ))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    pub async fn close(&mut self) -> Result<()> {
+        // Attempt graceful shutdown
+        if let Err(e) = self.process.exec(b"exit\n".to_vec()).await {
+            warn!("Failed to gracefully close channel: {}", e);
+        }
+
+        // Give the process a moment to shut down
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Ok(())
+    }
+}
+
+impl Config for WinexeConfig {
+    type SessionType = WinexeContainer;
+
+    async fn create_session(&self) -> Result<Self::SessionType> {
+        let container = WinexeContainer::new(self.clone()).await?;
+
+        // Verify the connection works
+        match container.exec(&Command::new("echo Connection test")).await {
+            Ok(_) => Ok(container),
+            Err(e) => {
+                if e.to_string()
+                    .to_lowercase()
+                    .contains("nt_status_logon_failure")
+                {
+                    Err(Error::AuthenticationError(
+                        "Login credentials invalid".to_string(),
+                    ))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_winexe_authentication_failure() {
+        let config = WinexeConfig::password(
+            "wrong_user",
+            "wrong_password",
+            "10.100.136.241",
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        match config.create_session().await {
+            Err(Error::AuthenticationError(_)) => (),
+            other => panic!("Expected authentication error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_successful_connection() {
+        let config = WinexeConfig::password(
+            "Administrator",
+            "Cheesed2MeetU!",
+            "10.100.136.111",
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        let session = config
+            .create_session()
+            .await
+            .expect("Failed to create session");
+        let output = session
+            .exec(&Command::new("echo test"))
+            .await
+            .expect("Failed to execute command");
+
+        println!("stdout: {:?}", String::from_utf8_lossy(&output.stdout));
+        println!("stderr: {:?}", String::from_utf8_lossy(&output.stderr));
+        println!("status_code: {:?}", output.status_code);
+
+        assert!(String::from_utf8_lossy(&output.stdout).contains("test"));
+    }
+
+    #[tokio::test]
+    async fn test_file_transfer() {
+        let config = WinexeConfig::password(
+            "Administrator",
+            "Cheesed2MeetU!",
+            "10.100.136.241",
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+        let session = config
+            .create_session()
+            .await
+            .expect("Failed to create session");
+
+        // Test file transfer
+        let test_content = b"Hello, World!".to_vec();
+        session
+            .transfer_file(Arc::new(test_content.clone()), "C:\\Temp\\test.txt")
+            .await
+            .expect("Failed to transfer file");
+
+        // Verify file exists
+        let output = session
+            .exec(&Command::new("type C:\\Temp\\test.txt"))
+            .await
+            .expect("Failed to read file");
+
+        assert_eq!(output.stdout, test_content);
+
+        // Test file download
+        session
+            .download_file("C:\\Temp\\test.txt", "test_download.txt")
+            .await
+            .expect("Failed to download file");
+
+        // Verify downloaded content
+        let downloaded = tokio::fs::read("test_download.txt")
+            .await
+            .expect("Failed to read downloaded file");
+
+        assert_eq!(downloaded, test_content);
+
+        // Cleanup
+        let _ = tokio::fs::remove_file("test_download.txt").await;
+        let _ = session.exec(&Command::new("del C:\\Temp\\test.txt")).await;
+    }
+}

@@ -307,7 +307,6 @@ impl WinexeContainer {
         }
     }
 
-
     async fn fetch_file(addr: &SocketAddr, local_path: &str) -> crate::Result<()> {
         // Try connection with retries
         let mut stream = {
@@ -479,25 +478,14 @@ impl WinexeContainer {
             return Ok(());
         }
 
-        let check = self
-            .exec(&cmd!("if not exist C:\\Temp\\ echo TRUE"))
-            .await?;
-
-        let check_stdout = String::from_utf8_lossy(&check.stdout);
-
-        if check_stdout.matches("TRUE").count() > 1 {
-            self.exec(&cmd!("mkdir C:\\Temp")).await?;
-        }
-
         // Write the entire content in one echo command
         let transfer_helper = include_str!("../resources/transfer_file.bat");
         let base64_content = base64::encode(transfer_helper);
 
-
         // First write the base64 string
         let echo_command = format!("echo {}> C:\\Temp\\transfer_file.b64", base64_content);
         println!("echo command: {}", echo_command);
-        let echo_out =  self.exec(&cmd!(echo_command)).await?;
+        let echo_out = self.exec(&cmd!(echo_command)).await?;
         println!("cmd out{}", String::from_utf8_lossy(&echo_out.stdout));
 
         // Then decode it into the batch file using certutil
@@ -545,11 +533,39 @@ impl WinexeChannel {
     /// # Returns
     ///
     /// Returns Ok(()) if the command is successfully sent, or an error if sending fails
-    pub async fn exec(&mut self, command: &Command) -> Result<()> {
+    pub async fn exec(&mut self, command: &Command) -> Result<CommandOutput> {
         let exit_bytes = b" && exit\n";
-        let mut command: Vec<u8> = command.into();
-        command.extend_from_slice(exit_bytes);
-        self.process.exec(command).await
+        let mut command_bytes: Vec<u8> = command.into();
+        command_bytes.extend_from_slice(exit_bytes);
+
+        self.process.exec(command_bytes).await?;
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        while let Some(msg) = self.wait().await {
+            match msg {
+                Message::Data(data) => {
+                    stdout.extend_from_slice(&data);
+                }
+                Message::Error(data) => {
+                    let error_str = String::from_utf8_lossy(&data);
+                    if error_str.contains("NT_STATUS_LOGON_FAILURE") {
+                        return Err(crate::Error::ConnectionError(
+                            "Authentication failed - NT_STATUS_LOGON_FAILURE".into(),
+                        ));
+                    }
+                    stderr.extend_from_slice(&data);
+                }
+                Message::Exec(_) => {} // Ignore Exec messages
+            }
+        }
+
+        Ok(CommandOutput {
+            stdout,
+            stderr,
+            status_code: None,
+        })
     }
 
     /// Closes the channel
@@ -643,9 +659,12 @@ impl Session for WinexeContainer {
                 self.exec(&crate::cmd!(format!(
                     "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
                     port_number
-                ))).await;
-                Err(crate::Error::ConnectionError("Invalid socket address".to_string()))
-            },
+                )))
+                .await;
+                Err(crate::Error::ConnectionError(
+                    "Invalid socket address".to_string(),
+                ))
+            }
         }
     }
 
@@ -733,8 +752,11 @@ mod tests {
             .transfer_file(Arc::new(file_bytes), "C:\\Temp\\chimera")
             .await
             .unwrap();
-        
-        session.download_file("C:\\Temp\\transfer_file.bat", "./transfer_file.bat").await.unwrap();
+
+        session
+            .download_file("C:\\Temp\\transfer_file.bat", "./transfer_file.bat")
+            .await
+            .unwrap();
 
         let output = session.exec(&cmd!("dir C:\\Temp")).await.unwrap();
 

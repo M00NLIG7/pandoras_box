@@ -15,7 +15,7 @@ const PRIVILEGED_USER: &str = match cfg!(target_os = "windows") {
     false => "root",
 };
 
-pub struct Magic(pub u16);
+pub struct Magic(pub u32);
 
 pub struct CredentialsMode;
 
@@ -51,10 +51,12 @@ impl ModeExecutor for CredentialsMode {
                             "IPv6 is not supported".to_string(),
                         );
                     }
-                } as u16;
+                } as u32;
 
                 let magic = args.0;
 
+                println!("Last octet: {}", last_octet);
+                println!("Magic: {}", magic);
                 password = format!("{}{}", password, last_octet * magic);
 
                 if let Err(e) = platform::change_password(PRIVILEGED_USER, password.as_mut_str()) {

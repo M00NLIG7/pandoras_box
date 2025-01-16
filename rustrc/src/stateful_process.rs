@@ -1,8 +1,8 @@
 use nix::sys::signal::{kill, Signal};
-use nix::unistd::{setpgid, getpgid, Pid};
+use nix::unistd::{getpgid, setpgid, Pid};
 use std::process::Stdio;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, ChildStderr};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
 
 const BUFFER_SIZE: usize = 1024;
@@ -11,6 +11,7 @@ const BUFFER_SIZE: usize = 1024;
 pub enum Message {
     Exec(Vec<u8>),
     Data(Vec<u8>),
+    Error(Vec<u8>), // New variant for errors
 }
 
 #[derive(Debug, Clone)]
@@ -39,16 +40,28 @@ impl StatefulProcess {
                 .spawn()?
         };
 
-        let pid = Pid::from_raw(child.id().ok_or_else(|| crate::Error::CommandError("Failed to get PID".into()))? as i32);
-        let pgid = getpgid(Some(pid)).map_err(|e| crate::Error::CommandError(format!("Failed to get PGID: {:?}", e)))?;
+        let pid = Pid::from_raw(
+            child
+                .id()
+                .ok_or_else(|| crate::Error::CommandError("Failed to get PID".into()))?
+                as i32,
+        );
+        let pgid = getpgid(Some(pid))
+            .map_err(|e| crate::Error::CommandError(format!("Failed to get PGID: {:?}", e)))?;
 
         let (sender, receiver) = mpsc::channel(32);
 
-        let stdin = child.stdin.take()
+        let stdin = child
+            .stdin
+            .take()
             .ok_or_else(|| crate::Error::CommandError("Failed to get stdin handle".into()))?;
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| crate::Error::CommandError("Failed to get stdout handle".into()))?;
-        let stderr = child.stderr.take()
+        let stderr = child
+            .stderr
+            .take()
             .ok_or_else(|| crate::Error::CommandError("Failed to get stderr handle".into()))?;
 
         Self::manage_process(stdin, stdout, stderr, receiver, external_sender).await;
@@ -83,9 +96,11 @@ impl StatefulProcess {
                     }
                     result = stderr_reader.read(&mut stderr_buffer) => {
                         match result {
-                            Ok(0) => {}, // EOF, but don't break the loop
+                            Ok(0) => {}, // EOF, but don't break loop
                             Ok(n) => {
-                                eprintln!("Stderr: {}", String::from_utf8_lossy(&stderr_buffer[..n]));
+                                let error_data = stderr_buffer[..n].to_vec();
+                                eprintln!("Stderr: {}", String::from_utf8_lossy(&error_data));
+                                let _ = external_sender.send(Message::Error(error_data));
                             }
                             Err(e) => eprintln!("Failed to read from stderr: {:?}", e),
                         }
@@ -102,7 +117,7 @@ impl StatefulProcess {
                                     eprintln!("Failed to write data: {:?}", e);
                                 }
                             }
-                            None => break,
+                            Some(Message::Error(_)) | None => break,
                         }
                     }
                 }
@@ -116,9 +131,13 @@ impl StatefulProcess {
     }
 
     pub async fn exec(&self, cmd: Vec<u8>) -> crate::Result<()> {
-        self.sender.send(Message::Exec(cmd)).await
+        self.sender
+            .send(Message::Exec(cmd))
+            .await
             .map_err(|e| crate::Error::CommandError(format!("Failed to send command: {:?}", e)))?;
-        self.sender.send(Message::Data(b"\n".to_vec())).await
+        self.sender
+            .send(Message::Data(b"\n".to_vec()))
+            .await
             .map_err(|e| crate::Error::CommandError(format!("Failed to send newline: {:?}", e)))
     }
 
@@ -146,9 +165,14 @@ mod tests {
     #[tokio::test]
     async fn test_container_echo() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-        let stateful_process = StatefulProcess::new("bash", vec![], tx).await.expect("Failed to create stateful_process");
+        let stateful_process = StatefulProcess::new("bash", vec![], tx)
+            .await
+            .expect("Failed to create stateful_process");
 
-        stateful_process.exec("echo 'Hello, World!'".as_bytes().to_vec()).await.expect("Failed to execute echo command");
+        stateful_process
+            .exec("echo 'Hello, World!'".as_bytes().to_vec())
+            .await
+            .expect("Failed to execute echo command");
 
         let output = collect_output(&mut rx).await;
         assert_eq!(output.trim(), "Hello, World!");
@@ -157,9 +181,14 @@ mod tests {
     #[tokio::test]
     async fn test_container_arithmetic() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-        let stateful_process = StatefulProcess::new("bash", vec![], tx).await.expect("Failed to create stateful_process");
+        let stateful_process = StatefulProcess::new("bash", vec![], tx)
+            .await
+            .expect("Failed to create stateful_process");
 
-        stateful_process.exec("echo '2 + 2' | bc".as_bytes().to_vec()).await.expect("Failed to execute bc command");
+        stateful_process
+            .exec("echo '2 + 2' | bc".as_bytes().to_vec())
+            .await
+            .expect("Failed to execute bc command");
 
         let output = collect_output(&mut rx).await;
         assert_eq!(output.trim(), "4");
@@ -168,10 +197,18 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_commands() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-        let stateful_process = StatefulProcess::new("bash", vec![], tx).await.expect("Failed to create stateful_process");
+        let stateful_process = StatefulProcess::new("bash", vec![], tx)
+            .await
+            .expect("Failed to create stateful_process");
 
-        stateful_process.exec("echo 'First command'".as_bytes().to_vec()).await.expect("Failed to execute first command");
-        stateful_process.exec("echo 'Second command'".as_bytes().to_vec()).await.expect("Failed to execute second command");
+        stateful_process
+            .exec("echo 'First command'".as_bytes().to_vec())
+            .await
+            .expect("Failed to execute first command");
+        stateful_process
+            .exec("echo 'Second command'".as_bytes().to_vec())
+            .await
+            .expect("Failed to execute second command");
 
         let output = collect_output(&mut rx).await;
         let lines: Vec<&str> = output.lines().collect();
@@ -181,10 +218,14 @@ mod tests {
     #[tokio::test]
     async fn test_large_output() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-        let stateful_process = StatefulProcess::new("bash", vec![], tx).await.expect("Failed to create stateful_process");
+        let stateful_process = StatefulProcess::new("bash", vec![], tx)
+            .await
+            .expect("Failed to create stateful_process");
 
-        stateful_process.exec("for i in {1..1000}; do echo $i; done".as_bytes().to_vec())
-            .await.expect("Failed to execute large output command");
+        stateful_process
+            .exec("for i in {1..1000}; do echo $i; done".as_bytes().to_vec())
+            .await
+            .expect("Failed to execute large output command");
 
         let output = collect_output(&mut rx).await;
         let lines: Vec<&str> = output.lines().collect();
@@ -193,4 +234,3 @@ mod tests {
         assert_eq!(lines[999], "1000");
     }
 }
-

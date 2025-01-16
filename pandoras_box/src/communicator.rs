@@ -169,6 +169,14 @@ impl Communicator {
         }
     }
 
+    pub fn get_clients_by_os(&self, os_type: OS) -> Vec<(OS, &IpAddr, &Arc<dyn ClientWrapper>)> {
+        self.clients
+            .iter()
+            .filter(|(client_os, _, _)| *client_os == os_type)
+            .map(|(os, ip, client)| (*os, ip, client))
+            .collect()
+    }
+
     pub async fn disconnect_all(&self) -> Vec<HostOperationResult<()>> {
         join_all(self.clients.iter().map(|(os, ip, client)| async move {
             HostOperationResult {
