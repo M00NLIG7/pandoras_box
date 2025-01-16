@@ -23,7 +23,7 @@ jobs:
             extension: .exe
           - target: i686-unknown-linux-musl
             extension: ""
-
+    
     steps:
     - uses: actions/checkout@v4
     
@@ -40,20 +40,36 @@ jobs:
         cd chimera
         cross build --target ${{ matrix.target }} --release
         
-    - name: Debug - List Files
+    - name: Debug - List Target Directory
       run: |
-        echo "Listing release directory contents:"
-        find chimera/target/${{ matrix.target }}/release -type f
+        echo "Workspace root contents:"
+        ls -la
+        echo "Chimera directory contents:"
+        ls -la chimera
+        echo "Target directory contents:"
+        ls -la target || true
+        echo "Chimera target directory contents:"
+        ls -la chimera/target || true
+        
+    - name: Create Release Directory
+      run: |
+        mkdir -p release-artifacts
+        
+    - name: Copy Binary to Release Directory
+      run: |
+        find . -name "chimera${{ matrix.extension }}" -type f -exec cp {} release-artifacts/ \;
+        echo "Release artifacts directory contents:"
+        ls -la release-artifacts/
     
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: chimera-${{ matrix.target }}
-        path: chimera/target/${{ matrix.target }}/release/chimera${{ matrix.extension }}
+        path: release-artifacts/chimera${{ matrix.extension }}
         if-no-files-found: error
-
+        
     - name: Upload Release Assets
       if: github.event_name == 'release'
       uses: softprops/action-gh-release@v1
       with:
-        files: chimera/target/${{ matrix.target }}/release/chimera${{ matrix.extension }}
+        files: release-artifacts/chimera${{ matrix.extension }}
