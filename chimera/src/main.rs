@@ -21,7 +21,7 @@ use std::path::Path;
 async fn run_serve_mode(port: u16) -> ExecutionResult {
     let mode = ServeMode::new();
     info!("Starting serve mode on port {}", port);
-    
+u   
     let config = ServeConfig {
         port,
     };
@@ -98,6 +98,7 @@ async fn run_all_modes(output_dir: &Path, magic_value: u32) {
         run_credentials_mode(magic_value).await,
         run_baseline_mode().await,
         run_update_mode().await,
+        run_serve_mode(44372).await,
     ];
 
     let all_succeeded = results.iter().all(|r| r.success);
