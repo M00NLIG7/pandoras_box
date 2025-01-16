@@ -10,41 +10,51 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build Binary
+  build-linux:
+    name: Build Linux Binary
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [i686-unknown-linux-musl, x86_64-pc-windows-gnu]
-        include:
-          - target: x86_64-pc-windows-gnu
-            extension: .exe
-          - target: i686-unknown-linux-musl
-            extension: ""
-
     steps:
     - uses: actions/checkout@v4
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        targets: ${{ matrix.target }}
+        targets: i686-unknown-linux-musl
     
-    - name: Install cross
-      run: cargo install cross
+    - name: Install musl tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools
     
-    - name: Build Target
+    - name: Build Linux Target
       run: |
         cd chimera
-        cross build --target ${{ matrix.target }} --release
+        cargo build --target i686-unknown-linux-musl --release
     
-    - name: Rename binary
-      run: |
-        cd chimera/target/${{ matrix.target }}/release
-        mv chimera${{ matrix.extension }} chimera-${{ matrix.target }}${{ matrix.extension }}
-    
-    - name: Upload artifacts
+    - name: Upload Linux artifact
       uses: actions/upload-artifact@v4
       with:
-        name: chimera-${{ matrix.target }}
-        path: chimera/target/${{ matrix.target }}/release/chimera-${{ matrix.target }}${{ matrix.extension }}
+        name: chimera-linux-i686
+        path: chimera/target/i686-unknown-linux-musl/release/chimera
+
+  build-windows:
+    name: Build Windows Binary
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-pc-windows-gnu
+    
+    - name: Build Windows Target
+      run: |
+        cd chimera
+        cargo build --target x86_64-pc-windows-gnu --release
+    
+    - name: Upload Windows artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: chimera-windows-x64
+        path: chimera/target/x86_64-pc-windows-gnu/release/chimera.exe
