@@ -1,10 +1,17 @@
 name: Build Chimera Binary
 
 on:
+  # Trigger on release creation
+  release:
+    types: [created]
+  
+  # Allow manual trigger from GitHub Actions tab
+  workflow_dispatch:
+    
+  # Optionally trigger on specific tags
   push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+    tags:
+      - 'v*'  # Matches v1.0.0, v2.1.0, etc.
 
 env:
   CARGO_TERM_COLOR: always
