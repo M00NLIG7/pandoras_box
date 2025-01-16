@@ -38,6 +38,7 @@ struct ModeConfig<'a> {
 }
 
 // Define the available modes with their optional arguments
+/*
 const CHIMERA_MODES: [ModeConfig; 3] = [
     ModeConfig {
         name: "inventory",
@@ -56,6 +57,13 @@ const CHIMERA_MODES: [ModeConfig; 3] = [
     ModeConfig {
         name: "serve",
         args: None,
+    },
+];
+*/
+const CHIMERA_MODES: [ModeConfig; 1] = [
+    ModeConfig {
+        name: "all",
+        args: Some("-m 1234"),
     },
 ];
 
