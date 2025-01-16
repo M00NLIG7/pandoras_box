@@ -1,17 +1,12 @@
 name: Build Chimera Binary
 
 on:
-  # Trigger on release creation
   release:
     types: [created]
-  
-  # Allow manual trigger from GitHub Actions tab
   workflow_dispatch:
-    
-  # Optionally trigger on specific tags
   push:
     tags:
-      - 'v*'  # Matches v1.0.0, v2.1.0, etc.
+      - 'v*'
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,12 +39,18 @@ jobs:
       run: |
         cd chimera
         cross build --target ${{ matrix.target }} --release
+        
+    - name: Debug - List Files
+      run: |
+        echo "Listing release directory contents:"
+        find chimera/target/${{ matrix.target }}/release -type f
     
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: chimera-${{ matrix.target }}
         path: chimera/target/${{ matrix.target }}/release/chimera${{ matrix.extension }}
+        if-no-files-found: error
 
     - name: Upload Release Assets
       if: github.event_name == 'release'
