@@ -21,7 +21,7 @@ use std::path::Path;
 async fn run_serve_mode(port: u16) -> ExecutionResult {
     let mode = ServeMode::new();
     info!("Starting serve mode on port {}", port);
-u   
+
     let config = ServeConfig {
         port,
     };
