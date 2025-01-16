@@ -20,9 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout Repository
+      uses: actions/checkout@v4
     
-    - name: Create Tag
+    - name: Create Git Tag
       run: |
         git tag ${{ github.event.inputs.version }}
         git push origin ${{ github.event.inputs.version }}
@@ -38,7 +39,7 @@ jobs:
         draft: false
         prerelease: false
     
-    - name: Install Rust
+    - name: Install Rust Toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: i686-unknown-linux-musl,x86_64-pc-windows-gnu
@@ -52,7 +53,10 @@ jobs:
         cd chimera
         cross build --target i686-unknown-linux-musl --release
         mkdir -p release-artifacts
-        find . -type f -name "chimera" -exec cp {} release-artifacts/chimera \;
+        cp ../target/i686-unknown-linux-musl/release/chimera release-artifacts/chimera
+    
+    - name: Verify Linux Build Output
+      run: ls -l chimera/release-artifacts
     
     - name: Upload Linux Binary
       uses: actions/upload-release-asset@v1
@@ -60,7 +64,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./release-artifacts/chimera
+        asset_path: chimera/release-artifacts/chimera
         asset_name: chimera
         asset_content_type: application/octet-stream
     
@@ -70,7 +74,10 @@ jobs:
         cd chimera
         cross build --target x86_64-pc-windows-gnu --release
         mkdir -p release-artifacts
-        find . -type f -name "chimera.exe" -exec cp {} release-artifacts/chimera.exe \;
+        cp ../target/x86_64-pc-windows-gnu/release/chimera.exe release-artifacts/chimera.exe
+    
+    - name: Verify Windows Build Output
+      run: ls -l chimera/release-artifacts
     
     - name: Upload Windows Binary
       uses: actions/upload-release-asset@v1
@@ -78,6 +85,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./release-artifacts/chimera.exe
+        asset_path: chimera/release-artifacts/chimera.exe
         asset_name: chimera.exe
         asset_content_type: application/octet-stream
+
