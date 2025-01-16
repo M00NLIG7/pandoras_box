@@ -1,16 +1,19 @@
+use http_body_util::Full;
+use hyper::body::Bytes;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Request, Response};
+use hyper_util::rt::TokioIo;
+use log::{error, info};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use http_body_util::Full;
-use hyper::service::service_fn;
-use hyper::body::Bytes;
-use hyper::server::conn::http1;
-use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use log::{error, info};
+use tokio::net::TcpListener;
+
+#[cfg(target_os = "windows")]
+use tokio::process::Command;
 
 pub struct FileServer {
     root_dir: PathBuf,
@@ -23,24 +26,31 @@ impl FileServer {
     pub fn new(root_dir: PathBuf, port: u16) -> Self {
         #[cfg(target_os = "windows")]
         let rule_name = format!("ChimeraFileServer_{}", port);
-        
+
         #[cfg(target_os = "windows")]
-        return Self { root_dir, port, rule_name };
-        
+        return Self {
+            root_dir,
+            port,
+            rule_name,
+        };
+
         #[cfg(not(target_os = "windows"))]
         Self { root_dir, port }
     }
 
     #[cfg(target_os = "windows")]
-    fn configure_windows_firewall(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn configure_windows_firewall(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Configuring Windows Firewall for port {}", self.port);
 
         // First check if the rule already exists
-        let check_cmd = Command::new("netsh")
+        let check_output = Command::new("netsh")
             .args(&["advfirewall", "firewall", "show", "rule", "name=all"])
-            .output()?;
+            .output()
+            .await?;
 
-        let output = String::from_utf8_lossy(&check_cmd.stdout);
+        let output = String::from_utf8_lossy(&check_output.stdout);
         if !output.contains(&self.rule_name) {
             // Add new firewall rule
             let status = Command::new("netsh")
@@ -55,7 +65,8 @@ impl FileServer {
                     &format!("localport={}", self.port),
                     "protocol=TCP",
                 ])
-                .status()?;
+                .status()
+                .await?;
 
             if !status.success() {
                 error!("Failed to add firewall rule");
@@ -72,12 +83,15 @@ impl FileServer {
 
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Configure firewall on Windows and set up cleanup
-        #[cfg(target_os = "windows")] {
-            self.configure_windows_firewall()?;
+        #[cfg(target_os = "windows")]
+        {
+            self.configure_windows_firewall().await?;
             let rule_name = self.rule_name.clone();
             let _guard = CleanupGuard::new(move || {
+                // Note: We can't make the closure itself async, so we use a blocking command here
+                // This is fine for cleanup as it's only called once when shutting down
                 info!("Cleaning up firewall rule...");
-                let cleanup_cmd = Command::new("netsh")
+                let cleanup_cmd = std::process::Command::new("netsh")
                     .args(&[
                         "advfirewall",
                         "firewall",
@@ -86,7 +100,7 @@ impl FileServer {
                         &format!("name={}", rule_name),
                     ])
                     .status();
-                
+
                 if let Err(e) = cleanup_cmd {
                     error!("Failed to cleanup firewall: {}", e);
                 }
@@ -109,7 +123,9 @@ impl FileServer {
                         if let Err(err) = http1::Builder::new()
                             .serve_connection(
                                 io,
-                                service_fn(move |req| handle_request(req, Arc::clone(&root_dir_clone))),
+                                service_fn(move |req| {
+                                    handle_request(req, Arc::clone(&root_dir_clone))
+                                }),
                             )
                             .await
                         {
