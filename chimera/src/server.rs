@@ -11,15 +11,17 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "windows")]
 use tokio::process::Command;
 
 pub struct FileServer {
-    root_dir: PathBuf,
+    root_dir: Arc<PathBuf>,
     port: u16,
     #[cfg(target_os = "windows")]
     rule_name: String,
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 impl FileServer {
@@ -29,13 +31,18 @@ impl FileServer {
 
         #[cfg(target_os = "windows")]
         return Self {
-            root_dir,
+            root_dir: Arc::new(root_dir),
             port,
             rule_name,
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
         };
 
         #[cfg(not(target_os = "windows"))]
-        Self { root_dir, port }
+        Self { 
+            root_dir: Arc::new(root_dir), 
+            port,
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -44,7 +51,6 @@ impl FileServer {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Configuring Windows Firewall for port {}", self.port);
 
-        // First check if the rule already exists
         let check_output = Command::new("netsh")
             .args(&["advfirewall", "firewall", "show", "rule", "name=all"])
             .output()
@@ -52,7 +58,6 @@ impl FileServer {
 
         let output = String::from_utf8_lossy(&check_output.stdout);
         if !output.contains(&self.rule_name) {
-            // Add new firewall rule
             let status = Command::new("netsh")
                 .args(&[
                     "advfirewall",
@@ -81,113 +86,109 @@ impl FileServer {
         Ok(())
     }
 
-    pub async fn serve(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Configure firewall on Windows and set up cleanup
-        #[cfg(target_os = "windows")]
-        {
-            self.configure_windows_firewall().await?;
-            let rule_name = self.rule_name.clone();
-            let _guard = CleanupGuard::new(move || {
-                // Note: We can't make the closure itself async, so we use a blocking command here
-                // This is fine for cleanup as it's only called once when shutting down
-                info!("Cleaning up firewall rule...");
-                let cleanup_cmd = std::process::Command::new("netsh")
-                    .args(&[
-                        "advfirewall",
-                        "firewall",
-                        "delete",
-                        "rule",
-                        &format!("name={}", rule_name),
-                    ])
-                    .status();
+    #[cfg(target_os = "windows")]
+    async fn cleanup_windows_firewall(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        info!("Cleaning up firewall rule...");
+        let status = Command::new("netsh")
+            .args(&[
+                "advfirewall",
+                "firewall",
+                "delete",
+                "rule",
+                &format!("name={}", self.rule_name),
+            ])
+            .status()
+            .await?;
 
-                if let Err(e) = cleanup_cmd {
-                    error!("Failed to cleanup firewall: {}", e);
-                }
-            });
+        if !status.success() {
+            error!("Failed to cleanup firewall rule");
+            return Err("Failed to cleanup firewall".into());
         }
+
+        info!("Successfully cleaned up firewall rule");
+        Ok(())
+    }
+
+    pub async fn serve(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        #[cfg(target_os = "windows")]
+        self.configure_windows_firewall().await?;
 
         let addr: std::net::SocketAddr = ([0, 0, 0, 0], self.port).into();
         let listener = TcpListener::bind(addr).await?;
 
         info!("Starting file server on port {}", self.port);
-        let root_dir = Arc::new(self.root_dir);
+        let root_dir = Arc::clone(&self.root_dir);
+        let shutdown_flag = Arc::clone(&self.shutdown_flag);
+
+        let mut connection_tasks = Vec::new();
 
         loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let io = TokioIo::new(stream);
-                    let root_dir_clone = Arc::clone(&root_dir);
+            if self.shutdown_flag.load(Ordering::SeqCst) {
+                info!("Shutdown flag detected, stopping server");
+                break;
+            }
 
-                    tokio::task::spawn(async move {
-                        if let Err(err) = http1::Builder::new()
-                            .serve_connection(
-                                io,
-                                service_fn(move |req| {
-                                    handle_request(req, Arc::clone(&root_dir_clone))
-                                }),
-                            )
-                            .await
-                        {
-                            error!("Error serving connection: {:?}", err);
-                        }
-                    });
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok((stream, _)) => {
+                            let io = TokioIo::new(stream);
+                            let root_dir_clone = Arc::clone(&root_dir);
+                            let shutdown_flag = Arc::clone(&self.shutdown_flag);
 
-                    // Check if all files have been served
-                    if let Ok(entries) = tokio::fs::read_dir(&*root_dir).await {
-                        let mut has_files = false;
-                        let mut entries = entries;
-                        while let Ok(Some(_)) = entries.next_entry().await {
-                            has_files = true;
-                            break;
+                            let handle = tokio::spawn(async move {
+                                if let Err(err) = http1::Builder::new()
+                                    .serve_connection(
+                                        io,
+                                        service_fn(move |req| {
+                                            handle_request(req, Arc::clone(&root_dir_clone), Arc::clone(&shutdown_flag))
+                                        }),
+                                    )
+                                    .await
+                                {
+                                    error!("Error serving connection: {:?}", err);
+                                }
+                            });
+
+                            connection_tasks.push(handle);
                         }
-                        if !has_files {
-                            info!("All files have been served, shutting down server");
-                            break;
+                        Err(e) => {
+                            error!("Failed to accept connection: {:?}", e);
                         }
                     }
                 }
-                Err(e) => {
-                    error!("Failed to accept connection: {:?}", e);
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                    // Cleanup finished tasks
+                    connection_tasks.retain(|task| !task.is_finished());
                 }
             }
         }
 
+        // Wait for ongoing connections to complete
+        info!("Waiting for {} ongoing connections to complete", connection_tasks.len());
+        for task in connection_tasks {
+            let _ = task.await;
+        }
+
+        #[cfg(target_os = "windows")]
+        self.cleanup_windows_firewall().await?;
+
+        info!("File server shutdown complete");
+        std::process::exit(0);
+        
+        #[allow(unreachable_code)]
         Ok(())
-    }
-}
-
-// RAII guard for cleanup
-#[cfg(target_os = "windows")]
-struct CleanupGuard<F: FnOnce()> {
-    cleanup: Option<F>,
-}
-
-#[cfg(target_os = "windows")]
-impl<F: FnOnce()> CleanupGuard<F> {
-    fn new(cleanup: F) -> Self {
-        Self {
-            cleanup: Some(cleanup),
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl<F: FnOnce()> Drop for CleanupGuard<F> {
-    fn drop(&mut self) {
-        if let Some(cleanup) = self.cleanup.take() {
-            cleanup();
-        }
     }
 }
 
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     root: Arc<PathBuf>,
+    shutdown_flag: Arc<AtomicBool>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     match (req.method(), req.uri().path()) {
         (&hyper::Method::GET, "/") => serve_directory_listing(&root).await,
-        (&hyper::Method::GET, path) => serve_file(&root, path).await,
+        (&hyper::Method::GET, path) => serve_file(&root, path, shutdown_flag).await,
         _ => Ok(Response::builder()
             .status(hyper::StatusCode::METHOD_NOT_ALLOWED)
             .body(Full::new(Bytes::new()))
@@ -236,7 +237,11 @@ async fn serve_directory_listing(root: &Path) -> Result<Response<Full<Bytes>>, I
         .unwrap())
 }
 
-async fn serve_file(root: &Path, path: &str) -> Result<Response<Full<Bytes>>, Infallible> {
+async fn serve_file(
+    root: &Path,
+    path: &str,
+    shutdown_flag: Arc<AtomicBool>,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     let path = path.trim_start_matches('/');
     let full_path = root.join(path);
 
@@ -257,7 +262,13 @@ async fn serve_file(root: &Path, path: &str) -> Result<Response<Full<Bytes>>, In
                         .first_or_octet_stream()
                         .to_string();
 
-                    // After successful read, delete the file
+                    // Check if this is application.log and set the shutdown flag
+                    if path == "application.log" {
+                        info!("application.log has been served, triggering shutdown");
+                        shutdown_flag.store(true, Ordering::SeqCst);
+                    }
+
+                    // Try to delete the file, but don't require it to succeed
                     if let Err(e) = tokio::fs::remove_file(&full_path).await {
                         error!("Failed to delete file after serving: {}", e);
                     } else {
