@@ -24,6 +24,9 @@ use std::time::Duration;
 
 use crate::logging::{log_failure, log_output, log_results, log_skipped, log_success, log_host_results};
 
+const MAX_RETRIES: u32 = 3;
+const INITIAL_DELAY_MS: u64 = 1000; // 1 second
+
 //cmd.exe /c echo Dim xhr: Set xhr = CreateObject("MSXML2.XMLHTTP.6.0"): xhr.Open "GET", "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera", False: xhr.Send: Set stream = CreateObject("ADODB.Stream"): stream.Open: stream.Type = 1: stream.Write xhr.responseBody: stream.SaveToFile "C:\Temp\chimera.exe", 2: stream.Close > dl.vbs && cscript //B dl.vbs
 
 static CHIMERA_URL_UNIX: &str = "https://github.com/M00NLIG7/pandoras_box/releases/download/v1.0.0/chimera";
@@ -250,12 +253,15 @@ impl NetworkManager {
                 Err(e) => {
                     warn!("SSH connection failed for {}: {}", host.ip, e);
                     info!("Initiating WinExe fallback for {}", host.ip);
-                    self.try_windows_winexe(host, password).await
+                    return Err(crate::Error::CommunicatorError("No usable client".to_string()))
+                    //self.try_windows_winexe(host, password).await
                 }
             }
         } else {
             info!("No SSH port available, using WinExe for {}", host.ip);
-            self.try_windows_winexe(host, password).await
+            return Err(crate::Error::CommunicatorError("No usable client".to_string()))
+
+            //self.try_windows_winexe(host, password).await
         }
     }
 
@@ -271,6 +277,7 @@ impl NetworkManager {
         .map_err(Into::into)
     }
 
+    /*
     async fn try_windows_winexe(&self, host: &Arc<Host>, password: &str) -> Result<OSConfig> {
         WinexeConfig::password(
             "Administrator",
@@ -284,6 +291,50 @@ impl NetworkManager {
             warn!("Failed to create WinExe config for {}: {}", host.ip, e);
             e.into()
         })
+    }
+    */
+}
+
+async fn fetch_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    filename: &str,
+    ip: &str,
+    uri_path: &str,
+) -> Result<()> {
+    let mut attempt = 0;
+    let mut delay_ms = INITIAL_DELAY_MS;
+
+    loop {
+        match client.get(url).send().await {
+            Ok(response) => {
+                match response.text().await {
+                    Ok(text) => {
+                        let mut file = tokio::fs::File::create(filename).await?;
+                        file.write_all(text.as_bytes()).await?;
+                        info!("Successfully saved {} for {} to {}", uri_path, ip, filename);
+                        return Ok(());
+                    },
+                    Err(e) => {
+                        if attempt >= MAX_RETRIES {
+                            error!("Failed to read response from {} after {} attempts: {}", ip, attempt + 1, e);
+                            return Err(Error::CommandError(format!("Failed to read response: {}", e)));
+                        }
+                    }
+                }
+            },
+            Err(e) => {
+                if attempt >= MAX_RETRIES {
+                    error!("Failed to fetch {} from {} after {} attempts: {}", uri_path, ip, attempt + 1, e);
+                    return Err(Error::CommandError(format!("Failed to fetch file: {}", e)));
+                }
+            }
+        }
+
+        attempt += 1;
+        info!("Retry attempt {} for {} after {}ms delay", attempt, ip, delay_ms);
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        delay_ms *= 2; // Exponential backoff
     }
 }
 
@@ -301,6 +352,7 @@ impl Orchestrator {
     // Generic function to fetch files from hosts on port 44372
     /// uri_path: The path part of the URI (e.g., "inventory.json")
     /// output_prefix: Prefix for the output filename (e.g., "chimera_inventory")
+
     async fn fetch_file(&self, hosts: &[Arc<Host>], uri_path: &str, output_prefix: &str) -> Result<()> {
         info!("Starting file fetch for {} hosts, uri: {}", hosts.len(), uri_path);
         
@@ -316,26 +368,7 @@ impl Orchestrator {
                 let filename = format!("{}_{}.json", output_prefix, ip);
                 
                 info!("Fetching {} from {}", uri_path, url);
-                match client.get(&url).send().await {
-                    Ok(response) => {
-                        match response.text().await {
-                            Ok(text) => {
-                                let mut file = tokio::fs::File::create(&filename).await?;
-                                file.write_all(text.as_bytes()).await?;
-                                info!("Successfully saved {} for {} to {}", uri_path, ip, filename);
-                                Ok(())
-                            },
-                            Err(e) => {
-                                error!("Failed to read response from {}: {}", ip, e);
-                                Err(Error::CommandError(format!("Failed to read response: {}", e)))
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        error!("Failed to fetch {} from {}: {}", uri_path, ip, e);
-                        Err(Error::CommandError(format!("Failed to fetch file: {}", e)))
-                    }
-                }
+                fetch_with_retry(&client, &url, &filename, &ip, &uri_path).await
             }
         }).collect();
 
@@ -349,7 +382,6 @@ impl Orchestrator {
                 Err(e) => error!("Failed to fetch {} from {}: {}", uri_path, host.ip, e)
             }
         }
-
         Ok(())
     }
 
