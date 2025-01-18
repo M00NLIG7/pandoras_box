@@ -14,6 +14,7 @@ use crate::types::{ExecutionMode, ExecutionResult};
 use chrono::Utc;
 use clap::{arg, command, value_parser, Command};
 use log::{error, info};
+use utils::get_default_output_dir;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -122,7 +123,8 @@ async fn main() {
         return;
     }
 
-    let output_dir = Path::new("output");
+    let output_dir = get_default_output_dir();
+
     fs::create_dir_all(output_dir).expect("Failed to create output directory");
 
     let matches = command!()

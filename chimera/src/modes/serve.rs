@@ -2,9 +2,12 @@ use std::path::PathBuf;
 use super::ModeExecutor;
 use crate::types::{ExecutionMode, ExecutionResult};
 use crate::server::FileServer;
+use crate::utils::get_default_output_dir;
 use log::{error, info};
 use tokio::spawn;
 use std::process;
+use chrono;
+
 
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
@@ -19,8 +22,18 @@ impl ModeExecutor for ServeMode {
 
     async fn execute(&self, args: Self::Args) -> ExecutionResult {
         let config = args;
-        let output_dir = PathBuf::from("./output");
+        let output_dir = get_default_output_dir();
         
+        // Ensure output directory exists
+        if let Err(e) = std::fs::create_dir_all(&output_dir) {
+            error!("Failed to create output directory: {}", e);
+            return ExecutionResult::new(
+                ExecutionMode::Serve,
+                false,
+                format!("Failed to create output directory: {}", e)
+            );
+        }
+
         info!("Starting file server on port {} in background", config.port);
         let current_exe = std::env::current_exe()
             .expect("Failed to get current executable path");
@@ -36,7 +49,11 @@ impl ModeExecutor for ServeMode {
                 .args(&[
                     "/create",
                     "/tn", &task_name,
-                    "/tr", &format!("\"{}\" serve-internal --port {}", current_exe_str, config.port),
+                    "/tr", &format!("\"{}\" serve-internal --port {} --output \"{}\"", 
+                        current_exe_str, 
+                        config.port,
+                        output_dir.to_string_lossy()
+                    ),
                     "/sc", "once",
                     "/st", &chrono::Local::now().format("%H:%M").to_string(),
                     "/f",
@@ -87,6 +104,8 @@ impl ModeExecutor for ServeMode {
                 .arg("serve-internal")
                 .arg("--port")
                 .arg(config.port.to_string())
+                .arg("--output")
+                .arg(output_dir.to_string_lossy().to_string())
                 .spawn();
 
             match child {
@@ -114,7 +133,17 @@ impl ServeMode {
     }
 
     pub async fn serve_internal(port: u16) -> ExecutionResult {
-        let output_dir = PathBuf::from("./output");
+        let output_dir = get_default_output_dir();
+        
+        // Ensure output directory exists
+        if let Err(e) = std::fs::create_dir_all(&output_dir) {
+            error!("Failed to create output directory: {}", e);
+            return ExecutionResult::new(
+                ExecutionMode::Serve,
+                false,
+                format!("Failed to create output directory: {}", e)
+            );
+        }
         
         // Create the server without a timeout
         let server = FileServer::new(output_dir.clone(), port);

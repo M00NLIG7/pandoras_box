@@ -15,7 +15,7 @@ use rustrc::winexe::WinexeConfig;
 use reqwest;
 use futures::stream;
 use futures::stream::StreamExt;
-
+use std::collections::HashSet; // Add this to imports if not already present
 use futures::future::join_all;
 use log::{error, info, warn};
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -477,44 +477,62 @@ impl Orchestrator {
     }
 
     async fn download_chimera_win(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
-        let mut results = Vec::new();
-        let target_ip = "10.100.136.111";
+       let target_ip = "10.100.136.111";
+       
+       // Create temp directory
+       let mkdir_cmd = "cmd.exe /c md C:\\Temp";
+       let mkdir_results = communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
+       
+       // Debug logging for target IP
+       for result in &mkdir_results {
+           if result.ip == target_ip {
+               match &result.result {
+                   Ok(output) => {
+                       println!("Directory creation output for {}", target_ip);
+                       println!("Stdout: {}", String::from_utf8_lossy(&output.stdout));
+                       println!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
+                   }
+                   Err(e) => println!("Directory creation error for {}: {}", target_ip, e),
+               }
+           }
+       }
 
-        // Create temp directory
-        let mkdir_cmd = "cmd.exe /c md C:\\Temp";
-        let mkdir_results = communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
-        for result in &mkdir_results {
-            if result.ip == target_ip {
-                match &result.result {
-                    Ok(output) => {
-                        println!("Directory creation output for {}", target_ip);
-                        println!("Stdout: {}", String::from_utf8_lossy(&output.stdout));
-                        println!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
-                    }
-                    Err(e) => println!("Directory creation error for {}: {}", target_ip, e),
-                }
-            }
-        }
-        results.extend(log_host_results(mkdir_results, &host_map, "directory creation"));
+       // Only proceed with download for hosts where mkdir succeeded
+       let successful_mkdir_ips: Vec<String> = mkdir_results.iter()
+           .filter(|result| result.result.is_ok())
+           .map(|result| result.ip.clone())
+           .collect();
 
-        // Generate and execute the base64 download command
-        let download_cmd = Self::generate_base64_download_command(CHIMERA_URL_WIN);
-        let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
-        for result in &download_results {
-            if result.ip == target_ip {
-                match &result.result {
-                    Ok(output) => {
-                        println!("Download command output for {}", target_ip);
-                        println!("Stdout: {}", String::from_utf8_lossy(&output.stdout));
-                        println!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
-                    }
-                    Err(e) => println!("Download error for {}: {}", target_ip, e),
-                }
-            }
-        }
-        results.extend(log_host_results(download_results, &host_map, "chimera download"));
+       if successful_mkdir_ips.is_empty() {
+           return vec![];
+       }
 
-        results
+       // Generate and execute the base64 download command
+       let download_cmd = Self::generate_base64_download_command(CHIMERA_URL_WIN);
+       let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
+       
+       // Debug logging for target IP
+       for result in &download_results {
+           if result.ip == target_ip {
+               match &result.result {
+                   Ok(output) => {
+                       println!("Download command output for {}", target_ip);
+                       println!("Stdout: {}", String::from_utf8_lossy(&output.stdout));
+                       println!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
+                   }
+                   Err(e) => println!("Download error for {}: {}", target_ip, e),
+               }
+           }
+       }
+
+       // Filter download results to only include hosts where mkdir succeeded
+       let filtered_results: Vec<HostOperationResult<CommandOutput>> = download_results
+           .into_iter()
+           .filter(|result| successful_mkdir_ips.contains(&result.ip))
+           .collect();
+
+       // Only return the download results
+       log_host_results(filtered_results, &host_map, "chimera download")
     }
 
     async fn download_chimera_unix(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
@@ -623,16 +641,22 @@ impl Orchestrator {
         };
 
         let deployment_results = self.download_chimera(&communicator, host_map).await;
-        let deployed_hosts: Vec<Arc<Host>> = deployment_results
-            .iter()
-            .filter_map(|(host, result)| match result {
-                Ok(_) => Some(host.clone()),
-                Err(e) => {
-                    error!("Failed to deploy to {}: {}", host.ip, e);
-                    None
-                }
-            })
-            .collect();
+        let deployed_hosts: Vec<Arc<Host>> = {
+            // First collect IPs we've seen into a HashSet
+            let mut seen_ips = HashSet::new();
+            
+            deployment_results
+                .iter()
+                .filter_map(|(host, result)| match result {
+                    Ok(_) if seen_ips.insert(host.ip.clone()) => Some(host.clone()),
+                    Ok(_) => None, // Skip if we've seen this IP before
+                    Err(e) => {
+                        error!("Failed to deploy to {}: {}", host.ip, e);
+                        None
+                    }
+                })
+                .collect()
+        };
 
         /*
         let deployed_hosts: Vec<Arc<Host>> = deployment_results
@@ -667,7 +691,7 @@ impl Orchestrator {
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        //tokio::time::sleep(Duration::from_secs(5)).await;
 
         self.fetch_inventory(&deployed_hosts).await?;
         self.fetch_application_log(&deployed_hosts).await?;
