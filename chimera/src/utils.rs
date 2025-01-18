@@ -3,6 +3,17 @@ use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use std::process::Stdio;
 use std::io;
 
+pub fn get_default_output_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(r"C:\Temp\output")
+    }
+    #[cfg(unix)]
+    {
+        PathBuf::from("/tmp/output")
+    }
+}
+
 pub struct CommandOutput {
     pub status: i32,
     pub stdout: Vec<u8>,
