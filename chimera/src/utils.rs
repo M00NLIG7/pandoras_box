@@ -2,6 +2,7 @@ use tokio::process::{Command, Child};
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use std::process::Stdio;
 use std::io;
+use std::path::PathBuf;
 
 pub fn get_default_output_dir() -> PathBuf {
     #[cfg(windows)]
