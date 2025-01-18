@@ -125,7 +125,7 @@ async fn main() {
 
     let output_dir = get_default_output_dir();
 
-    fs::create_dir_all(output_dir).expect("Failed to create output directory");
+    fs::create_dir_all(&output_dir).expect("Failed to create output directory");
 
     let matches = command!()
         .subcommand(
@@ -173,10 +173,10 @@ async fn main() {
                 .get_one::<u32>("magic")
                 .copied()
                 .expect("Required argument");
-            run_all_modes(output_dir, magic_value).await;
+            run_all_modes(&output_dir, magic_value).await;
         }
         Some(("inventory", _)) => {
-            let _ = run_inventory_mode(output_dir).await;
+            let _ = run_inventory_mode(&output_dir).await;
         }
         Some(("credentials", sub_matches)) => {
             let magic_value = sub_matches

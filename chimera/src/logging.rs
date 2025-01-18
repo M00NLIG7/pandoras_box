@@ -27,7 +27,7 @@ pub fn init_logging() -> Result<(), SetLoggerError> {
     let default_output = get_default_output_dir();
 
     // Create ./output directory if it doesn't exist
-    std::fs::create_dir_all(default_output).expect("Failed to create output directory");
+    std::fs::create_dir_all(&default_output).expect("Failed to create output directory");
 
     let env = env_logger::Env::default().default_filter_or("info");
     
