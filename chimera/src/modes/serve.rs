@@ -49,10 +49,9 @@ impl ModeExecutor for ServeMode {
                 .args(&[
                     "/create",
                     "/tn", &task_name,
-                    "/tr", &format!("\"{}\" serve-internal --port {} --output \"{}\"", 
+                    "/tr", &format!("\"{}\" serve-internal --port {}", 
                         current_exe_str, 
-                        config.port,
-                        output_dir.to_string_lossy()
+                        config.port
                     ),
                     "/sc", "once",
                     "/st", &chrono::Local::now().format("%H:%M").to_string(),
@@ -104,8 +103,6 @@ impl ModeExecutor for ServeMode {
                 .arg("serve-internal")
                 .arg("--port")
                 .arg(config.port.to_string())
-                .arg("--output")
-                .arg(output_dir.to_string_lossy().to_string())
                 .spawn();
 
             match child {

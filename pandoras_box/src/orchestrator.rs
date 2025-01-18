@@ -691,7 +691,7 @@ impl Orchestrator {
             }
         }
 
-        //tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
 
         self.fetch_inventory(&deployed_hosts).await?;
         self.fetch_application_log(&deployed_hosts).await?;
