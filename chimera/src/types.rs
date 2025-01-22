@@ -136,7 +136,7 @@ impl ExecutionMode {
 ///
 /// This enum is used to indicate whether a service is currently running,
 /// stopped, or in an error state.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum ServiceStatus {
     /// Service is running and operational
@@ -153,7 +153,7 @@ pub enum ServiceStatus {
 ///
 /// This enum determines whether a service will automatically start
 /// when the system boots up.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub enum ServiceStartType {
     /// Service will start automatically on system boot
@@ -166,7 +166,7 @@ pub enum ServiceStartType {
 ///
 /// This struct contains all relevant information about a service,
 /// including its current state and startup configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Service {
     /// Unique identifier for the service

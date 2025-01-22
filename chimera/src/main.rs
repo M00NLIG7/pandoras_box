@@ -11,7 +11,6 @@ use crate::modes::inventory::InventoryMode;
 use crate::modes::serve::{ServeConfig, ServeMode};
 use crate::modes::ModeExecutor;
 use crate::types::{ExecutionMode, ExecutionResult};
-use chrono::Utc;
 use clap::{arg, command, value_parser, Command};
 use log::{error, info};
 use utils::get_default_output_dir;
