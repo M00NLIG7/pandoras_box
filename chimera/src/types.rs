@@ -245,6 +245,8 @@ pub struct ContainerNetwork {
 pub struct Container {
     /// Unique container identifier
     pub(crate) container_id: String,
+    /// Image name used to create the container
+    pub(crate) image: String,
     /// User-assigned container name
     pub(crate) name: String,
     /// Network configurations
