@@ -307,14 +307,11 @@ impl SlackwareInit {
     }
 
     async fn get_startup_cache(&self) -> Arc<HashMap<String, ServiceStartType>> {
-        let map = self
+        self
             .startup_cache
             .get_or_init(|| async { Arc::new(self.build_startup_cache().await) })
             .await
             .clone();
-
-        println!("{:?}", map);
-        map
     }
 
     async fn list_services(&self) -> Result<Vec<Service>> {
