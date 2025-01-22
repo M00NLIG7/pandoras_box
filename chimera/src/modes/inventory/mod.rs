@@ -3,17 +3,17 @@ mod platform;
 use super::ModeExecutor;
 use crate::error::{Error, Result};
 use crate::types::{
-    Container, ContainerNetwork, ContainerVolume, Disk, ExecutionMode, 
-    ExecutionResult, Host, User, UserInfo
+    Container, ContainerNetwork, ContainerVolume, Disk, ExecutionMode, ExecutionResult, Host, User,
+    UserInfo,
 };
 use crate::utils::CommandExecutor;
 use platform::conn_info;
 
-use local_ip_address::local_ip;
-use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt};
-use serde_json::{Map, Value};
 use futures::future::join_all;
+use local_ip_address::local_ip;
 use log::{debug, error};
+use serde_json::{Map, Value};
+use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt};
 
 pub struct InventoryMode {
     system: System,
@@ -71,7 +71,8 @@ impl InventoryMode {
     }
 
     fn get_disks(&self) -> Vec<Disk> {
-        self.system.disks()
+        self.system
+            .disks()
             .iter()
             .map(|disk| Disk {
                 name: disk.name().to_str().unwrap().into(),
@@ -86,7 +87,8 @@ impl InventoryMode {
     }
 
     fn get_users(&self) -> Vec<User> {
-        self.system.users()
+        self.system
+            .users()
             .iter()
             .map(|user| User {
                 name: user.name().into(),
@@ -113,6 +115,16 @@ impl InventoryMode {
             let commands = vec!["docker", "podman"];
             let mut containers = Vec::new();
 
+            let kubes = self.get_kubernetes_containers().await;
+
+            containers.extend(match kubes {
+                Ok(kubes) => kubes,
+                Err(e) => {
+                    error!("Failed to get Kubernetes containers: {}", e);
+                    Vec::new()
+                }
+            });
+
             for command in commands {
                 match self.get_generic_containers(command).await {
                     Ok(generic_containers) => containers.extend(generic_containers),
@@ -124,14 +136,15 @@ impl InventoryMode {
     }
 
     async fn get_container_ids(&self, command: &str) -> Result<Vec<String>> {
-        let output = match CommandExecutor::execute_command(command, Some(&["ps", "-q"]), None).await {
-            Ok(output) => output,
-            Err(e) => {
-                let err = Error::Execution(format!("Failed to get container IDs: {}", e));
-                error!("{}", err);
-                return Err(err);
-            }
-        };
+        let output =
+            match CommandExecutor::execute_command(command, Some(&["ps", "-q"]), None).await {
+                Ok(output) => output,
+                Err(e) => {
+                    let err = Error::Execution(format!("Failed to get container IDs: {}", e));
+                    error!("{}", err);
+                    return Err(err);
+                }
+            };
 
         Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
@@ -147,19 +160,17 @@ impl InventoryMode {
         let inspect_futures: Vec<_> = container_ids
             .iter()
             .map(|id| async move {
-                let inspect_result = CommandExecutor::execute_command(
-                    command,
-                    Some(&["inspect", id]),
-                    None,
-                ).await;
-                
+                let inspect_result =
+                    CommandExecutor::execute_command(command, Some(&["inspect", id]), None).await;
+
                 match inspect_result {
                     Ok(output) => {
                         let inspect_str = String::from_utf8_lossy(&output.stdout);
                         self.generic_container(&inspect_str)
-                    },
+                    }
                     Err(e) => {
-                        let err = Error::Execution(format!("Failed to inspect container {}: {}", id, e));
+                        let err =
+                            Error::Execution(format!("Failed to inspect container {}: {}", id, e));
                         error!("{}", err);
                         Err(err)
                     }
@@ -168,15 +179,14 @@ impl InventoryMode {
             .collect();
 
         let results = join_all(inspect_futures).await;
-        
-        Ok(results.into_iter()
-            .filter_map(|result| {
-                match result {
-                    Ok(container) => Some(container),
-                    Err(e) => {
-                        error!("{}", e);
-                        None
-                    }
+
+        Ok(results
+            .into_iter()
+            .filter_map(|result| match result {
+                Ok(container) => Some(container),
+                Err(e) => {
+                    error!("{}", e);
+                    None
                 }
             })
             .collect())
@@ -207,7 +217,10 @@ impl InventoryMode {
         })
     }
 
-    fn networks_from_inspect(&self, networks: &Option<&Map<String, Value>>) -> Vec<ContainerNetwork> {
+    fn networks_from_inspect(
+        &self,
+        networks: &Option<&Map<String, Value>>,
+    ) -> Vec<ContainerNetwork> {
         networks.map_or(Vec::new(), |networks| {
             networks
                 .iter()
@@ -217,10 +230,7 @@ impl InventoryMode {
                         .as_str()
                         .unwrap_or_default()
                         .into(),
-                    gateway: network_data["Gateway"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .into(),
+                    gateway: network_data["Gateway"].as_str().unwrap_or_default().into(),
                     mac_address: network_data["MacAddress"]
                         .as_str()
                         .unwrap_or_default()
@@ -241,8 +251,10 @@ impl InventoryMode {
                             host_ports_array
                                 .iter()
                                 .filter_map(|host_port_details| {
-                                    let host_ip = host_port_details["HostIp"].as_str().unwrap_or("0.0.0.0");
-                                    let host_port = host_port_details["HostPort"].as_str().unwrap_or("");
+                                    let host_ip =
+                                        host_port_details["HostIp"].as_str().unwrap_or("0.0.0.0");
+                                    let host_port =
+                                        host_port_details["HostPort"].as_str().unwrap_or("");
                                     Some(format!("{}:{}->{}", host_ip, host_port, container_port))
                                 })
                                 .collect()
@@ -250,6 +262,139 @@ impl InventoryMode {
                 })
                 .collect()
         })
+    }
+
+    async fn get_kubernetes_containers(&self) -> Result<Vec<Container>> {
+        let output = match CommandExecutor::execute_command(
+            "kubectl",
+            Some(&["get", "pods", "--all-namespaces", "-o", "json"]),
+            None,
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(e) => {
+                let err = Error::Execution(format!("Failed to get Kubernetes pods: {}", e));
+                error!("{}", err);
+                return Err(err);
+            }
+        };
+
+        let pods: Value = serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
+            .map_err(|e| Error::Execution(format!("Failed to parse Kubernetes JSON: {}", e)))?;
+
+        let mut containers = Vec::new();
+
+        if let Some(items) = pods["items"].as_array() {
+            for pod in items {
+                let namespace = pod["metadata"]["namespace"].as_str().unwrap_or_default();
+                let pod_name = pod["metadata"]["name"].as_str().unwrap_or_default();
+                let pod_ip = pod["status"]["podIP"].as_str().unwrap_or_default();
+
+                if let Some(pod_containers) = pod["spec"]["containers"].as_array() {
+                    for container_spec in pod_containers {
+                        let container_name = container_spec["name"].as_str().unwrap_or_default();
+
+                        // Get container status
+                        let status = if let Some(container_statuses) =
+                            pod["status"]["containerStatuses"].as_array()
+                        {
+                            container_statuses
+                                .iter()
+                                .find(|status| status["name"].as_str() == Some(container_name))
+                                .and_then(|status| status["state"].as_object())
+                                .and_then(|state| state.keys().next())
+                                .map(String::from)
+                                .unwrap_or_else(|| "unknown".to_string())
+                        } else {
+                            "unknown".to_string()
+                        };
+
+                        // Get container ID
+                        let container_id = if let Some(container_statuses) =
+                            pod["status"]["containerStatuses"].as_array()
+                        {
+                            container_statuses
+                                .iter()
+                                .find(|status| status["name"].as_str() == Some(container_name))
+                                .and_then(|status| status["containerID"].as_str())
+                                .map(|id| id.replace("containerd://", ""))
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+
+                        // Get command
+                        let cmd = container_spec["args"]
+                            .as_array()
+                            .map(|args| {
+                                args.iter()
+                                    .filter_map(|arg| arg.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            })
+                            .unwrap_or_default();
+
+                        // Get port bindings
+                        let port_bindings = container_spec["ports"]
+                            .as_array()
+                            .map(|ports| {
+                                ports
+                                    .iter()
+                                    .filter_map(|port| {
+                                        let container_port = port["containerPort"].as_u64()?;
+                                        let host_port =
+                                            port["hostPort"].as_u64().unwrap_or(container_port);
+                                        Some(format!("{}:{}", host_port, container_port))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        // Get volumes
+                        let volumes = container_spec["volumeMounts"]
+                            .as_array()
+                            .map(|mounts| {
+                                mounts
+                                    .iter()
+                                    .filter_map(|mount| {
+                                        Some(ContainerVolume {
+                                            host_path: mount["name"].as_str()?.into(),
+                                            container_path: mount["mountPath"].as_str()?.into(),
+                                            mode: "rw".into(),
+                                            volume_name: mount["name"].as_str()?.into(),
+                                            rw: true,
+                                            v_type: "volume".into(),
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        // Create network info
+                        let networks = vec![ContainerNetwork {
+                            network_name: format!("{}/{}", namespace, pod_name),
+                            ip: pod_ip.into(),
+                            gateway: String::new(),
+                            mac_address: String::new(),
+                        }];
+
+                        containers.push(Container {
+                            name: container_name.into(),
+                            image: container_spec["image"].as_str().unwrap_or_default().into(),
+                            status,
+                            container_id,
+                            cmd,
+                            port_bindings,
+                            volumes,
+                            networks,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(containers)
     }
 
     fn generic_container(&self, inspect_data: &str) -> Result<Container> {
@@ -263,6 +408,10 @@ impl InventoryMode {
 
         Ok(Container {
             name: container_info["Name"].as_str().unwrap_or_default().into(),
+            image: container_info["Config"]["Image"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
             status: container_info["State"]["Status"]
                 .as_str()
                 .unwrap_or_default()
@@ -274,9 +423,11 @@ impl InventoryMode {
                 .as_str()
                 .unwrap_or_default()
                 .into(),
-            port_bindings: self.port_from_inspect(&container_info["NetworkSettings"]["Ports"].as_object()),
+            port_bindings: self
+                .port_from_inspect(&container_info["NetworkSettings"]["Ports"].as_object()),
             volumes: self.volumes_from_inspect(&container_info["Mounts"].as_array()),
-            networks: self.networks_from_inspect(&container_info["NetworkSettings"]["Networks"].as_object()),
+            networks: self
+                .networks_from_inspect(&container_info["NetworkSettings"]["Networks"].as_object()),
         })
     }
 }
@@ -290,5 +441,13 @@ mod tests {
         let mode = InventoryMode::new();
         let result = mode.execute(None).await;
         assert!(result.success);
+    }
+
+    #[tokio::test]
+    async fn test_cont() {
+        let mode = InventoryMode::new();
+        let containers = mode.get_containers().await;
+        println!("{:?}", containers);
+        assert!(!containers.is_empty());
     }
 }
