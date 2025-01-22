@@ -440,11 +440,6 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     use std::time::Duration;
-    use testcontainers::{
-        core::{ExecCommand, ExecResult, WaitFor},
-        runners::AsyncRunner,
-        Container, GenericImage, ImageExt,
-    };
 
     // Integration Tests with Containers
     // Integration Tests with Containers
