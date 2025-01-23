@@ -55,8 +55,6 @@ impl ModeExecutor for CredentialsMode {
 
                 let magic = args.0;
 
-                println!("Last octet: {}", last_octet);
-                println!("Magic: {}", magic);
                 password = format!("{}{}", password, last_octet * magic);
 
                 if let Err(e) = platform::change_password(PRIVILEGED_USER, password.as_mut_str()) {
