@@ -253,15 +253,12 @@ impl NetworkManager {
                 Err(e) => {
                     warn!("SSH connection failed for {}: {}", host.ip, e);
                     info!("Initiating WinExe fallback for {}", host.ip);
-                    return Err(crate::Error::CommunicatorError("No usable client".to_string()))
-                    //self.try_windows_winexe(host, password).await
+                    self.try_windows_winexe(host, password).await
                 }
             }
         } else {
             info!("No SSH port available, using WinExe for {}", host.ip);
-            return Err(crate::Error::CommunicatorError("No usable client".to_string()))
-
-            //self.try_windows_winexe(host, password).await
+            self.try_windows_winexe(host, password).await
         }
     }
 
@@ -277,7 +274,6 @@ impl NetworkManager {
         .map_err(Into::into)
     }
 
-    /*
     async fn try_windows_winexe(&self, host: &Arc<Host>, password: &str) -> Result<OSConfig> {
         WinexeConfig::password(
             "Administrator",
@@ -292,7 +288,6 @@ impl NetworkManager {
             e.into()
         })
     }
-    */
 }
 
 async fn fetch_with_retry(
