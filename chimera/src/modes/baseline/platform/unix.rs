@@ -1,17 +1,13 @@
 use crate::error::Result;
-use futures::future::{join_all, try_join_all};
+use ignore::WalkBuilder;
 use log::{debug, error, info, warn};
-use std::process::Stdio;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use bstr::ByteVec;
-use ignore::{WalkBuilder, DirEntry};
 use tokio::sync::mpsc;
-
-use futures::stream::StreamExt;
 
 #[derive(Debug, Clone)]
 struct SysctlSetting {
@@ -23,11 +19,6 @@ struct SysctlSetting {
 struct SSHConfig {
     setting: String,
     value: String,
-}
-
-#[derive(Debug, Clone)]
-struct FirewallRule {
-    args: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,21 +73,22 @@ fn generate_php_config() -> PHPConfig {
     }
 }
 
-fn format_php_config(config: &PHPConfig) -> String {
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "disable_functions = {}", 
-        config.disable_functions.join(",")
-    ));
-    for (key, value) in &config.security_settings {
-        lines.push(format!("{} = {}", key, value));
-    }
-    lines.join("\n")
-}
+async fn append_php_config_to_file(path: &str, config: &PHPConfig) -> Result<()> {
+    let mut file = OpenOptions::new().append(true).open(path).await?;
 
-async fn apply_php_config_to_file(path: &str, config: &PHPConfig) -> Result<()> {
-    let config_content = format_php_config(config);
-    fs::write(path, config_content).await?;
+    // Append disable_functions
+    let disable_functions = format!(
+        "\ndisable_functions = {}\n",
+        config.disable_functions.join(",")
+    );
+    file.write_all(disable_functions.as_bytes()).await?;
+
+    // Append security settings
+    for (key, value) in &config.security_settings {
+        let setting = format!("{} = {}\n", key, value);
+        file.write_all(setting.as_bytes()).await?;
+    }
+
     println!("{} changed", path);
     Ok(())
 }
@@ -131,7 +123,8 @@ pub async fn find_files(target_name: String, root: String) -> Vec<String> {
                 Box::new(move |entry| {
                     if let Ok(entry) = entry {
                         // Check if the file name matches
-                        if entry.path().file_name().and_then(|n| n.to_str()) == Some(&*target_name) {
+                        if entry.path().file_name().and_then(|n| n.to_str()) == Some(&*target_name)
+                        {
                             // Send the matching path
                             tx.blocking_send(entry.into_path()).ok();
                         }
@@ -155,7 +148,6 @@ pub async fn find_files(target_name: String, root: String) -> Vec<String> {
 
     results
 }
-
 
 async fn configure_rbash(revert: bool) -> Result<()> {
     if revert {
@@ -462,16 +454,70 @@ pub async fn setup_syslog() -> Result<()> {
     };
 
     match package_manager {
-        PackageManager::Yum => {
-            info!("Installing rsyslog and auditd via yum");
-            run_command("yum", &["install", "rsyslog", "auditd", "-y"]).await?;
+        PackageManager::Yum | PackageManager::Dnf => {
+            let cmd = if matches!(package_manager, PackageManager::Dnf) {
+                "dnf"
+            } else {
+                "yum"
+            };
+
+            info!("Installing rsyslog and auditd via {}", cmd);
+
+            match run_command(cmd, &["check-update", "-y"]).await {
+                Ok(_) => info!("Package list updated"),
+                Err(e) => warn!("Failed to update package list: {}", e),
+            }
+            match run_command(
+                cmd,
+                &[
+                    "install",
+                    "net-tools",
+                    "iproute",
+                    "sed",
+                    "curl",
+                    "wget",
+                    "bash",
+                    "-y",
+                ],
+            )
+            .await
+            {
+                Ok(_) => info!("Installed required packages"),
+                Err(e) => warn!("Failed to install required packages: {}", e),
+            }
+
+            match run_command(cmd, &["install", "iptraf", "-y"]).await {
+                Ok(_) => info!("Installed iptraf"),
+                Err(e) => warn!("Failed to install iptraf: {}", e),
+            }
+
+            match run_command(cmd, &["install", "auditd", "-y"]).await {
+                Ok(_) => info!("Installed auditd"),
+                Err(e) => warn!("Failed to install auditd: {}", e),
+            }
+
+            match run_command(cmd, &["install", "rsyslog", "-y"]).await {
+                Ok(_) => info!("Installed rsyslog"),
+                Err(e) => warn!("Failed to install rsyslog: {}", e),
+            }
+
             debug!("Setting SELinux context for /var/log/audit");
-            run_command("chcon", &["-R", "-t", "var_log_t", "/var/log/audit"]).await?;
+            match run_command("chcon", &["-R", "-t", "var_log_t", "/var/log/audit"]).await {
+                Ok(_) => info!("Set SELinux context for /var/log/audit"),
+                Err(e) => warn!("Failed to set SELinux context for /var/log/audit: {}", e),
+            }
         }
         PackageManager::Apt => {
             info!("Installing rsyslog and auditd via apt");
-            run_command("apt-get", &["-qq", "update"]).await?;
-            run_command("apt-get", &["-qq", "install", "rsyslog", "auditd", "-y"]).await?;
+            match run_command("apt-get", &["-qq", "update"]).await {
+                Ok(_) => info!("Package list updated"),
+                Err(e) => warn!("Failed to update package list: {}", e),
+            }
+
+            match run_command("apt-get", &["-qq", "install", "rsyslog", "auditd", "-y"]).await {
+                Ok(_) => info!("Installed rsyslog and auditd"),
+                Err(e) => warn!("Failed to install rsyslog and auditd: {}", e),
+            }
         }
         PackageManager::Apk => {
             info!("Installing rsyslog and auditd via apk");
@@ -480,10 +526,20 @@ pub async fn setup_syslog() -> Result<()> {
                 "\nhttp://mirrors.ocf.berkeley.edu/alpine/v3.16/community\n",
             )
             .await?;
-            run_command("apk", &["update", "--allow-untrusted"]).await?;
-            run_command("apk", &["add", "rsyslog", "audit", "--allow-untrusted"]).await?;
+            match run_command("apk", &["update", "--allow-untrusted"]).await {
+                Ok(_) => info!("Package list updated"),
+                Err(e) => warn!("Failed to update package list: {}", e),
+            }
+
+            match run_command("apk", &["add", "rsyslog", "audit", "--allow-untrusted"]).await {
+                Ok(_) => info!("Installed rsyslog and auditd"),
+                Err(e) => warn!("Failed to install rsyslog and auditd: {}", e),
+            }
             fs::create_dir_all("/var/log/audit").await?;
-            update_audit_dispatcher().await?;
+            match update_audit_dispatcher().await {
+                Ok(_) => info!("Updated audit dispatcher"),
+                Err(e) => warn!("Failed to update audit dispatcher: {}", e),
+            }
         }
         PackageManager::Pkg if is_dragonfly().await? => {
             info!("Installing rsyslog via pkg");
@@ -492,8 +548,14 @@ pub async fn setup_syslog() -> Result<()> {
                 "/usr/local/etc/pkg/repos/df-latest.conf",
             )
             .await?;
-            run_command("pkg", &["update"]).await?;
-            run_command("pkg", &["install", "-y", "rsyslog"]).await?;
+            match run_command("pkg", &["update"]).await {
+                Ok(_) => info!("Package list updated"),
+                Err(e) => warn!("Failed to update package list: {}", e),
+            }
+            match run_command("pkg", &["install", "-y", "rsyslog"]).await {
+                Ok(_) => info!("Installed rsyslog"),
+                Err(e) => warn!("Failed to install rsyslog: {}", e),
+            }
             return Ok(()); // Skip audit setup for DragonFly
         }
         _ => return Err(crate::error::Error::UnknownOS),
@@ -504,21 +566,43 @@ pub async fn setup_syslog() -> Result<()> {
     // Configure audit unless we're on DragonFly
     if !is_dragonfly().await? {
         info!("Setting up auditd");
-        setup_audit().await?;
+        match setup_audit().await {
+            Ok(_) => info!("Auditd setup completed"),
+            Err(e) => warn!("Failed to setup auditd: {}", e),
+        }
     }
 
     // Start services unless we're on Alpine
     if !is_alpine().await? {
         if command_exists("systemctl").await {
-            run_command("systemctl", &["restart", "rsyslog"]).await?;
-            run_command("systemctl", &["start", "auditd"]).await?;
+            match run_command("systemctl", &["restart", "rsyslog"]).await {
+                Ok(_) => info!("Restarted rsyslog"),
+                Err(e) => warn!("Failed to restart rsyslog: {}", e),
+            }
+            match run_command("systemctl", &["start", "auditd"]).await {
+                Ok(_) => info!("Started auditd"),
+                Err(e) => warn!("Failed to start auditd: {}", e),
+            }
         } else {
-            run_command("service", &["rsyslog", "restart"]).await?;
-            run_command("service", &["auditd", "start"]).await?;
+            match run_command("service", &["rsyslog", "restart"]).await {
+                Ok(_) => info!("Restarted rsyslog"),
+                Err(e) => warn!("Failed to restart rsyslog: {}", e),
+            }
+
+            match run_command("service", &["auditd", "start"]).await {
+                Ok(_) => info!("Started auditd"),
+                Err(e) => warn!("Failed to start auditd: {}", e),
+            }
         }
     } else {
-        run_command("service", &["rsyslog", "restart"]).await?;
-        run_command("/usr/sbin/auditd", &[]).await?;
+        match run_command("service", &["rsyslog", "restart"]).await {
+            Ok(_) => info!("Restarted rsyslog"),
+            Err(e) => warn!("Failed to restart rsyslog: {}", e),
+        }
+        match run_command("/usr/sbin/auditd", &[]).await {
+            Ok(_) => info!("Started auditd"),
+            Err(e) => warn!("Failed to start auditd: {}", e),
+        }
     }
 
     Ok(())
@@ -597,14 +681,7 @@ async fn command_exists(cmd: &str) -> bool {
         return false;
     }
 
-    // Use absolute path for which
-    Command::new("/usr/bin/which")
-        .arg(cmd)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map_or(false, |s| s.success())
+    which::which(cmd).is_ok()
 }
 
 async fn run_command(cmd: &str, args: &[&str]) -> Result<()> {
@@ -672,6 +749,7 @@ async fn detect_package_manager() -> Option<PackageManager> {
         .iter()
         .map(|(cmd, pm)| async move {
             if command_exists(cmd).await {
+                info!("Detected package manager: {:?}", pm);
                 Some(pm.clone())
             } else {
                 None
@@ -958,101 +1036,16 @@ async fn restart_ssh_service() -> Result<()> {
     Ok(()) // Return Ok since this isn't critical enough to fail the whole hardening process
 }
 
-fn get_firewall_rules() -> Vec<FirewallRule> {
-    vec![
-        vec!["-F"],
-        vec!["-P", "INPUT", "DROP"],
-        vec!["-P", "FORWARD", "DROP"],
-        vec!["-P", "OUTPUT", "ACCEPT"],
-        vec!["-A", "INPUT", "-i", "lo", "-j", "ACCEPT"],
-        vec!["-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"],
-        vec![
-            "-A",
-            "INPUT",
-            "-m",
-            "conntrack",
-            "--ctstate",
-            "ESTABLISHED,RELATED",
-            "-j",
-            "ACCEPT",
-        ],
-        vec!["-A", "INPUT", "-p", "tcp", "--dport", "22", "-j", "ACCEPT"],
-    ]
-    .into_iter()
-    .map(|args| FirewallRule {
-        args: args.into_iter().map(String::from).collect(),
-    })
-    .collect()
-}
-
-async fn backup_iptables(backup_dir: &str) -> Result<()> {
-    if command_exists("iptables-save").await {
-        let timestamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            Ok(duration) => duration.as_secs(),
-            Err(_) => return Ok(()), // If we can't get timestamp, skip backup
-        };
-
-        let output = Command::new("iptables-save").output().await?;
-
-        fs::write(
-            format!("{}/iptables.backup.{}", backup_dir, timestamp),
-            output.stdout,
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-async fn apply_firewall_rules(rules: Vec<FirewallRule>) -> Result<()> {
-    let mut futures = Vec::new();
-
-    for rule in rules {
-        futures.push(async move {
-            Command::new("iptables")
-                .args(&rule.args)
-                .status()
-                .await
-                .map(|_| ())
-        });
-    }
-
-    // Execute rules sequentially to maintain order
-    for future in futures {
-        future.await?;
-    }
-
-    Ok(())
-}
-
-async fn configure_firewall() -> Result<()> {
-    if !command_exists("iptables").await {
-        warn!("iptables not found, skipping firewall configuration");
-        return Ok(());
-    }
-
-    info!("Configuring firewall rules");
-    backup_iptables("/etc/security-config").await?;
-
-    info!("Applying firewall rules");
-    apply_firewall_rules(get_firewall_rules()).await?;
-
-    if command_exists("iptables-save").await {
-        fs::create_dir_all("/etc/iptables").await?;
-        let output = Command::new("iptables-save").output().await?;
-        fs::write("/etc/iptables/rules.v4", output.stdout).await?;
-    }
-
-    Ok(())
-}
-
 async fn configure_kernel_modules() -> Result<()> {
     let blacklisted_modules = [
         "cramfs", "freevxfs", "jffs2", "hfs", "hfsplus", "squashfs", "udf",
     ];
 
     fs::create_dir_all("/etc/modprobe.d").await?;
+    let config_path = "/etc/modprobe.d/security-blacklist.conf";
 
-    let config = blacklisted_modules
+    // Create a set of our new configurations
+    let new_configs: HashSet<String> = blacklisted_modules
         .iter()
         .flat_map(|module| {
             vec![
@@ -1060,10 +1053,39 @@ async fn configure_kernel_modules() -> Result<()> {
                 format!("install {} /bin/false", module),
             ]
         })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect();
 
-    fs::write("/etc/modprobe.d/security-blacklist.conf", config).await?;
+    // Read existing configurations if file exists
+    let existing_configs = if Path::new(config_path).exists() {
+        // Backup existing file
+        backup_config(config_path, "bak").await?;
+
+        // Read existing content
+        let content = fs::read_to_string(config_path).await?;
+        content
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect::<HashSet<String>>()
+    } else {
+        HashSet::new()
+    };
+
+    // Combine existing and new configs, maintaining uniqueness
+    let mut final_configs: Vec<String> = existing_configs.union(&new_configs).cloned().collect();
+
+    // Sort for consistency
+    final_configs.sort();
+
+    // Write the combined configuration
+    let config_content = final_configs.join("\n") + "\n";
+
+    // Write to a temporary file first
+    let temp_path = format!("{}.tmp", config_path);
+    fs::write(&temp_path, &config_content).await?;
+
+    // Move temporary file to actual location
+    fs::rename(&temp_path, config_path).await?;
 
     Ok(())
 }
@@ -1081,16 +1103,34 @@ async fn configure_login_security() -> Result<()> {
         let content = fs::read_to_string(login_defs_path).await?;
 
         let new_content = login_configs.iter().fold(content, |acc, &(key, value)| {
-            acc.replacen(
-                &format!(r"^{}\s+\d+", key),
-                &format!("{} {}", key, value),
-                1,
-            )
+            // Case A: Match "UMASK   022" pattern (key + whitespace + number)
+            let value_pattern = format!(r"(?m)^{}\s+\d+", regex::escape(key));
+            let value_regex = regex::Regex::new(&value_pattern).unwrap();
+
+            // Case B: Match standalone "UMASK" on its own line
+            let key_pattern = format!(r"(?m)^{}\s*$", regex::escape(key));
+            let key_regex = regex::Regex::new(&key_pattern).unwrap();
+
+            // First check if Case A exists (key + number)
+            if value_regex.is_match(&acc) {
+                value_regex
+                    .replace(&acc, format!("{}\t{}", key, value))
+                    .to_string()
+            }
+            // Then check if Case B exists (standalone key)
+            else if key_regex.is_match(&acc) {
+                key_regex
+                    .replace(&acc, format!("{}\t{}", key, value))
+                    .to_string()
+            }
+            // Case C: Neither exists, append to end of file
+            else {
+                format!("{}\n{}\t{}", acc.trim_end(), key, value)
+            }
         });
 
         fs::write(login_defs_path, new_content).await?;
     }
-
     Ok(())
 }
 
@@ -1116,11 +1156,10 @@ pub async fn harden() -> Result<()> {
     let config = generate_php_config();
 
     for file in files {
-        if let Err(e) = apply_php_config_to_file(&file, &config).await {
+        if let Err(e) = append_php_config_to_file(&file, &config).await {
             error!("Failed to secure php.ini: {}", e);
         }
     }
-
 
     info!("Applying sysctl settings");
     // Apply sysctl settings sequentially to avoid borrowing issues
@@ -1135,11 +1174,6 @@ pub async fn harden() -> Result<()> {
     info!("Configuring SSH security settings");
     if let Err(e) = configure_ssh().await {
         error!("SSH configuration failed: {}", e);
-    }
-
-    info!("Configuring firewall rules");
-    if let Err(e) = configure_firewall().await {
-        error!("Firewall configuration failed: {}", e);
     }
 
     info!("Configuring kernel module restrictions");
@@ -1192,7 +1226,6 @@ mod tests {
             let config_path = ssh_dir.join("sshd_config");
             fs::write(&config_path, content).await.unwrap();
 
-            // Store original path and replace it with our test path
             let original_path = "/etc/ssh/sshd_config".to_string();
 
             TestContext {
@@ -1207,7 +1240,6 @@ mod tests {
         }
     }
 
-    // Helper function to parse SSH config into a HashMap
     fn parse_ssh_config(content: &str) -> HashMap<String, String> {
         let mut settings = HashMap::new();
         for line in content.lines() {
@@ -1221,26 +1253,15 @@ mod tests {
         settings
     }
 
-    // Mock command execution for tests
-    async fn mock_command_exists(_cmd: &str) -> bool {
-        true // Always return true for tests
-    }
-
-    async fn mock_restart_ssh_service() -> Result<()> {
-        Ok(()) // Always succeed in tests
-    }
-
+    // Original Tests
     #[tokio::test]
     async fn test_empty_config() {
         let ctx = TestContext::new("").await;
-
-        // Override the original configure_ssh function
         async fn test_configure_ssh(config_path: &str) -> Result<()> {
             let content = fs::read_to_string(config_path).await?;
             let config_settings = get_secure_ssh_config();
-            let mut new_lines = vec![];
+            let mut new_lines = Vec::new();
 
-            // Add all secure settings
             new_lines.push("# Security hardening configurations".to_string());
             for conf in config_settings {
                 new_lines.push(format!("{} {}", conf.setting, conf.value));
@@ -1251,7 +1272,6 @@ mod tests {
         }
 
         test_configure_ssh(&ctx.ssh_config_path).await.unwrap();
-
         let result = ctx.read_config().await;
         let settings = parse_ssh_config(&result);
 
@@ -1269,7 +1289,6 @@ mod tests {
 
         let ctx = TestContext::new(initial_config).await;
 
-        // Use actual configure_ssh logic but with our test path
         async fn test_configure_ssh(config_path: &str) -> Result<()> {
             let content = fs::read_to_string(config_path).await?;
             let mut new_lines: Vec<String> = Vec::new();
@@ -1298,7 +1317,6 @@ mod tests {
                 }
             }
 
-            // Add security settings
             new_lines.push("\n# Security hardening configurations".to_string());
             for conf in config_settings {
                 new_lines.push(format!("{} {}", conf.setting, conf.value));
@@ -1309,15 +1327,12 @@ mod tests {
         }
 
         test_configure_ssh(&ctx.ssh_config_path).await.unwrap();
-
         let result = ctx.read_config().await;
         assert!(result.contains("# X11Forwarding yes (modified by security hardening)"));
         assert!(result.contains("X11Forwarding no"));
         assert!(result.contains("# AllowTcpForwarding yes (modified by security hardening)"));
         assert!(result.contains("AllowTcpForwarding no"));
     }
-
-    // More test cases following the same pattern...
 
     #[tokio::test]
     async fn test_handle_malformed_settings() {
@@ -1363,11 +1378,9 @@ mod tests {
         let ctx = TestContext::new(initial_config).await;
 
         async fn test_configure_ssh(config_path: &str) -> Result<()> {
-            // Create backup
             let backup_path = format!("{}.bak.test", config_path);
             fs::copy(config_path, &backup_path).await?;
 
-            // Proceed with normal configuration
             let config_settings = get_secure_ssh_config();
             let mut new_lines = vec!["# Security hardening configurations".to_string()];
             for conf in config_settings {
@@ -1380,7 +1393,6 @@ mod tests {
 
         test_configure_ssh(&ctx.ssh_config_path).await.unwrap();
 
-        // Check if backup file exists
         let backup_path = format!("{}.bak.test", ctx.ssh_config_path);
         assert!(PathBuf::from(&backup_path).exists());
     }
@@ -1405,7 +1417,6 @@ mod tests {
         let result = ctx.read_config().await;
         let settings = parse_ssh_config(&result);
 
-        // Test all required security settings
         let required_settings = [
             ("Protocol", "2"),
             ("X11Forwarding", "no"),
@@ -1429,13 +1440,172 @@ mod tests {
         }
     }
 
+    // New Tests
     #[tokio::test]
-    async fn test_php() {
-        let files = find_files("php.ini".to_string(), "/".to_string()).await;
+    async fn test_php_config_generation() {
         let config = generate_php_config();
 
-        for file in files {
-            apply_php_config_to_file(&file, &config).await.unwrap();
+        assert!(config.disable_functions.contains(&"exec".to_string()));
+        assert!(config.disable_functions.contains(&"system".to_string()));
+        assert!(config.disable_functions.contains(&"shell_exec".to_string()));
+
+        let settings: HashMap<_, _> = config.security_settings.iter().cloned().collect();
+        assert_eq!(settings.get("display_errors").unwrap(), "off");
+        assert_eq!(settings.get("allow_url_fopen").unwrap(), "off");
+        assert_eq!(settings.get("session.cookie_httponly").unwrap(), "1");
+    }
+
+    #[tokio::test]
+    async fn test_sysctl_settings() {
+        let settings = get_secure_sysctl_settings();
+
+        let settings_map: HashMap<_, _> = settings
+            .iter()
+            .map(|s| (s.key.as_str(), s.value.as_str()))
+            .collect();
+
+        assert_eq!(*settings_map.get("kernel.randomize_va_space").unwrap(), "2");
+        assert_eq!(*settings_map.get("net.ipv4.tcp_syncookies").unwrap(), "1");
+        assert_eq!(
+            *settings_map
+                .get("net.ipv4.conf.all.accept_redirects")
+                .unwrap(),
+            "0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ssh_config_validation() {
+        let initial_config = "# Invalid setting\nRandomSetting random_value\n";
+        let ctx = TestContext::new(initial_config).await;
+
+        async fn test_configure_ssh(config_path: &str) -> Result<()> {
+            let config_settings = get_secure_ssh_config();
+            let mut new_lines = Vec::new();
+
+            new_lines.push("# Security hardening configurations".to_string());
+            for conf in config_settings {
+                new_lines.push(format!("{} {}", conf.setting, conf.value));
+            }
+
+            fs::write(config_path, new_lines.join("\n")).await?;
+            Ok(())
         }
+
+        test_configure_ssh(&ctx.ssh_config_path).await.unwrap();
+        let result = ctx.read_config().await;
+        assert!(!result.contains("RandomSetting"));
+    }
+
+    #[tokio::test]
+    async fn test_kernel_module_blacklist() {
+        let temp_dir = tempdir().unwrap();
+        let modprobe_path = temp_dir.path().join("security-blacklist.conf");
+
+        async fn test_configure_kernel_modules(path: PathBuf) -> Result<()> {
+            let blacklisted_modules = ["cramfs", "freevxfs", "jffs2"];
+            let config = blacklisted_modules
+                .iter()
+                .flat_map(|module| {
+                    vec![
+                        format!("blacklist {}", module),
+                        format!("install {} /bin/false", module),
+                    ]
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            fs::write(path, config).await?;
+            Ok(())
+        }
+
+        test_configure_kernel_modules(modprobe_path.clone())
+            .await
+            .unwrap();
+
+        let content = fs::read_to_string(modprobe_path).await.unwrap();
+        assert!(content.contains("blacklist cramfs"));
+        assert!(content.contains("install cramfs /bin/false"));
+    }
+
+    #[tokio::test]
+    async fn test_find_files() {
+        let temp_dir = tempdir().unwrap();
+        let test_file_path = temp_dir.path().join("test.txt");
+        fs::write(&test_file_path, "test content").await.unwrap();
+
+        let files = find_files(
+            "test.txt".to_string(),
+            temp_dir.path().to_str().unwrap().to_string(),
+        )
+        .await;
+
+        assert_eq!(files.len(), 1);
+        assert!(files[0].contains("test.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_command_exists() {
+        // Test with common commands that should exist
+        assert!(command_exists("ls").await);
+        assert!(command_exists("cat").await);
+
+        // Test with likely non-existent command
+        assert!(!command_exists("nonexistentcommand123456789").await);
+
+        // Test with potentially dangerous input
+        assert!(!command_exists("; rm -rf /").await);
+        assert!(!command_exists("&&").await);
+    }
+
+    #[tokio::test]
+    async fn test_backup_config() {
+        let temp_dir = tempdir().unwrap();
+        let test_file = temp_dir.path().join("test.conf");
+        fs::write(&test_file, "original content").await.unwrap();
+
+        backup_config(test_file.to_str().unwrap(), "backup")
+            .await
+            .unwrap();
+
+        let mut entries = fs::read_dir(temp_dir.path()).await.unwrap();
+        let mut found_backup = false;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.file_name().to_string_lossy().contains("backup") {
+                found_backup = true;
+                break;
+            }
+        }
+        assert!(found_backup);
+    }
+
+    #[tokio::test]
+    async fn test_package_manager_detection() {
+        // This is a basic test since we can't mock the command_exists easily
+        let pm = detect_package_manager().await;
+        assert!(pm.is_some());
+
+        match pm.unwrap() {
+            PackageManager::Apt
+            | PackageManager::Yum
+            | PackageManager::Apk
+            | PackageManager::Dnf
+            | PackageManager::Pacman
+            | PackageManager::Pkg
+            | PackageManager::Zypper
+            | PackageManager::SlaptGet => (),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_find_rc_files() {
+        let temp_dir = tempdir().unwrap();
+        let rc_file = temp_dir.path().join(".bashrc");
+        fs::write(&rc_file, "# test rc file").await.unwrap();
+
+        let files = find_rc_files_in_dir(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(!files.is_empty());
     }
 }
