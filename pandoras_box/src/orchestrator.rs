@@ -253,12 +253,14 @@ impl NetworkManager {
                 Err(e) => {
                     warn!("SSH connection failed for {}: {}", host.ip, e);
                     info!("Initiating WinExe fallback for {}", host.ip);
-                    self.try_windows_winexe(host, password).await
+                    return Err(e.into());
+                    //self.try_windows_winexe(host, password).await
                 }
             }
         } else {
             info!("No SSH port available, using WinExe for {}", host.ip);
-            self.try_windows_winexe(host, password).await
+            return Err(Error::NoSSHPort);
+            //self.try_windows_winexe(host, password).await
         }
     }
 
