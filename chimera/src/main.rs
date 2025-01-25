@@ -94,8 +94,8 @@ async fn run_all_modes(output_dir: &Path, magic_value: u32) {
     info!("Starting execution of all modes");
 
     let results = [
-        run_inventory_mode(output_dir).await,
         run_credentials_mode(magic_value).await,
+        run_inventory_mode(output_dir).await,
         run_baseline_mode().await,
         run_update_mode().await,
         run_serve_mode(44372).await,

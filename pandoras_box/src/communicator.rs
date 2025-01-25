@@ -3,9 +3,9 @@ use futures::future::{join_all, BoxFuture};
 use futures::StreamExt;
 use log::{debug, error, info};
 use rustrc::client::{Client, Command, CommandOutput, Config};
+use rustrc::cmd;
 use rustrc::ssh::SSHConfig;
 use rustrc::winexe::WinexeConfig;
-use rustrc::cmd;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -204,7 +204,7 @@ impl Communicator {
                     let result = client.exec(cmd).await;
                     if let Err(e) = &result {
                         if matches!(*os, OS::Unix) && !e.to_string().contains("timed out") {
-`                           error!("Retrying with sudo");
+                            error!("Retrying with sudo");
                             let sudo_cmd = format!("sudo {}", cmd.to_string());
 
                             let cmd = &cmd!(sudo_cmd);
@@ -219,7 +219,7 @@ impl Communicator {
                     HostOperationResult {
                         ip: ip.to_string(),
                         os: *os,
-                        result
+                        result,
                     }
                 }),
         )
@@ -443,4 +443,3 @@ pub fn unix_config(config: SSHConfig) -> OSConfig {
 pub fn unknown_config(config: SSHConfig) -> OSConfig {
     OSConfig::Unknown(config)
 }
-
