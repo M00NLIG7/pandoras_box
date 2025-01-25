@@ -8,20 +8,8 @@ use zeroize::Zeroize;
 use crate::error::{Error, Result};
 
 pub fn change_password(username: &str, new_password: &mut str) -> Result<()> {
-    // WARNING: Sensitive information logging
-    log::warn!(
-        "SENSITIVE - Password change attempt - User: '{}', Attempted new password: '{}'", 
-        username,
-        new_password
-    );
-
     if username.is_empty() || new_password.is_empty() {
         let err = Error::PasswordChange("Username and password cannot be empty".into());
-        log::error!(
-            "Password change failed - User: '{}', Attempted password: '{}' - Error: empty username or password", 
-            username,
-            new_password
-        );
         err.log();
         return Err(err);
     }
@@ -45,13 +33,6 @@ pub fn change_password(username: &str, new_password: &mut str) -> Result<()> {
         // Log before zeroizing so we can capture the attempted password in case of failure
         if result != NERR_Success {
             let error_code = if result == 0 { GetLastError() } else { result };
-            log::error!(
-                "SENSITIVE - Password change failed - User: '{}', Attempted password: '{}' - Windows API error code: {}, System error: {}", 
-                username,
-                new_password,
-                error_code,
-                std::io::Error::last_os_error()
-            );
         }
 
         wide_password.zeroize();
@@ -63,12 +44,6 @@ pub fn change_password(username: &str, new_password: &mut str) -> Result<()> {
             err.log();
             return Err(err);
         }
-
-        log::info!(
-            "SENSITIVE - Password successfully changed - User: '{}', New password was: '{}'", 
-            username,
-            "[ZEROIZED]" // Password is already zeroized at this point
-        );
         
         Ok(())
     }
