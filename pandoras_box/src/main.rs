@@ -31,10 +31,6 @@ pub fn setup_tracing() -> Result<()> {
     let mut result = Ok(());
 
     INIT.call_once(|| {
-        if std::env::var("RUST_LOG").is_err() {
-            std::env::set_var("RUST_LOG", "info,rustrc=debug");
-        }
-
         // Create log file
         let timestamp = Local::now().format("%Y%m%d_%H%M%S");
         let log_path = format!("./pandoras_box{}.log", timestamp);
@@ -70,7 +66,7 @@ pub fn setup_tracing() -> Result<()> {
 
         // Set up the filter
         let filter_layer = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info,rustrc=debug,test=debug"));
+            .unwrap_or_else(|_| EnvFilter::new("info"));
 
         // Combine everything and initialize
         tracing_subscriber::registry()
@@ -108,7 +104,6 @@ async fn main() -> Result<()> {
     let password = matches.get_one::<String>("password").unwrap();
 
     info!("Starting application with range: {}", range);
-    debug!("Password length: {}", password.len());
 
     let subnet = match enumerator::Subnet::try_from(range) {
         Ok(s) => s,

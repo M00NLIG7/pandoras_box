@@ -5,6 +5,7 @@ use log::{debug, error, info};
 use rustrc::client::{Client, Command, CommandOutput, Config};
 use rustrc::ssh::SSHConfig;
 use rustrc::winexe::WinexeConfig;
+use rustrc::cmd;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -200,6 +201,21 @@ impl Communicator {
                 .iter()
                 .filter(|(client_os, _, _)| *client_os == os_type)
                 .map(|(os, ip, client)| async move {
+                    let result = client.exec(cmd).await;
+                    if let Err(e) = &result {
+                        if *os == OS::Unix {
+                            error!("Retrying with sudo");
+                            let sudo_cmd = format!("sudo {}", cmd.to_string());
+
+                            let cmd = &cmd!(sudo_cmd);
+
+                            return HostOperationResult {
+                                ip: ip.to_string(),
+                                os: *os,
+                                result: client.exec(cmd).await,
+                            };
+                        }
+                    }
                     HostOperationResult {
                         ip: ip.to_string(),
                         os: *os,

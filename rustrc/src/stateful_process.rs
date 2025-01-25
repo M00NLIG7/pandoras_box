@@ -165,7 +165,7 @@ mod tests {
     #[tokio::test]
     async fn test_container_echo() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-        let stateful_process = StatefulProcess::new("bash", vec![], tx)
+        let stateful_process = StatefulProcess::new("sh", vec![], tx)
             .await
             .expect("Failed to create stateful_process");
 

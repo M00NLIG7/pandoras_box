@@ -240,19 +240,33 @@ async fn modify_shell_rc_files() -> Result<()> {
     let is_alpine = command_exists("apk").await;
     let rc_paths = find_rc_files().await?;
 
+    // Define secure base paths that are essential for system operation
+    let secure_path = vec![
+        "/usr/local/sbin",
+        "/usr/local/bin",
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+    ];
+
     for path in rc_paths {
         debug!("Modifying shell rc file: {:?}", path);
 
         let mut file = OpenOptions::new().append(true).open(&path).await?;
 
-        // Add PATH restrictions
-        file.write_all(b"\nPATH=\"\"\n").await?;
+        // Reset PATH to known secure directories
+        file.write_all(b"\n# Security hardening - Setting secure PATH\n")
+            .await?;
+        file.write_all(format!("PATH=\"{}\"\n", secure_path.join(":")).as_bytes())
+            .await?;
         file.write_all(b"export PATH\n").await?;
 
-        // Extra export for Alpine
-        if is_alpine {
-            file.write_all(b"export PATH\n").await?;
-        }
+        // Optional: Prevent PATH modification by user scripts
+        file.write_all(b"readonly PATH\n").await?;
+
+        // Optional: Prevent PATH modification through ENV
+        file.write_all(b"export -n PATH\n").await?;
     }
 
     Ok(())

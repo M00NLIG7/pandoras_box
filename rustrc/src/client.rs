@@ -12,11 +12,17 @@ pub trait Session {
         &self,
         cmd: &Command,
     ) -> impl std::future::Future<Output = Result<CommandOutput>> + Send;
-    fn download_file(&self, remote_path: &str, local_path: &str) -> impl std::future::Future<Output = Result<()>> + Send;
-    fn transfer_file(&self, file: Arc<Vec<u8>>, destination: &str) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn download_file(
+        &self,
+        remote_path: &str,
+        local_path: &str,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn transfer_file(
+        &self,
+        file: Arc<Vec<u8>>,
+        destination: &str,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
-
-
 
 /// Trait defining the configuration for a client.
 pub trait Config {
@@ -52,6 +58,28 @@ pub enum ConnectionState {
 pub struct Command {
     pub cmd: String,
     pub args: Vec<String>,
+}
+
+impl std::fmt::Display for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.cmd)?;
+        for arg in &self.args {
+            write!(f, " {}", arg)?;
+        }
+        Ok(())
+    }
+}
+
+impl From<Command> for String {
+    fn from(command: Command) -> Self {
+        std::iter::once(command.cmd.as_str()) // Convert the command into a byte slice wrapped in an iterator
+            .chain(command.args.iter().flat_map(
+                |arg| // For each arg, create an iterator of the space and the arg bytes
+                std::iter::once(" ").chain(std::iter::once(arg.as_str())),
+            ))
+            .collect::<Vec<&str>>()
+            .join("")
+    }
 }
 
 impl From<&Command> for String {
