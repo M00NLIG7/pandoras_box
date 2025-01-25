@@ -856,8 +856,6 @@ fn get_secure_ssh_config() -> Vec<SSHConfig> {
         ("Protocol", "2"),
         // Limit authentication attempts to 3 to prevent brute force attacks
         ("MaxAuthTries", "3"),
-        // Disable password authentication, forcing use of more secure key-based auth
-        ("PasswordAuthentication", "no"),
         // Explicitly prevent empty passwords, additional protection against null passwords
         ("PermitEmptyPasswords", "no"),
         // Disable X11 forwarding to prevent potential display hijacking
