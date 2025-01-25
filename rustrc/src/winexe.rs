@@ -203,7 +203,7 @@ impl WinexeContainer {
             }
         }
 
-        container.write_transfer_helper().await?;
+        //container.write_transfer_helper().await?;
 
         Ok(container)
     }

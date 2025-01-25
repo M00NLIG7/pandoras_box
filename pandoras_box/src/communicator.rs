@@ -203,8 +203,8 @@ impl Communicator {
                 .map(|(os, ip, client)| async move {
                     let result = client.exec(cmd).await;
                     if let Err(e) = &result {
-                        if *os == OS::Unix {
-                            error!("Retrying with sudo");
+                        if matches!(*os, OS::Unix) && !e.to_string().contains("timed out") {
+`                           error!("Retrying with sudo");
                             let sudo_cmd = format!("sudo {}", cmd.to_string());
 
                             let cmd = &cmd!(sudo_cmd);
