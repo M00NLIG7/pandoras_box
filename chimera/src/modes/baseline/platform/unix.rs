@@ -1195,10 +1195,17 @@ pub async fn establish_baseline() -> Result<()> {
     info!("Establishing system baseline");
 
     info!("Setting up logging");
-    setup_syslog().await?;
+    match setup_syslog().await {
+        Ok(_) => info!("Syslog setup completed"),
+        Err(e) => warn!("Failed to setup syslog: {}", e),
+    }
 
     info!("Adding system hardening measures");
-    harden().await?;
+    match harden().await {
+        Ok(_) => info!("System hardening completed"),
+        Err(e) => warn!("Failed to harden system: {}", e),
+    }
+
     Ok(())
 }
 

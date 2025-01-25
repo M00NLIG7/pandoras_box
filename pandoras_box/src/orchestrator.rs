@@ -66,7 +66,7 @@ const CHIMERA_MODES: [ModeConfig; 3] = [
 const CHIMERA_MODES: [ModeConfig; 1] = [
     ModeConfig {
         name: "all",
-        args: Some("-m 1234"),
+        args: Some("-m 62"),
     },
 ];
 
