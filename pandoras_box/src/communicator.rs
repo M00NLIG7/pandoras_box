@@ -219,7 +219,7 @@ impl Communicator {
                     HostOperationResult {
                         ip: ip.to_string(),
                         os: *os,
-                        result: client.exec(cmd).await,
+                        result
                     }
                 }),
         )
