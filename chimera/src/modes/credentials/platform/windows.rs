@@ -8,8 +8,6 @@ use zeroize::Zeroize;
 use crate::error::{Error, Result};
 
 pub fn change_password(username: &str, new_password: &mut str) -> Result<()> {
-    log::info!("Password changing to {} for user: {}", new_password, username);
-
     if username.is_empty() || new_password.is_empty() {
         let err = Error::PasswordChange("Username and password cannot be empty".into());
         err.log();
