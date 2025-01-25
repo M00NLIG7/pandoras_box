@@ -352,7 +352,7 @@ impl SSHSession {
         let mut stderr = vec![];
         let mut consecutive_empty_reads = 0;
         const MAX_EMPTY_READS: u32 = 3;
-        const CHANNEL_TIMEOUT: Duration = Duration::from_secs(120);
+        const CHANNEL_TIMEOUT: Duration = Duration::from_secs(240);
 
         debug!("Starting to process channel output");
 
