@@ -488,26 +488,10 @@ impl Orchestrator {
     }
 
     async fn download_chimera_win(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
-       let target_ip = "10.100.136.111";
-       
        // Create temp directory
        let mkdir_cmd = "cmd.exe /c md C:\\Temp";
        let mkdir_results = communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
        
-       // Debug logging for target IP
-       for result in &mkdir_results {
-           if result.ip == target_ip {
-               match &result.result {
-                   Ok(output) => {
-                       println!("Directory creation output for {}", target_ip);
-                       println!("Stdout: {}", String::from_utf8_lossy(&output.stdout));
-                       println!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
-                   }
-                   Err(e) => println!("Directory creation error for {}: {}", target_ip, e),
-               }
-           }
-       }
-
        // Only proceed with download for hosts where mkdir succeeded
        let successful_mkdir_ips: Vec<String> = mkdir_results.iter()
            .filter(|result| result.result.is_ok())
@@ -522,20 +506,6 @@ impl Orchestrator {
        let download_cmd = Self::generate_base64_download_command(CHIMERA_URL_WIN);
        let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
        
-       // Debug logging for target IP
-       for result in &download_results {
-           if result.ip == target_ip {
-               match &result.result {
-                   Ok(output) => {
-                       println!("Download command output for {}", target_ip);
-                       println!("Stdout: {}", String::from_utf8_lossy(&output.stdout));
-                       println!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
-                   }
-                   Err(e) => println!("Download error for {}: {}", target_ip, e),
-               }
-           }
-       }
-
        // Filter download results to only include hosts where mkdir succeeded
        let filtered_results: Vec<HostOperationResult<CommandOutput>> = download_results
            .into_iter()
