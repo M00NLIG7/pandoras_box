@@ -1,13 +1,10 @@
-use std::path::PathBuf;
 use super::ModeExecutor;
-use crate::types::{ExecutionMode, ExecutionResult};
 use crate::server::FileServer;
+use crate::types::{ExecutionMode, ExecutionResult};
 use crate::utils::get_default_output_dir;
 use log::{error, info};
-use tokio::spawn;
 use std::process;
-use chrono;
-
+use tokio::spawn;
 
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
@@ -23,40 +20,44 @@ impl ModeExecutor for ServeMode {
     async fn execute(&self, args: Self::Args) -> ExecutionResult {
         let config = args;
         let output_dir = get_default_output_dir();
-        
+
         // Ensure output directory exists
         if let Err(e) = std::fs::create_dir_all(&output_dir) {
             error!("Failed to create output directory: {}", e);
             return ExecutionResult::new(
                 ExecutionMode::Serve,
                 false,
-                format!("Failed to create output directory: {}", e)
+                format!("Failed to create output directory: {}", e),
             );
         }
 
         info!("Starting file server on port {} in background", config.port);
-        let current_exe = std::env::current_exe()
-            .expect("Failed to get current executable path");
-        
+        let current_exe = std::env::current_exe().expect("Failed to get current executable path");
+
         #[cfg(windows)]
         {
             // Windows-specific implementation using schtasks
             let task_name = format!("ChimeraServer_{}", config.port);
             let current_exe_str = current_exe.to_string_lossy();
-            
+
             // Create and run the scheduled task
             let create_result = tokio::process::Command::new("schtasks")
                 .args(&[
                     "/create",
-                    "/tn", &task_name,
-                    "/tr", &format!("\"{}\" serve-internal --port {}", 
-                        current_exe_str, 
-                        config.port
+                    "/tn",
+                    &task_name,
+                    "/tr",
+                    &format!(
+                        "\"{}\" serve-internal --port {}",
+                        current_exe_str, config.port
                     ),
-                    "/sc", "once",
-                    "/st", &chrono::Local::now().format("%H:%M").to_string(),
+                    "/sc",
+                    "once",
+                    "/st",
+                    &chrono::Local::now().format("%H:%M").to_string(),
                     "/f",
-                    "/ru", "System"
+                    "/ru",
+                    "System",
                 ])
                 .output()
                 .await;
@@ -73,24 +74,24 @@ impl ModeExecutor for ServeMode {
                         Ok(_) => ExecutionResult::new(
                             ExecutionMode::Serve,
                             true,
-                            format!("Server started in background on port {}", config.port)
+                            format!("Server started in background on port {}", config.port),
                         ),
                         Err(e) => {
                             error!("Failed to run scheduled task: {}", e);
                             ExecutionResult::new(
                                 ExecutionMode::Serve,
                                 false,
-                                format!("Failed to run scheduled task: {}", e)
+                                format!("Failed to run scheduled task: {}", e),
                             )
                         }
                     }
-                },
+                }
                 Err(e) => {
                     error!("Failed to create scheduled task: {}", e);
                     ExecutionResult::new(
                         ExecutionMode::Serve,
                         false,
-                        format!("Failed to create scheduled task: {}", e)
+                        format!("Failed to create scheduled task: {}", e),
                     )
                 }
             }
@@ -98,25 +99,33 @@ impl ModeExecutor for ServeMode {
 
         #[cfg(unix)]
         {
-            // Unix implementation using regular process spawning
-            let child = tokio::process::Command::new(current_exe)
-                .arg("serve-internal")
-                .arg("--port")
-                .arg(config.port.to_string())
-                .spawn();
+            use nix::unistd::{fork, ForkResult};
 
-            match child {
-                Ok(_) => ExecutionResult::new(
-                    ExecutionMode::Serve,
-                    true,
-                    format!("Server started in background on port {}", config.port)
-                ),
+            match unsafe { fork() } {
+                Ok(ForkResult::Parent { child: _ }) => {
+                    // Parent returns immediately
+                    ExecutionResult::new(
+                        ExecutionMode::Serve,
+                        true,
+                        format!("Server started in background on port {}", config.port),
+                    )
+                }
+                Ok(ForkResult::Child) => {
+                    // Child process - start the server
+                    let _ = tokio::process::Command::new(current_exe)
+                        .arg("serve-internal")
+                        .arg("--port")
+                        .arg(config.port.to_string())
+                        .spawn();
+
+                    std::process::exit(0);
+                }
                 Err(e) => {
-                    error!("Failed to start background server: {}", e);
+                    error!("Failed to fork process: {}", e);
                     ExecutionResult::new(
                         ExecutionMode::Serve,
                         false,
-                        format!("Failed to start background server: {}", e)
+                        format!("Failed to fork process: {}", e),
                     )
                 }
             }
@@ -131,25 +140,25 @@ impl ServeMode {
 
     pub async fn serve_internal(port: u16) -> ExecutionResult {
         let output_dir = get_default_output_dir();
-        
+
         // Ensure output directory exists
         if let Err(e) = std::fs::create_dir_all(&output_dir) {
             error!("Failed to create output directory: {}", e);
             return ExecutionResult::new(
                 ExecutionMode::Serve,
                 false,
-                format!("Failed to create output directory: {}", e)
+                format!("Failed to create output directory: {}", e),
             );
         }
-        
+
         // Create the server without a timeout
         let server = FileServer::new(output_dir.clone(), port);
-        
+
         // Start a monitoring task
         let monitor_handle = spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                
+
                 // Check if output directory is empty
                 if let Ok(entries) = std::fs::read_dir(&output_dir) {
                     if entries.count() == 0 {
@@ -165,15 +174,11 @@ impl ServeMode {
             Ok(_) => ExecutionResult::new(
                 ExecutionMode::Serve,
                 true,
-                format!("Server completed successfully on port {}", port)
+                format!("Server completed successfully on port {}", port),
             ),
             Err(e) => {
                 error!("Server failed: {}", e);
-                ExecutionResult::new(
-                    ExecutionMode::Serve,
-                    false,
-                    format!("Server failed: {}", e)
-                )
+                ExecutionResult::new(ExecutionMode::Serve, false, format!("Server failed: {}", e))
             }
         }
     }
