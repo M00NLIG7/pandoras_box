@@ -352,90 +352,77 @@ impl SSHSession {
         let mut stderr = vec![];
         let mut consecutive_empty_reads = 0;
         const MAX_EMPTY_READS: u32 = 3;
-        const CHANNEL_TIMEOUT: Duration = Duration::from_secs(240);
 
         debug!("Starting to process channel output");
 
-        // Set an overall timeout for the channel processing
-        let result = tokio::time::timeout(CHANNEL_TIMEOUT, async {
-            while let Some(msg) = channel.wait().await {
-                match msg {
-                    russh::ChannelMsg::Data { ref data } => {
-                        if data.is_empty() {
-                            consecutive_empty_reads += 1;
-                            if consecutive_empty_reads >= MAX_EMPTY_READS {
-                                warn!("Multiple empty data reads, assuming channel done");
-                                break;
-                            }
-                        } else {
-                            consecutive_empty_reads = 0;
-                            trace!(bytes_received = data.len(), "Received stdout data");
-                            stdout.extend_from_slice(data);
-                        }
-                    }
-                    russh::ChannelMsg::ExtendedData { ref data, ext } => {
-                        if data.is_empty() {
-                            consecutive_empty_reads += 1;
-                            if consecutive_empty_reads >= MAX_EMPTY_READS {
-                                warn!("Multiple empty extended data reads, assuming channel done");
-                                break;
-                            }
-                        } else {
-                            consecutive_empty_reads = 0;
-                            trace!(
-                                bytes_received = data.len(),
-                                channel = ext,
-                                "Received stderr data"
-                            );
-                            stderr.extend_from_slice(data);
-                        }
-                    }
-                    russh::ChannelMsg::ExitStatus { exit_status } => {
-                        debug!(status = exit_status, "Received exit status");
-                        code = Some(exit_status);
-                        // Don't break immediately - there might still be buffered data
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                russh::ChannelMsg::Data { ref data } => {
+                    if data.is_empty() {
                         consecutive_empty_reads += 1;
-                    }
-                    russh::ChannelMsg::ExitSignal {
-                        signal_name,
-                        core_dumped,
-                        error_message,
-                        lang_tag,
-                    } => {
-                        error!(
-                            ?signal_name,
-                            ?core_dumped,
-                            ?error_message,
-                            ?lang_tag,
-                            "Command terminated by signal"
-                        );
-                        // Break immediately on signal
-                        break;
-                    }
-                    russh::ChannelMsg::Eof => {
-                        debug!("Received EOF");
-                        break;
-                    }
-                    _ => {
-                        trace!("Received other channel message type");
-                        consecutive_empty_reads += 1;
+                        if consecutive_empty_reads >= MAX_EMPTY_READS {
+                            warn!("Multiple empty data reads, assuming channel done");
+                            break;
+                        }
+                    } else {
+                        consecutive_empty_reads = 0;
+                        trace!(bytes_received = data.len(), "Received stdout data");
+                        stdout.extend_from_slice(data);
                     }
                 }
-
-                if consecutive_empty_reads >= MAX_EMPTY_READS {
-                    debug!("Maximum consecutive empty reads reached, closing channel");
+                russh::ChannelMsg::ExtendedData { ref data, ext } => {
+                    if data.is_empty() {
+                        consecutive_empty_reads += 1;
+                        if consecutive_empty_reads >= MAX_EMPTY_READS {
+                            warn!("Multiple empty extended data reads, assuming channel done");
+                            break;
+                        }
+                    } else {
+                        consecutive_empty_reads = 0;
+                        trace!(
+                            bytes_received = data.len(),
+                            channel = ext,
+                            "Received stderr data"
+                        );
+                        stderr.extend_from_slice(data);
+                    }
+                }
+                russh::ChannelMsg::ExitStatus { exit_status } => {
+                    debug!(status = exit_status, "Received exit status");
+                    code = Some(exit_status);
+                    // Don't break immediately - there might still be buffered data
+                    consecutive_empty_reads += 1;
+                }
+                russh::ChannelMsg::ExitSignal {
+                    signal_name,
+                    core_dumped,
+                    error_message,
+                    lang_tag,
+                } => {
+                    error!(
+                        ?signal_name,
+                        ?core_dumped,
+                        ?error_message,
+                        ?lang_tag,
+                        "Command terminated by signal"
+                    );
+                    // Break immediately on signal
                     break;
                 }
+                russh::ChannelMsg::Eof => {
+                    debug!("Received EOF");
+                    break;
+                }
+                _ => {
+                    trace!("Received other channel message type");
+                    consecutive_empty_reads += 1;
+                }
             }
-        })
-        .await;
 
-        // Handle timeout
-        if result.is_err() {
-            error!("Channel processing timed out");
-            return Err(crate::Error::ConnectionError(
-                "Channel processing timed out".into(),
-            ));
+            if consecutive_empty_reads >= MAX_EMPTY_READS {
+                debug!("Maximum consecutive empty reads reached, closing channel");
+                break;
+            }
         }
 
         // Attempt to close the channel gracefully
@@ -1252,4 +1239,3 @@ impl client::Handler for Handler {
         Ok(true)
     }
 }
-

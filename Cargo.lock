@@ -402,6 +402,7 @@ dependencies = [
  "log",
  "mime_guess",
  "netstat",
+ "nix",
  "once_cell",
  "procfs",
  "regex",
