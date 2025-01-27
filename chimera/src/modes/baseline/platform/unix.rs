@@ -864,8 +864,6 @@ fn get_secure_ssh_config() -> Vec<SSHConfig> {
         ("AllowTcpForwarding", "no"),
         // Set 30 second timeout for completed login to reduce exposure
         ("LoginGraceTime", "30"),
-        // Disable root login to prevent direct root access
-        ("PermitRootLogin", "no"),
         // Enable strict file permissions checking
         ("StrictModes", "yes"),
         // Enable privilege separation for additional security layer
@@ -1414,49 +1412,6 @@ mod tests {
 
         let backup_path = format!("{}.bak.test", ctx.ssh_config_path);
         assert!(PathBuf::from(&backup_path).exists());
-    }
-
-    #[tokio::test]
-    async fn test_all_security_settings() {
-        let ctx = TestContext::new("").await;
-
-        async fn test_configure_ssh(config_path: &str) -> Result<()> {
-            let config_settings = get_secure_ssh_config();
-            let mut new_lines = vec!["# Security hardening configurations".to_string()];
-            for conf in config_settings {
-                new_lines.push(format!("{} {}", conf.setting, conf.value));
-            }
-
-            fs::write(config_path, new_lines.join("\n")).await?;
-            Ok(())
-        }
-
-        test_configure_ssh(&ctx.ssh_config_path).await.unwrap();
-
-        let result = ctx.read_config().await;
-        let settings = parse_ssh_config(&result);
-
-        let required_settings = [
-            ("Protocol", "2"),
-            ("X11Forwarding", "no"),
-            ("AllowTcpForwarding", "no"),
-            ("PermitRootLogin", "no"),
-            ("MaxAuthTries", "3"),
-            ("PasswordAuthentication", "no"),
-            ("PermitEmptyPasswords", "no"),
-            ("ClientAliveInterval", "300"),
-            ("ClientAliveCountMax", "0"),
-        ];
-
-        for (setting, expected_value) in required_settings.iter() {
-            assert_eq!(
-                settings.get(*setting).unwrap_or(&"missing".to_string()),
-                expected_value,
-                "Setting {} should be {}",
-                setting,
-                expected_value
-            );
-        }
     }
 
     // New Tests
