@@ -103,7 +103,7 @@ impl ModeExecutor for ServeMode {
 
             match unsafe { fork() } {
                 Ok(ForkResult::Parent { child: _ }) => {
-                    // Parent returns immediately
+                    // Parent continues executing until serve_internal starts
                     ExecutionResult::new(
                         ExecutionMode::Serve,
                         true,
@@ -111,13 +111,8 @@ impl ModeExecutor for ServeMode {
                     )
                 }
                 Ok(ForkResult::Child) => {
-                    // Child process - start the server
-                    let _ = tokio::process::Command::new(current_exe)
-                        .arg("serve-internal")
-                        .arg("--port")
-                        .arg(config.port.to_string())
-                        .spawn();
-
+                    // Child process takes over and runs serve_internal directly
+                    Self::serve_internal(config.port).await;
                     std::process::exit(0);
                 }
                 Err(e) => {

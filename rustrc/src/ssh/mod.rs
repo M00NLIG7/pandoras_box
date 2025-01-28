@@ -347,100 +347,57 @@ impl SSHSession {
         &self,
         channel: &mut russh::Channel<russh::client::Msg>,
     ) -> crate::Result<CommandOutput> {
-        let mut code = None;
         let mut stdout = vec![];
         let mut stderr = vec![];
         let mut consecutive_empty_reads = 0;
         const MAX_EMPTY_READS: u32 = 3;
 
-        debug!("Starting to process channel output");
-
-        while let Some(msg) = channel.wait().await {
-            match msg {
-                russh::ChannelMsg::Data { ref data } => {
-                    if data.is_empty() {
-                        consecutive_empty_reads += 1;
-                        if consecutive_empty_reads >= MAX_EMPTY_READS {
-                            warn!("Multiple empty data reads, assuming channel done");
-                            break;
+        loop {
+            match channel.wait().await {
+                Some(msg) => match msg {
+                    russh::ChannelMsg::Data { ref data } => {
+                        if data.is_empty() {
+                            consecutive_empty_reads += 1;
+                        } else {
+                            consecutive_empty_reads = 0;
+                            stdout.extend_from_slice(data);
+                            if String::from_utf8_lossy(data)
+                                .contains("Starting internal serve mode on port")
+                            {
+                                let _ = channel.eof().await;
+                                return Ok(CommandOutput {
+                                    stdout,
+                                    stderr,
+                                    status_code: Some(0),
+                                });
+                            }
                         }
-                    } else {
-                        consecutive_empty_reads = 0;
-                        trace!(bytes_received = data.len(), "Received stdout data");
-                        stdout.extend_from_slice(data);
                     }
-                }
-                russh::ChannelMsg::ExtendedData { ref data, ext } => {
-                    if data.is_empty() {
-                        consecutive_empty_reads += 1;
-                        if consecutive_empty_reads >= MAX_EMPTY_READS {
-                            warn!("Multiple empty extended data reads, assuming channel done");
-                            break;
+                    russh::ChannelMsg::ExtendedData { ref data, .. } => {
+                        if data.is_empty() {
+                            consecutive_empty_reads += 1;
+                        } else {
+                            consecutive_empty_reads = 0;
+                            stderr.extend_from_slice(data);
                         }
-                    } else {
-                        consecutive_empty_reads = 0;
-                        trace!(
-                            bytes_received = data.len(),
-                            channel = ext,
-                            "Received stderr data"
-                        );
-                        stderr.extend_from_slice(data);
                     }
-                }
-                russh::ChannelMsg::ExitStatus { exit_status } => {
-                    debug!(status = exit_status, "Received exit status");
-                    code = Some(exit_status);
-                    // Don't break immediately - there might still be buffered data
-                    consecutive_empty_reads += 1;
-                }
-                russh::ChannelMsg::ExitSignal {
-                    signal_name,
-                    core_dumped,
-                    error_message,
-                    lang_tag,
-                } => {
-                    error!(
-                        ?signal_name,
-                        ?core_dumped,
-                        ?error_message,
-                        ?lang_tag,
-                        "Command terminated by signal"
-                    );
-                    // Break immediately on signal
-                    break;
-                }
-                russh::ChannelMsg::Eof => {
-                    debug!("Received EOF");
-                    break;
-                }
-                _ => {
-                    trace!("Received other channel message type");
-                    consecutive_empty_reads += 1;
-                }
+                    _ => {
+                        consecutive_empty_reads += 1;
+                    }
+                },
+                None => break,
             }
 
             if consecutive_empty_reads >= MAX_EMPTY_READS {
-                debug!("Maximum consecutive empty reads reached, closing channel");
                 break;
             }
         }
 
-        // Attempt to close the channel gracefully
-        if let Err(e) = channel.eof().await {
-            warn!(error = ?e, "Failed to send EOF to channel");
-        }
-
-        debug!(
-            exit_code = ?code,
-            stdout_size = stdout.len(),
-            stderr = ?String::from_utf8_lossy(&stderr),
-            "Command execution completed"
-        );
-
+        let _ = channel.eof().await;
         Ok(CommandOutput {
             stdout,
             stderr,
-            status_code: code,
+            status_code: Some(0),
         })
     }
 
