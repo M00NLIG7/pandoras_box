@@ -361,16 +361,7 @@ impl SSHSession {
                         } else {
                             consecutive_empty_reads = 0;
                             stdout.extend_from_slice(data);
-                            if String::from_utf8_lossy(data)
-                                .contains("Starting internal serve mode on port")
-                            {
-                                let _ = channel.eof().await;
-                                return Ok(CommandOutput {
-                                    stdout,
-                                    stderr,
-                                    status_code: Some(0),
-                                });
-                            }
+                            debug!(stdout = ?String::from_utf8_lossy(data), "Received data");
                         }
                     }
                     russh::ChannelMsg::ExtendedData { ref data, .. } => {
