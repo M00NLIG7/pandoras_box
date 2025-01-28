@@ -269,7 +269,7 @@ impl NetworkManager {
             "Administrator",
             password,
             socket_addr,
-            Duration::from_secs(300),
+            Duration::from_secs(500),
         )
         .await
         .map(windows_config)
@@ -281,7 +281,7 @@ impl NetworkManager {
             "Administrator",
             password,
             &host.ip,
-            Duration::from_secs(300),
+            Duration::from_secs(500),
         )
         .await
         .map(windows_config)
@@ -933,7 +933,7 @@ impl Orchestrator {
 
 #[tokio::test]
 async fn test_main() -> Result<()> {
-    std::env::set_var("RUST_LOG", "info,rustrc=debug");
+    std::env::set_var("RUST_LOG", "info,rustrc=trace");
     env_logger::init();
 
     let subnet = Subnet::try_from("10.100.136.0/24")?;
