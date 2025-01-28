@@ -933,7 +933,7 @@ impl Orchestrator {
 
 #[tokio::test]
 async fn test_main() -> Result<()> {
-    std::env::set_var("RUST_LOG", "info");
+    std::env::set_var("RUST_LOG", "info,rustrc=debug");
     env_logger::init();
 
     let subnet = Subnet::try_from("10.100.136.0/24")?;

@@ -99,21 +99,31 @@ impl ModeExecutor for ServeMode {
 
         #[cfg(unix)]
         {
+            use nix::unistd::execvp;
             use nix::unistd::{fork, ForkResult};
+            use std::ffi::CString;
 
             match unsafe { fork() } {
-                Ok(ForkResult::Parent { child: _ }) => {
-                    // Parent continues executing until serve_internal starts
-                    ExecutionResult::new(
-                        ExecutionMode::Serve,
-                        true,
-                        format!("Server started in background on port {}", config.port),
-                    )
-                }
+                Ok(ForkResult::Parent { child: _ }) => ExecutionResult::new(
+                    ExecutionMode::Serve,
+                    true,
+                    format!("Server started in background on port {}", config.port),
+                ),
                 Ok(ForkResult::Child) => {
-                    // Child process takes over and runs serve_internal directly
-                    Self::serve_internal(config.port).await;
-                    std::process::exit(0);
+                    // Convert the executable path and arguments to CString
+                    let exe = CString::new(current_exe.to_str().unwrap()).unwrap();
+                    let arg0 = CString::new("serve-internal").unwrap();
+                    let arg1 = CString::new("--port").unwrap();
+                    let arg2 = CString::new(config.port.to_string()).unwrap();
+
+                    // Replace the current process with serve-internal
+                    match execvp(&exe, &[&exe, &arg0, &arg1, &arg2]) {
+                        Ok(_) => unreachable!(), // execvp never returns on success
+                        Err(e) => {
+                            error!("Failed to exec: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("Failed to fork process: {}", e);
