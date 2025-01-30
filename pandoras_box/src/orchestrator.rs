@@ -514,13 +514,6 @@ impl Orchestrator {
        info!("Running download command: {}", download_cmd);
        let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
 
-
-       for download_result in &download_results {
-           if &download_result.ip == "10.100.136.111" {
-               info!("mkdir result: {:?}", download_result);
-           }
-       }
-       
        // Filter download results to only include hosts where mkdir succeeded
        let filtered_results: Vec<HostOperationResult<CommandOutput>> = download_results
            .into_iter()
@@ -563,27 +556,6 @@ impl Orchestrator {
                         .exec_by_os(&cmd!(format!("echo {} >> {}", entry, hosts_file)), os)
                         .await;
 
-                    if results.is_empty() {
-                        info!("No hosts available for hosts file append");
-                    }
-
-
-                    for result in &results {
-                        if let Err(e) = &result.result {
-                            log_failure(&result.ip, "hosts file append", e);
-                        }
-
-                        if let Ok(output) = &result.result {
-                            info!("[{}] hosts file append succeeded\nstdout: {}\nstderr: {}", 
-                                result.ip,
-                                String::from_utf8_lossy(&output.stdout),
-                                String::from_utf8_lossy(&output.stderr)
-                            );
-                        }
-                    }
-
-
-                    
                     final_results.extend(results);
                 }
             },
