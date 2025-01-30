@@ -11,10 +11,10 @@ use std::{
     sync::Arc,
 };
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{timeout, Duration};
 use tokio::{
     io::AsyncWriteExt,
     net::{lookup_host, ToSocketAddrs},
-    time::Duration,
 };
 use tracing::{debug, error, info, instrument, trace, warn};
 
@@ -347,49 +347,57 @@ impl SSHSession {
         &self,
         channel: &mut russh::Channel<russh::client::Msg>,
     ) -> crate::Result<CommandOutput> {
-        let mut stdout = vec![];
-        let mut stderr = vec![];
-        let mut consecutive_empty_reads = 0;
-        const MAX_EMPTY_READS: u32 = 3;
+        let processing = async {
+            let mut stdout = vec![];
+            let mut stderr = vec![];
+            let mut consecutive_empty_reads = 0;
+            const MAX_EMPTY_READS: u32 = 3;
 
-        loop {
-            match channel.wait().await {
-                Some(msg) => match msg {
-                    russh::ChannelMsg::Data { ref data } => {
-                        if data.is_empty() {
-                            consecutive_empty_reads += 1;
-                        } else {
-                            consecutive_empty_reads = 0;
-                            stdout.extend_from_slice(data);
-                            debug!(stdout = ?String::from_utf8_lossy(data), "Received data");
+            loop {
+                match channel.wait().await {
+                    Some(msg) => match msg {
+                        russh::ChannelMsg::Data { ref data } => {
+                            if data.is_empty() {
+                                consecutive_empty_reads += 1;
+                            } else {
+                                consecutive_empty_reads = 0;
+                                stdout.extend_from_slice(data);
+                                debug!(stdout = ?String::from_utf8_lossy(data), "Received data");
+                            }
                         }
-                    }
-                    russh::ChannelMsg::ExtendedData { ref data, .. } => {
-                        if data.is_empty() {
-                            consecutive_empty_reads += 1;
-                        } else {
-                            consecutive_empty_reads = 0;
-                            stderr.extend_from_slice(data);
+                        russh::ChannelMsg::ExtendedData { ref data, .. } => {
+                            if data.is_empty() {
+                                consecutive_empty_reads += 1;
+                            } else {
+                                consecutive_empty_reads = 0;
+                                stderr.extend_from_slice(data);
+                            }
                         }
-                    }
-                    _ => {
-                        consecutive_empty_reads += 1;
-                    }
-                },
-                None => break,
+                        _ => {
+                            consecutive_empty_reads += 1;
+                        }
+                    },
+                    None => break,
+                }
+                if consecutive_empty_reads >= MAX_EMPTY_READS {
+                    break;
+                }
             }
+            let _ = channel.eof().await;
+            Ok(CommandOutput {
+                stdout,
+                stderr,
+                status_code: Some(0),
+            })
+        };
 
-            if consecutive_empty_reads >= MAX_EMPTY_READS {
-                break;
-            }
+        // Wrap the processing in a 90-second timeout
+        match timeout(Duration::from_secs(90), processing).await {
+            Ok(result) => result,
+            Err(_) => Err(crate::Error::CommandError(
+                "Command execution timed out after 90 seconds".into(),
+            )),
         }
-
-        let _ = channel.eof().await;
-        Ok(CommandOutput {
-            stdout,
-            stderr,
-            status_code: Some(0),
-        })
     }
 
     #[instrument(skip(self))]
