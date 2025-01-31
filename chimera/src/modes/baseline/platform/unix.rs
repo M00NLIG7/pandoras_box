@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use super::find_files;
+use crate::utils::find_files;
 
 #[derive(Debug, Clone)]
 struct SysctlSetting {
