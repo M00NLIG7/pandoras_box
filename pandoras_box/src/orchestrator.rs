@@ -329,7 +329,7 @@ async fn fetch_with_retry(
         }
 
         attempt += 1;
-        info!("Retry attempt {} for {} after {}ms delay", attempt, ip, delay_ms);
+        info!("Retry attempt {} for {} after {}s delay", attempt, ip, delay_ms);
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         delay_ms *= 2; // Exponential backoff
     }
@@ -511,7 +511,6 @@ impl Orchestrator {
        // Generate and execute the base64 download command
        let download_cmd = Self::generate_base64_download_command(CHIMERA_URL_WIN);
 
-       info!("Running download command: {}", download_cmd);
        let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
 
        // Filter download results to only include hosts where mkdir succeeded
@@ -582,12 +581,6 @@ impl Orchestrator {
                         
                         match client.exec(&cmd!(cmd)).await {
                             Ok(output) => {
-                                log::info!("[{}] {} succeeded\nstdout: {}\nstderr: {}", 
-                                    ip, tool,
-                                    String::from_utf8_lossy(&output.stdout),
-                                    String::from_utf8_lossy(&output.stderr)
-                                );
-                                
                                 success = true;
                                 final_results.push(HostOperationResult {
                                     ip: ip.to_string(),
@@ -626,6 +619,8 @@ impl Orchestrator {
     pub async fn run(&mut self, network_password: &str) -> Result<()> {
         info!("Starting Orchestrator run");
 
+        let start = std::time::Instant::now();
+
         // Step 1: Enumerate hosts
         let hosts = match self.network_manager.enumerate().await {
             Ok(hosts) => {
@@ -638,6 +633,9 @@ impl Orchestrator {
             }
         };
 
+        info!("Enumerated hosts in {}s", start.elapsed().as_secs());
+
+        let start = std::time::Instant::now();
         // Step 2: Initialize communication
         let connected_hosts = match self
             .network_manager
@@ -669,6 +667,8 @@ impl Orchestrator {
             return Err(Error::CommandError("No hosts available".into()));
         }
 
+        info!("Initialized communication in {}s", start.elapsed().as_secs());
+
         /*
 
         // Step 3: Deploy Chimera to successfully connected hosts
@@ -691,10 +691,18 @@ impl Orchestrator {
             None => return Err(Error::CommandError("Communicator not initialized".into())),
         };
 
+        let start = std::time::Instant::now();
         let _ = self.append_to_hosts_file(&communicator, OS::Unix).await;
-        let _ = self.append_to_hosts_file(&communicator, OS::Windows).await;
+        info!("Appended Unix hosts file in {}s", start.elapsed().as_secs());
 
+        let start = std::time::Instant::now();
+        let _ = self.append_to_hosts_file(&communicator, OS::Windows).await;
+        info!("Appended Windows hosts file in {}s", start.elapsed().as_secs());
+        
+        let start = std::time::Instant::now();
         let deployment_results = self.download_chimera(&communicator, host_map).await;
+        info!("Downloaded Chimera in {}s", start.elapsed().as_secs());
+
         let deployed_hosts: Vec<Arc<Host>> = {
             // First collect IPs we've seen into a HashSet
             let mut seen_ips = HashSet::new();
@@ -736,6 +744,7 @@ impl Orchestrator {
             return Err(Error::CommandError("No successful deployments".into()));
         }
 
+        let start = std::time::Instant::now();
         // Step 4: Execute Chimera modes on successfully deployed hosts
         let execution_results = self.execute_chimera_modes(&deployed_hosts).await;
         for result in &execution_results {
@@ -745,10 +754,13 @@ impl Orchestrator {
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        info!("Executed Chimera modes in {}s", start.elapsed().as_secs());
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
+        let start = std::time::Instant::now();
         self.fetch_inventory(&deployed_hosts).await?;
         self.fetch_application_log(&deployed_hosts).await?;
+        info!("Fetched files in {}s", start.elapsed().as_secs());
 
         info!(
             "Orchestrator run completed. Summary:\n\
@@ -775,7 +787,6 @@ impl Orchestrator {
     }
 
     async fn execute_mode_windows(
-        &self,
         communicator: &Communicator,
         mode: &ModeConfig<'_>,
     ) -> Vec<HostOperationResult<CommandOutput>> {
@@ -790,7 +801,6 @@ impl Orchestrator {
     }
 
     async fn execute_mode_unix(
-        &self,
         communicator: &Communicator,
         mode: &ModeConfig<'_>,
     ) -> Vec<HostOperationResult<CommandOutput>> {
@@ -875,40 +885,45 @@ impl Orchestrator {
         &self,
         hosts: &[Arc<Host>],
     ) -> Vec<HostOperationResult<CommandOutput>> {
-        info!("Executing Chimera modes on {} hosts", hosts.len());
-
         let communicator = match self.network_manager.get_communicator() {
             Some(comm) => comm,
-            None => {
-                return self.handle_missing_communicator_results(hosts);
-            }
+            None => return self.handle_missing_communicator_results(hosts),
         };
-
+        
         let mut all_results = Vec::new();
-
-        // Execute each mode for both Windows and Unix hosts
+        
         for mode in CHIMERA_MODES.iter() {
             info!("Processing mode: {} {}", mode.name, mode.args.unwrap_or(""));
+            
+            // Create the futures but don't spawn them
+            let windows_fut = if hosts.iter().any(|h| h.os == OS::Windows) {
+                Some(Self::execute_mode_windows(communicator, mode))
+            } else {
+                None
+            };
 
-            // Windows execution
-            if hosts.iter().any(|h| h.os == OS::Windows) {
-                let results = self.execute_mode_windows(communicator, mode).await;
-                all_results.extend(results);
+            let unix_fut = if hosts.iter().any(|h| h.os == OS::Unix) {
+                Some(Self::execute_mode_unix(communicator, mode))
+            } else {
+                None
+            };
 
-                // Download results for this mode
-                //self.download_results_windows(communicator, mode.name).await;
-            }
-
-            // Unix execution
-            if hosts.iter().any(|h| h.os == OS::Unix) {
-                let results = self.execute_mode_unix(communicator, mode).await;
-                all_results.extend(results);
-
-                // Download results for this mode
-                //self.download_results_unix(communicator, mode.name).await;
+            // Use join! to run them concurrently
+            match (windows_fut, unix_fut) {
+                (Some(w), Some(u)) => {
+                    let (w_res, u_res) = tokio::join!(w, u);
+                    all_results.extend(w_res);
+                    all_results.extend(u_res);
+                }
+                (Some(w), None) => {
+                    all_results.extend(w.await);
+                }
+                (None, Some(u)) => {
+                    all_results.extend(u.await);
+                }
+                (None, None) => {}
             }
         }
-
         all_results
     }
 
