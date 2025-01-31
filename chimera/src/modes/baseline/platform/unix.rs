@@ -1,13 +1,11 @@
 use crate::error::Result;
-use ignore::WalkBuilder;
 use log::{debug, error, info, warn};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use super::find_files;
 
 #[derive(Debug, Clone)]
 struct SysctlSetting {
@@ -93,61 +91,6 @@ async fn append_php_config_to_file(path: &str, config: &PHPConfig) -> Result<()>
     Ok(())
 }
 
-/// Asynchronously searches for files with the specified name and returns their paths.
-///
-/// # Arguments
-///
-/// * `target_name` - The name of the file to search for.
-/// * `root` - The root directory to start the search.
-///
-/// # Returns
-///
-/// A vector of file paths matching the specified name.
-pub async fn find_files(target_name: String, root: String) -> Vec<String> {
-    // Use Arc for shared ownership of the target_name
-    let target_name = Arc::new(target_name);
-    let root = Arc::new(root);
-
-    // Create a channel for communication
-    let (tx, mut rx) = mpsc::channel::<PathBuf>(100);
-
-    // Spawn a blocking task for file traversal
-    let walker_task = tokio::task::spawn_blocking({
-        let target_name = Arc::clone(&target_name);
-        let root = Arc::clone(&root);
-        move || {
-            let walker = WalkBuilder::new(&*root).threads(6).build_parallel();
-            walker.run(|| {
-                let tx = tx.clone();
-                let target_name = Arc::clone(&target_name);
-                Box::new(move |entry| {
-                    if let Ok(entry) = entry {
-                        // Check if the file name matches
-                        if entry.path().file_name().and_then(|n| n.to_str()) == Some(&*target_name)
-                        {
-                            // Send the matching path
-                            tx.blocking_send(entry.into_path()).ok();
-                        }
-                    }
-                    ignore::WalkState::Continue
-                })
-            });
-        }
-    });
-
-    // Collect results asynchronously
-    let mut results = Vec::new();
-    while let Some(path) = rx.recv().await {
-        if let Some(path_str) = path.to_str() {
-            results.push(path_str.to_string());
-        }
-    }
-
-    // Ensure the walker task finishes
-    walker_task.await.unwrap();
-
-    results
-}
 
 async fn configure_rbash(revert: bool) -> Result<()> {
     if revert {
