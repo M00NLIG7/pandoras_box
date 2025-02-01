@@ -18,6 +18,166 @@ async fn run_cmd(args: &[&str]) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+pub async fn harden_zerologon() -> Result<()> {
+    // Registry settings can use cmd with reg.exe
+    let registry_settings = [
+        ("FullSecureChannelProtection", "REG_DWORD", "1"),
+        ("RequireSecureRPC", "REG_DWORD", "1"),
+        ("RequireStrongKey", "REG_DWORD", "1"),
+        ("RequireSignOrSeal", "REG_DWORD", "1"),
+        ("SealSecureChannel", "REG_DWORD", "1"),
+        ("SignSecureChannel", "REG_DWORD", "1"),
+        ("VulnerableChannelAllowList", "REG_SZ", ""),
+    ];
+
+    // Apply registry settings using cmd
+    for (setting, reg_type, value) in registry_settings.iter() {
+        run_cmd(&[
+            "reg",
+            "add",
+            "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Netlogon\\Parameters",
+            "/v",
+            setting,
+            "/t",
+            reg_type,
+            "/d",
+            value,
+            "/f",
+        ])
+        .await?;
+    }
+
+    // PowerShell is needed for the monitoring setup
+    // Create the monitoring script content
+    let monitoring_script = r#"
+# Event monitoring configuration
+$eventLogName = 'System'
+$eventSourceName = 'Netlogon'
+$criticalEvents = @(5827, 5828, 5829, 5830, 5831)
+$logPath = 'C:\Program Files\SecurityConfig\ZerologonEvents.csv'
+$logDir = Split-Path $logPath -Parent
+
+# Create directory if it doesn't exist
+if (-not (Test-Path $logDir)) {
+    New-Item -Path $logDir -ItemType Directory -Force | Out-Null
+}
+
+# Query and log events
+try {
+    Get-WinEvent -FilterHashtable @{
+        LogName = $eventLogName
+        ProviderName = $eventSourceName
+        ID = $criticalEvents
+    } -MaxEvents 100 -ErrorAction Stop | 
+    Select-Object TimeCreated, Id, LevelDisplayName, Message |
+    Export-Csv -Path $logPath -NoTypeInformation -Append
+} catch [Exception] {
+    $errorMessage = $_.Exception.Message
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path "$logDir\error.log" -Value "[$timestamp] $errorMessage"
+}
+
+# Add additional monitoring for secure channel validation
+$secureChannelStatus = nltest /sc_query:$env:COMPUTERNAME 2>&1
+Add-Content -Path "$logDir\secure_channel.log" -Value "[$timestamp] $secureChannelStatus"
+"#;
+
+    // Save the monitoring script using PowerShell
+    let encoded_script = monitoring_script.replace("\"", "\\\"");
+    run_cmd(&[
+        "powershell",
+        "-Command",
+        &format!("Set-Content -Path 'C:\\Program Files\\SecurityConfig\\ZerologonMonitor.ps1' -Value @\"\n{}\n\"@", encoded_script),
+    ])
+    .await?;
+
+    // Create scheduled task using schtasks (cmd)
+    run_cmd(&[
+        "schtasks",
+        "/create",
+        "/tn",
+        "ZerologonMonitoring",
+        "/tr",
+        "powershell.exe -ExecutionPolicy Bypass -NoProfile -File \"C:\\Program Files\\SecurityConfig\\ZerologonMonitor.ps1\"",
+        "/sc",
+        "hourly",
+        "/ru",
+        "SYSTEM",
+        "/rl",
+        "HIGHEST",
+        "/f",
+    ])
+    .await?;
+
+    // Verify settings using cmd
+    let verification_result = verify_zerologon_settings().await?;
+    if !verification_result {
+        error!("Some Zerologon mitigation settings were not applied correctly");
+    }
+
+    // Additional security checks using PowerShell
+    run_cmd(&[
+        "powershell",
+        "-Command",
+        r#"
+        $result = Test-ComputerSecureChannel -Verbose
+        if (-not $result) {
+            Write-Error "Secure channel test failed"
+            Exit 1
+        }
+        "#
+    ])
+    .await?;
+
+    Ok(())
+}
+
+async fn verify_zerologon_settings() -> Result<bool> {
+    // Use cmd for registry verification
+    let registry_path = "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Netlogon\\Parameters";
+    let required_settings = [
+        "FullSecureChannelProtection",
+        "RequireSecureRPC",
+        "RequireStrongKey",
+        "RequireSignOrSeal",
+        "SealSecureChannel",
+        "SignSecureChannel",
+    ];
+
+    let mut all_settings_correct = true;
+
+    for setting in required_settings.iter() {
+        let output = run_cmd(&[
+            "reg",
+            "query",
+            registry_path,
+            "/v",
+            setting,
+        ])
+        .await?;
+
+        if !output.contains("0x1") {
+            error!("Setting {} is not properly configured", setting);
+            all_settings_correct = false;
+        }
+    }
+
+    // Use PowerShell for additional verification
+    let netlogon_status = run_cmd(&[
+        "powershell",
+        "-Command",
+        "Get-Service Netlogon | Select-Object -ExpandProperty Status"
+    ])
+    .await?;
+
+    if !netlogon_status.contains("Running") {
+        error!("Netlogon service is not running");
+        all_settings_correct = false;
+    }
+
+    Ok(all_settings_correct)
+}
+
 pub async fn harden_php() -> Result<()> {
     // Find PHP configuration files
     let php_configs = find_php_configs().await?;
