@@ -23,7 +23,7 @@ impl ModeExecutor for BaselineMode {
         ExecutionResult::new(
             ExecutionMode::Baseline,
             true,
-            "Credentials managed successfully".to_string(),
+            "Baseline managed successfully".to_string(),
         )
     }
 }
