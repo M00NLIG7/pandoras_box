@@ -9,12 +9,11 @@ use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::time::timeout;
-use std::time::Duration;
-
 
 #[cfg(target_os = "windows")]
 use tokio::process::Command;
@@ -62,7 +61,7 @@ impl FileServer {
             "Checking for existing firewall rule '{}'...",
             self.rule_name
         );
-        let check_result = timeout(
+        let should_create_rule = match timeout(
             Duration::from_secs(5),
             Command::new("netsh")
                 .args(&[
@@ -74,27 +73,28 @@ impl FileServer {
                 ])
                 .output(),
         )
-        .await;
-
-        // Handle timeout error specifically
-        let check_output = match check_result {
-            Ok(Ok(output)) => output,
+        .await
+        {
+            Ok(Ok(output)) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                !stdout.contains(&self.rule_name)
+            }
             Ok(Err(e)) => {
-                error!("Failed to execute firewall check command: {}", e);
-                return Err(format!("Firewall check command failed: {}", e).into());
+                warn!(
+                    "Failed to execute firewall check command: {}. Will attempt to create rule.",
+                    e
+                );
+                true
             }
             Err(_) => {
-                error!("Firewall check command timed out after 5 seconds");
-                return Err("Firewall check timed out".into());
+                warn!("Firewall check command timed out after 5 seconds. Will attempt to create rule.");
+                true
             }
         };
 
-        let stdout = String::from_utf8_lossy(&check_output.stdout);
-        let stderr = String::from_utf8_lossy(&check_output.stderr);
-
-        // If rule doesn't exist, create it
-        if !stdout.contains(&self.rule_name) {
-            info!("Firewall rule does not exist, creating new rule...");
+        // If we should create the rule (either because it doesn't exist or we couldn't check)
+        if should_create_rule {
+            info!("Attempting to create firewall rule...");
 
             let add_result = timeout(
                 Duration::from_secs(5),
@@ -109,7 +109,7 @@ impl FileServer {
                         "action=allow",
                         &format!("localport={}", self.port),
                         "protocol=TCP",
-                        "profile=private,domain", // More restrictive profiles
+                        "profile=private,domain",
                         "description=Temporary rule for Chimera file server",
                     ])
                     .output(),
@@ -145,13 +145,6 @@ impl FileServer {
             }
         } else {
             info!("Firewall rule '{}' already exists", self.rule_name);
-
-            // Verify the existing rule is correct
-            if !stdout.contains(&self.port.to_string()) {
-                warn!("Existing rule found but port mismatch. Removing and recreating rule...");
-                // Similar cleanup and recreation code here
-                // (You might want to add this functionality)
-            }
         }
 
         info!("Firewall configuration completed successfully");

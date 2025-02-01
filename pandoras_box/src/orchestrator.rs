@@ -699,7 +699,6 @@ impl Orchestrator {
         let _ = self.append_to_hosts_file(&communicator, OS::Windows).await;
         info!("Appended Windows hosts file in {}s", start.elapsed().as_secs());
         
-        /*
         let start = std::time::Instant::now();
         let deployment_results = self.download_chimera(&communicator, host_map).await;
         info!("Downloaded Chimera in {}s", start.elapsed().as_secs());
@@ -726,8 +725,7 @@ impl Orchestrator {
             error!("No hosts successfully deployed");
             return Err(Error::CommandError("No successful deployments".into()));
         }
-       */ 
-        let deployed_hosts = connected_hosts.clone();
+        //let deployed_hosts = connected_hosts.clone();
 
         let start = std::time::Instant::now();
         // Step 4: Execute Chimera modes on successfully deployed hosts
@@ -1167,7 +1165,6 @@ async fn test_main() -> Result<()> {
     env_logger::init();
 
     // Create pre-enumerated hosts
-    /*
     let hosts = vec![
         Arc::new(Host {
             ip: "10.100.136.7".parse().unwrap(),
@@ -1190,16 +1187,6 @@ async fn test_main() -> Result<()> {
             open_ports: vec![139, 22],
         }),
         Arc::new(Host {
-            ip: "10.100.136.84".parse().unwrap(),
-            os: OS::Unix,
-            open_ports: vec![22],
-        }),
-        Arc::new(Host {
-            ip: "10.100.136.85".parse().unwrap(),
-            os: OS::Unix,
-            open_ports: vec![139, 22],
-        }),
-        Arc::new(Host {
             ip: "10.100.136.111".parse().unwrap(),
             os: OS::Windows,
             open_ports: vec![139, 22],
@@ -1215,13 +1202,15 @@ async fn test_main() -> Result<()> {
             open_ports: vec![139, 22],
         }),
     ];
-    */
+
+    /*
     let hosts = vec![
         Arc::new(Host {
             ip: "10.100.136.132".parse().unwrap(),
             os: OS::Windows,
             open_ports: vec![139, 22],
         })];
+        */
 
     // Initialize orchestrator with pre-enumerated hosts
     let mut orchestrator = Orchestrator::with_hosts(hosts.clone());
