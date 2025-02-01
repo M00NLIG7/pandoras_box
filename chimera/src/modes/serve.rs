@@ -36,64 +36,64 @@ impl ModeExecutor for ServeMode {
 
         #[cfg(windows)]
         {
-            // Windows-specific implementation using schtasks
-            let task_name = format!("ChimeraServer_{}", config.port);
-            let current_exe_str = current_exe.to_string_lossy();
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::System::Threading::{
+                CreateProcessW, CREATE_NO_WINDOW, DETACHED_PROCESS, PROCESS_INFORMATION,
+                STARTUPINFOW,
+            };
 
-            // Create and run the scheduled task
-            let create_result = tokio::process::Command::new("schtasks")
-                .args(&[
-                    "/create",
-                    "/tn",
-                    &task_name,
-                    "/tr",
-                    &format!(
-                        "\"{}\" serve-internal --port {}",
-                        current_exe_str, config.port
-                    ),
-                    "/sc",
-                    "once",
-                    "/st",
-                    &chrono::Local::now().format("%H:%M").to_string(),
-                    "/f",
-                    "/ru",
-                    "System",
-                ])
-                .output()
-                .await;
+            // Prepare command line
+            let mut cmd = format!(
+                "\"{}\" serve-internal --port {}",
+                current_exe.to_string_lossy(),
+                config.port
+            );
 
-            match create_result {
-                Ok(_) => {
-                    // Run the task
-                    let run_result = tokio::process::Command::new("schtasks")
-                        .args(&["/run", "/tn", &task_name])
-                        .output()
-                        .await;
+            // Convert to wide string for Windows API
+            let wide_cmd: Vec<u16> = cmd.encode_utf16().chain(std::iter::once(0)).collect();
 
-                    match run_result {
-                        Ok(_) => ExecutionResult::new(
-                            ExecutionMode::Serve,
-                            true,
-                            format!("Server started in background on port {}", config.port),
-                        ),
-                        Err(e) => {
-                            error!("Failed to run scheduled task: {}", e);
-                            ExecutionResult::new(
-                                ExecutionMode::Serve,
-                                false,
-                                format!("Failed to run scheduled task: {}", e),
-                            )
-                        }
-                    }
+            let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
+            startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+
+            let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+            // Create detached process
+            let success = unsafe {
+                CreateProcessW(
+                    std::ptr::null(),
+                    wide_cmd.as_ptr() as *mut _,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    DETACHED_PROCESS | CREATE_NO_WINDOW,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    &startup_info,
+                    &mut process_info,
+                )
+            };
+
+            if success == 0 {
+                let error = std::io::Error::last_os_error();
+                error!("Failed to create background process: {}", error);
+                ExecutionResult::new(
+                    ExecutionMode::Serve,
+                    false,
+                    format!("Failed to create background process: {}", error),
+                )
+            } else {
+                // Close handle immediately since we don't need them
+                unsafe {
+                    CloseHandle(process_info.hProcess);
+                    CloseHandle(process_info.hThread);
                 }
-                Err(e) => {
-                    error!("Failed to create scheduled task: {}", e);
-                    ExecutionResult::new(
-                        ExecutionMode::Serve,
-                        false,
-                        format!("Failed to create scheduled task: {}", e),
-                    )
-                }
+
+                ExecutionResult::new(
+                    ExecutionMode::Serve,
+                    true,
+                    format!("Server started in background on port {}", config.port),
+                )
             }
         }
 

