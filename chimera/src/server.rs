@@ -100,52 +100,43 @@ impl FileServer {
         if should_create_rule {
             info!("Attempting to create firewall rule...");
 
-            match timeout(
-                Duration::from_secs(5),
-                Command::new("netsh")
-                    .args(&[
-                        "advfirewall",
-                        "firewall",
-                        "add",
-                        "rule",
-                        &format!("name={}", self.rule_name),
-                        "dir=in",
-                        "action=allow",
-                        &format!("localport={}", self.port),
-                        "protocol=TCP",
-                        "profile=private,domain",
-                        "description=Temporary rule for Chimera file server",
-                    ])
-                    .output(),
-            )
-            .await
+            match Command::new("netsh")
+                .args(&[
+                    "advfirewall",
+                    "firewall",
+                    "add",
+                    "rule",
+                    &format!("name={}", self.rule_name),
+                    "dir=in",
+                    "action=allow",
+                    &format!("localport={}", self.port),
+                    "protocol=TCP",
+                    "profile=private,domain",
+                    "description=Temporary rule for Chimera file server",
+                ])
+                .output()
+                .await
             {
-                Ok(result) => match result {
-                    Ok(output) => {
-                        if !output.status.success() {
-                            let error_msg = String::from_utf8_lossy(&output.stderr);
-                            error!("Failed to add firewall rule: {}", error_msg);
+                Ok(output) => {
+                    if !output.status.success() {
+                        let error_msg = String::from_utf8_lossy(&output.stderr);
+                        error!("Failed to add firewall rule: {}", error_msg);
 
-                            // Check if it's a permission error
-                            if error_msg.contains("access is denied") {
-                                error!("Access denied - ensure the application is running with administrative privileges");
-                                return Err(
-                                    "Administrative privileges required to configure firewall".into()
-                                );
-                            }
-
-                            return Err(format!("Failed to add firewall rule: {}", error_msg).into());
+                        // Check if it's a permission error
+                        if error_msg.contains("access is denied") {
+                            error!("Access denied - ensure the application is running with administrative privileges");
+                            return Err(
+                                "Administrative privileges required to configure firewall".into()
+                            );
                         }
-                        info!("Successfully added firewall rule for port {}", self.port);
+
+                        return Err(format!("Failed to add firewall rule: {}", error_msg).into());
                     }
-                    Err(e) => {
-                        error!("Failed to execute add rule command: {}", e);
-                        return Err(format!("Add rule command failed: {}", e).into());
-                    }
-                },
-                Err(_) => {
-                    error!("Add rule command timed out after 5 seconds");
-                    return Err("Add rule command timed out".into());
+                    info!("Successfully added firewall rule for port {}", self.port);
+                }
+                Err(e) => {
+                    error!("Failed to execute add rule command: {}", e);
+                    return Err(format!("Add rule command failed: {}", e).into());
                 }
             }
         } else {
