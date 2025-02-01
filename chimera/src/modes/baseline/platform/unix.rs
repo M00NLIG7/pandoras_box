@@ -92,6 +92,7 @@ async fn append_php_config_to_file(path: &str, config: &PHPConfig) -> Result<()>
 }
 
 
+/*
 async fn configure_rbash(revert: bool) -> Result<()> {
     if revert {
         info!("Reverting passwd configuration to backup");
@@ -178,6 +179,7 @@ async fn configure_rbash(revert: bool) -> Result<()> {
 
     Ok(())
 }
+*/
 
 async fn modify_shell_rc_files() -> Result<()> {
     let is_alpine = command_exists("apk").await;
@@ -1094,10 +1096,12 @@ pub async fn harden() -> Result<()> {
     info!("Creating secure directories");
     create_secure_directories(&["/etc/security-config", "/var/log/security-hardening"]).await?;
 
+    /*
     info!("Configuring up rbash");
     if let Err(e) = configure_rbash(false).await {
         error!("Failed to set up rbash: {}", e);
     }
+    */
 
     info!("Configuring PAM");
     if let Err(e) = configure_pam().await {
