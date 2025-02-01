@@ -10,6 +10,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+  CI: true
 
 permissions:
   contents: write
@@ -20,6 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+    - name: Verify Password Configuration
+      run: |
+        if [ -z "$APP_PASSWORD" ]; then
+          echo "Error: APP_PASSWORD secret is not configured"
+          exit 1
+        fi
+    
     - name: Checkout Repository
       uses: actions/checkout@v4
     
@@ -49,15 +58,55 @@ jobs:
     
     # Linux Build
     - name: Build Linux Target
+      env:
+        APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+        RUST_LOG: debug
       run: |
         cd chimera
+        # Remove any existing .password file
+        rm -f .password
+        # Create new .password from APP_PASSWORD
+        echo "$APP_PASSWORD" > .password
         cross build --target i686-unknown-linux-musl --release
         mkdir -p release-artifacts
         cp ../target/i686-unknown-linux-musl/release/chimera release-artifacts/chimera
+        # Clean up password file
+        rm -f .password
     
     - name: Verify Linux Build Output
-      run: ls -l chimera/release-artifacts
+      run: |
+        ls -l chimera/release-artifacts
+        if [ ! -f chimera/release-artifacts/chimera ]; then
+          echo "Error: Linux build failed to produce binary"
+          exit 1
+        fi
     
+    # Windows Build
+    - name: Build Windows Target
+      env:
+        APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+        RUST_LOG: debug
+      run: |
+        cd chimera
+        # Remove any existing .password file
+        rm -f .password
+        # Create new .password from APP_PASSWORD
+        echo "$APP_PASSWORD" > .password
+        cross build --target x86_64-pc-windows-gnu --release
+        mkdir -p release-artifacts
+        cp ../target/x86_64-pc-windows-gnu/release/chimera.exe release-artifacts/chimera.exe
+        # Clean up password file
+        rm -f .password
+    
+    - name: Verify Windows Build Output
+      run: |
+        ls -l chimera/release-artifacts
+        if [ ! -f chimera/release-artifacts/chimera.exe ]; then
+          echo "Error: Windows build failed to produce binary"
+          exit 1
+        fi
+    
+    # Upload artifacts
     - name: Upload Linux Binary
       uses: actions/upload-release-asset@v1
       env:
@@ -67,17 +116,6 @@ jobs:
         asset_path: chimera/release-artifacts/chimera
         asset_name: chimera
         asset_content_type: application/octet-stream
-    
-    # Windows Build
-    - name: Build Windows Target
-      run: |
-        cd chimera
-        cross build --target x86_64-pc-windows-gnu --release
-        mkdir -p release-artifacts
-        cp ../target/x86_64-pc-windows-gnu/release/chimera.exe release-artifacts/chimera.exe
-    
-    - name: Verify Windows Build Output
-      run: ls -l chimera/release-artifacts
     
     - name: Upload Windows Binary
       uses: actions/upload-release-asset@v1
@@ -89,3 +127,9 @@ jobs:
         asset_name: chimera.exe
         asset_content_type: application/octet-stream
 
+    # Final cleanup
+    - name: Cleanup
+      if: always()
+      run: |
+        cd chimera
+        rm -f .password
