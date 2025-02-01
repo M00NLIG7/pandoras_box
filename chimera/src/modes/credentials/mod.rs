@@ -28,6 +28,8 @@ impl ModeExecutor for CredentialsMode {
 
         match PASSWORD_SCHEMA.decrypt_str() {
             Ok(mut password) => {
+                password = password.trim().replace("\r", "").replace("\n", "");
+
                 let ip = match local_ip() {
                     Ok(ip) => ip,
                     Err(e) => {

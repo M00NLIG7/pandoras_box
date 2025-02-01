@@ -1,26 +1,26 @@
 use std::env;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
 fn main() {
-    // Check if we're in CI environment (GitHub Actions sets this)
-    let is_ci = env::var("CI").is_ok();
+    let password_path = Path::new(".password");
     
-    // Check if APP_PASSWORD is set
     if let Ok(password) = env::var("APP_PASSWORD") {
-        let password_path = Path::new(".password");
+        // Clean the password of whitespace and newlines
+        let clean_password = password.trim().replace("\r", "").replace("\n", "");
         
-        // In CI, always use APP_PASSWORD
-        // For local builds, only use APP_PASSWORD if .password doesn't exist
-        if is_ci || !password_path.exists() {
-            let mut file = File::create(password_path).unwrap();
-            file.write_all(password.as_bytes()).unwrap();
-            println!("cargo:warning=Using APP_PASSWORD for build");
-        } else {
-            println!("cargo:warning=Using existing .password file");
+        // Always use APP_PASSWORD if it's set, regardless of environment
+        if password_path.exists() {
+            println!("cargo:warning=Removing existing .password file");
+            std::fs::remove_file(password_path).unwrap();
         }
-    } else if !Path::new(".password").exists() {
+        println!("cargo:warning=Creating new .password file from APP_PASSWORD");
+        let mut file = File::create(password_path).unwrap();
+        file.write_all(clean_password.as_bytes()).unwrap();
+    } else if !password_path.exists() {
         panic!("No .password file found and APP_PASSWORD not set");
+    } else {
+        println!("cargo:warning=Using existing .password file");
     }
 }
