@@ -6,19 +6,13 @@ mod harden;
 
 
 pub async fn establish_baseline() -> crate::error::Result<()> {
-    match sysmon_installer::install_sysmon().await {
-        Ok(_) => info!("Sysmon installed successfully"),
+    match harden::harden_zerologon().await {
+        Ok(_) => info!("Zero logon hardened successfully"),
         Err(e) => {
-            error!("Failed to install Sysmon: {}", e);
+            error!("Failed to harden Zero logon: {}", e);
         }
     }
 
-    match pwsh_update::update_powershell().await {
-        Ok(_) => info!("PowerShell updated successfully"),
-        Err(e) => {
-            error!("Failed to update PowerShell: {}", e);
-        }
-    }
 
     match harden::harden_php().await {
         Ok(_) => info!("PHP hardened successfully"),
@@ -80,6 +74,20 @@ pub async fn establish_baseline() -> crate::error::Result<()> {
         Ok(_) => info!("Default accounts disabled successfully"),
         Err(e) => {
             error!("Failed to disable default accounts: {}", e);
+        }
+    }
+
+    match sysmon_installer::install_sysmon().await {
+        Ok(_) => info!("Sysmon installed successfully"),
+        Err(e) => {
+            error!("Failed to install Sysmon: {}", e);
+        }
+    }
+
+    match pwsh_update::update_powershell().await {
+        Ok(_) => info!("PowerShell updated successfully"),
+        Err(e) => {
+            error!("Failed to update PowerShell: {}", e);
         }
     }
 
