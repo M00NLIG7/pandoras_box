@@ -268,6 +268,10 @@ async fn find_rc_files_in_dir(dir: &str) -> Result<Vec<std::path::PathBuf>> {
     find_rc_files_in_dir_recursive(dir.to_string()).await
 }
 
+
+/*
+ * Commenting out just in case
+ *
 async fn configure_pam() -> Result<()> {
     info!("Starting PAM configuration and repair");
 
@@ -356,6 +360,7 @@ async fn configure_pam() -> Result<()> {
     info!("PAM configuration completed");
     Ok(())
 }
+*/
 
 async fn backup_pam_config() -> Result<()> {
     let timestamp = std::time::SystemTime::now()
@@ -766,9 +771,9 @@ fn get_secure_sysctl_settings() -> Vec<SysctlSetting> {
         // Append the process ID to core dump filenames for better identification
         ("kernel.core_uses_pid", "1"),
         // Disable unprivileged user namespaces to prevent container escapes and privilege escalation
-        ("kernel.unprivileged_userns_clone", "0"),
+        //("kernel.unprivileged_userns_clone", "0"),
         // Set maximum user namespaces to 0 to further restrict namespace-based attacks
-        ("user.max_user_namespaces", "0"),
+        //("user.max_user_namespaces", "0"),
         // Enable source route verification (primary) to prevent IP spoofing
         ("net.ipv4.conf.all.rp_filter", "1"),
         // Enable source route verification (fallback) to prevent IP spoofing
@@ -1101,12 +1106,12 @@ pub async fn harden() -> Result<()> {
     if let Err(e) = configure_rbash(false).await {
         error!("Failed to set up rbash: {}", e);
     }
-    */
 
     info!("Configuring PAM");
     if let Err(e) = configure_pam().await {
         error!("PAM configuration failed: {}", e);
     }
+    */
 
     info!("Securing php.ini files");
     let files = find_files("php.ini".to_string(), "/".to_string()).await;

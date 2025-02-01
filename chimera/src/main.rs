@@ -13,28 +13,25 @@ use crate::modes::ModeExecutor;
 use crate::types::{ExecutionMode, ExecutionResult};
 use clap::{arg, command, value_parser, Command};
 use log::{error, info};
-use utils::get_default_output_dir;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
+use utils::get_default_output_dir;
 
 pub async fn run_baseline() -> ExecutionResult {
     let current_exe = std::env::current_exe().expect("Failed to get current executable path");
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::CloseHandle;
         use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
-            CreateProcessW, CREATE_NO_WINDOW, DETACHED_PROCESS, PROCESS_INFORMATION,
-            STARTUPINFOW, CREATE_NEW_PROCESS_GROUP, CREATE_BREAKAWAY_FROM_JOB
+            CreateProcessW, CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
+            DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW,
         };
 
         // Prepare command line
-        let mut cmd = format!(
-            "\"{}\" baseline",
-            current_exe.to_string_lossy(),
-        );
+        let mut cmd = format!("\"{}\" baseline", current_exe.to_string_lossy(),);
 
         // Convert to wide string for Windows API
         let wide_cmd: Vec<u16> = cmd.encode_utf16().chain(std::iter::once(0)).collect();
@@ -45,10 +42,10 @@ pub async fn run_baseline() -> ExecutionResult {
         let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
         // Create fully independent process with combined flags
-        let creation_flags = DETACHED_PROCESS | 
-                           CREATE_NEW_PROCESS_GROUP | 
-                           CREATE_NO_WINDOW |
-                           CREATE_BREAKAWAY_FROM_JOB;
+        let creation_flags = DETACHED_PROCESS
+            | CREATE_NEW_PROCESS_GROUP
+            | CREATE_NO_WINDOW
+            | CREATE_BREAKAWAY_FROM_JOB;
 
         let success = unsafe {
             CreateProcessW(
@@ -87,26 +84,28 @@ pub async fn run_baseline() -> ExecutionResult {
             )
         }
     }
-    
+
     #[cfg(unix)]
     {
-        use nix::unistd::execvp;
-        use nix::unistd::{fork, ForkResult};
+        use daemonize::Daemonize;
         use std::ffi::CString;
 
-        match unsafe { fork() } {
-            Ok(ForkResult::Parent { child: _ }) => ExecutionResult::new(
-                ExecutionMode::Baseline,
-                true,
-                "Baseline started in background".to_string(),
-            ),
-            Ok(ForkResult::Child) => {
+        // First daemonize the process
+        let daemonize = Daemonize::new()
+            .pid_file("/tmp/baseline.pid") // Optional: keep track of PID
+            .chown_pid_file(true)
+            .working_directory("/"); // No exit_action - it's not a valid method
+
+        match daemonize.start() {
+            Ok(_) => {
+                info!("Successfully daemonized"); // Log after daemonization
+
                 // Convert the executable path and arguments to CString
                 let exe = CString::new(current_exe.to_str().unwrap()).unwrap();
                 let arg0 = CString::new("baseline").unwrap();
 
                 // Replace the current process with baseline
-                match execvp(&exe, &[&exe, &arg0]) {
+                match nix::unistd::execvp(&exe, &[&exe, &arg0]) {
                     Ok(_) => unreachable!(), // execvp never returns on success
                     Err(e) => {
                         error!("Failed to exec baseline: {}", e);
@@ -115,11 +114,11 @@ pub async fn run_baseline() -> ExecutionResult {
                 }
             }
             Err(e) => {
-                error!("Failed to fork baseline process: {}", e);
+                error!("Failed to daemonize: {}", e);
                 ExecutionResult::new(
                     ExecutionMode::Baseline,
                     false,
-                    format!("Failed to fork baseline process: {}", e),
+                    format!("Failed to daemonize process: {}", e),
                 )
             }
         }
@@ -130,9 +129,7 @@ async fn run_serve_mode(port: u16) -> ExecutionResult {
     let mode = ServeMode::new();
     info!("Starting serve mode on port {}", port);
 
-    let config = ServeConfig {
-        port,
-    };
+    let config = ServeConfig { port };
     mode.execute(config).await
 }
 

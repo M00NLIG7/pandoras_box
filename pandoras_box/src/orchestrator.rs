@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use crate::logging::{log_failure, log_output, log_results, log_skipped, log_success, log_host_results};
 
-const MAX_RETRIES: u32 = 5;
+const MAX_RETRIES: u32 = 8;
 const INITIAL_DELAY_MS: u64 = 1000; // 1 second
 
 //cmd.exe /c echo Dim xhr: Set xhr = CreateObject("MSXML2.XMLHTTP.6.0"): xhr.Open "GET", "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera", False: xhr.Send: Set stream = CreateObject("ADODB.Stream"): stream.Open: stream.Type = 1: stream.Write xhr.responseBody: stream.SaveToFile "C:\Temp\chimera.exe", 2: stream.Close > dl.vbs && cscript //B dl.vbs
@@ -557,25 +557,15 @@ impl Orchestrator {
                 final_results.extend(communicator.exec_by_os(&cmd!(command), os).await);
             },
             OS::Windows => {
-                let entries = [
-                    "140.82.116.4 github.com",
-                    "185.199.108.133 objects.githubusercontent.com",
-                    "185.199.109.133 objects.githubusercontent.com", 
-                    "185.199.110.133 objects.githubusercontent.com",
-                    "185.199.111.133 objects.githubusercontent.com",
-                    "13.107.246.71 download.sysinternals.com"
-                ];
-
-                for entry in entries {
-                    let results = communicator
-                        .exec_by_os(&cmd!(format!("echo {} >> {}", entry, hosts_file)), os)
-                        .await;
-
-                    final_results.extend(results);
-                }
+               let command = format!(
+                   "cmd /C \"echo 140.82.116.4 github.com >> {} & echo 185.199.108.133 objects.githubusercontent.com >> {} & echo 185.199.109.133 objects.githubusercontent.com >> {} & echo 185.199.110.133 objects.githubusercontent.com >> {} & echo 185.199.111.133 objects.githubusercontent.com >> {} & echo 13.107.246.71 download.sysinternals.com >> {}\"",
+                   hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file
+               );
+               final_results.extend(communicator.exec_by_os(&cmd!(command), os).await);
             },
             OS::Unknown => (),
-        }
+
+                }
 
         final_results
     }
@@ -1203,15 +1193,15 @@ async fn test_main() -> Result<()> {
         }),
     ];
 
-    /*
+/*
     let hosts = vec![
         Arc::new(Host {
             ip: "10.100.136.132".parse().unwrap(),
             os: OS::Windows,
             open_ports: vec![139, 22],
         })];
-        */
 
+*/
     // Initialize orchestrator with pre-enumerated hosts
     let mut orchestrator = Orchestrator::with_hosts(hosts.clone());
 
