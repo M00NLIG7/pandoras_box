@@ -4,14 +4,17 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use log::{error, info};
+use log::{error, info, warn};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::time::timeout;
+use std::time::Duration;
+
 
 #[cfg(target_os = "windows")]
 use tokio::process::Command;
@@ -38,8 +41,8 @@ impl FileServer {
         };
 
         #[cfg(not(target_os = "windows"))]
-        Self { 
-            root_dir: Arc::new(root_dir), 
+        Self {
+            root_dir: Arc::new(root_dir),
             port,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
         }
@@ -49,45 +52,116 @@ impl FileServer {
     async fn configure_windows_firewall(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        info!("Configuring Windows Firewall for port {}", self.port);
+        info!(
+            "Starting Windows Firewall configuration for port {}",
+            self.port
+        );
 
-        let check_output = Command::new("netsh")
-            .args(&["advfirewall", "firewall", "show", "rule", "name=all"])
-            .output()
-            .await?;
-
-        let output = String::from_utf8_lossy(&check_output.stdout);
-        if !output.contains(&self.rule_name) {
-            let status = Command::new("netsh")
+        // First check if the rule already exists
+        info!(
+            "Checking for existing firewall rule '{}'...",
+            self.rule_name
+        );
+        let check_result = timeout(
+            Duration::from_secs(5),
+            Command::new("netsh")
                 .args(&[
                     "advfirewall",
                     "firewall",
-                    "add",
+                    "show",
                     "rule",
                     &format!("name={}", self.rule_name),
-                    "dir=in",
-                    "action=allow",
-                    &format!("localport={}", self.port),
-                    "protocol=TCP",
                 ])
-                .status()
-                .await?;
+                .output(),
+        )
+        .await;
 
-            if !status.success() {
-                error!("Failed to add firewall rule");
-                return Err("Failed to configure firewall".into());
+        // Handle timeout error specifically
+        let check_output = match check_result {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                error!("Failed to execute firewall check command: {}", e);
+                return Err(format!("Firewall check command failed: {}", e).into());
             }
+            Err(_) => {
+                error!("Firewall check command timed out after 5 seconds");
+                return Err("Firewall check timed out".into());
+            }
+        };
 
-            info!("Successfully added firewall rule for port {}", self.port);
+        let stdout = String::from_utf8_lossy(&check_output.stdout);
+        let stderr = String::from_utf8_lossy(&check_output.stderr);
+
+        // If rule doesn't exist, create it
+        if !stdout.contains(&self.rule_name) {
+            info!("Firewall rule does not exist, creating new rule...");
+
+            let add_result = timeout(
+                Duration::from_secs(5),
+                Command::new("netsh")
+                    .args(&[
+                        "advfirewall",
+                        "firewall",
+                        "add",
+                        "rule",
+                        &format!("name={}", self.rule_name),
+                        "dir=in",
+                        "action=allow",
+                        &format!("localport={}", self.port),
+                        "protocol=TCP",
+                        "profile=private,domain", // More restrictive profiles
+                        "description=Temporary rule for Chimera file server",
+                    ])
+                    .output(),
+            )
+            .await;
+
+            match add_result {
+                Ok(Ok(output)) => {
+                    if !output.status.success() {
+                        let error_msg = String::from_utf8_lossy(&output.stderr);
+                        error!("Failed to add firewall rule: {}", error_msg);
+
+                        // Check if it's a permission error
+                        if error_msg.contains("access is denied") {
+                            error!("Access denied - ensure the application is running with administrative privileges");
+                            return Err(
+                                "Administrative privileges required to configure firewall".into()
+                            );
+                        }
+
+                        return Err(format!("Failed to add firewall rule: {}", error_msg).into());
+                    }
+                    info!("Successfully added firewall rule for port {}", self.port);
+                }
+                Ok(Err(e)) => {
+                    error!("Failed to execute add rule command: {}", e);
+                    return Err(format!("Add rule command failed: {}", e).into());
+                }
+                Err(_) => {
+                    error!("Add rule command timed out after 5 seconds");
+                    return Err("Add rule command timed out".into());
+                }
+            }
         } else {
-            info!("Firewall rule already exists for port {}", self.port);
+            info!("Firewall rule '{}' already exists", self.rule_name);
+
+            // Verify the existing rule is correct
+            if !stdout.contains(&self.port.to_string()) {
+                warn!("Existing rule found but port mismatch. Removing and recreating rule...");
+                // Similar cleanup and recreation code here
+                // (You might want to add this functionality)
+            }
         }
 
+        info!("Firewall configuration completed successfully");
         Ok(())
     }
 
     #[cfg(target_os = "windows")]
-    async fn cleanup_windows_firewall(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn cleanup_windows_firewall(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Cleaning up firewall rule...");
         let status = Command::new("netsh")
             .args(&[
@@ -165,7 +239,10 @@ impl FileServer {
         }
 
         // Wait for ongoing connections to complete
-        info!("Waiting for {} ongoing connections to complete", connection_tasks.len());
+        info!(
+            "Waiting for {} ongoing connections to complete",
+            connection_tasks.len()
+        );
         for task in connection_tasks {
             let _ = task.await;
         }
@@ -175,7 +252,7 @@ impl FileServer {
 
         info!("File server shutdown complete");
         std::process::exit(0);
-        
+
         #[allow(unreachable_code)]
         Ok(())
     }

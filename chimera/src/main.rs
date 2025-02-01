@@ -23,64 +23,71 @@ pub async fn run_baseline() -> ExecutionResult {
 
     #[cfg(windows)]
     {
-        // Windows-specific implementation using schtasks
-        let task_name = "ChimeraBaseline";
-        let current_exe_str = current_exe.to_string_lossy();
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::Threading::{
+            CreateProcessW, CREATE_NO_WINDOW, DETACHED_PROCESS, PROCESS_INFORMATION,
+            STARTUPINFOW, CREATE_NEW_PROCESS_GROUP, CREATE_BREAKAWAY_FROM_JOB
+        };
 
-        // Create and run the scheduled task
-        let create_result = tokio::process::Command::new("schtasks")
-            .args(&[
-                "/create",
-                "/tn",
-                task_name,
-                "/tr",
-                &format!("\"{}\" baseline", current_exe_str),
-                "/sc",
-                "once",
-                "/st",
-                &chrono::Local::now().format("%H:%M").to_string(),
-                "/f",
-                "/ru",
-                "System",
-            ])
-            .output()
-            .await;
+        // Prepare command line
+        let mut cmd = format!(
+            "\"{}\" baseline",
+            current_exe.to_string_lossy(),
+        );
 
-        match create_result {
-            Ok(_) => {
-                // Run the task
-                let run_result = tokio::process::Command::new("schtasks")
-                    .args(&["/run", "/tn", task_name])
-                    .output()
-                    .await;
+        // Convert to wide string for Windows API
+        let wide_cmd: Vec<u16> = cmd.encode_utf16().chain(std::iter::once(0)).collect();
 
-                match run_result {
-                    Ok(_) => ExecutionResult::new(
-                        ExecutionMode::Baseline,
-                        true,
-                        "Baseline started in background".to_string(),
-                    ),
-                    Err(e) => {
-                        error!("Failed to run baseline scheduled task: {}", e);
-                        ExecutionResult::new(
-                            ExecutionMode::Baseline,
-                            false,
-                            format!("Failed to run baseline scheduled task: {}", e),
-                        )
-                    }
-                }
+        let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+
+        let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+        // Create fully independent process with combined flags
+        let creation_flags = DETACHED_PROCESS | 
+                           CREATE_NEW_PROCESS_GROUP | 
+                           CREATE_NO_WINDOW |
+                           CREATE_BREAKAWAY_FROM_JOB;
+
+        let success = unsafe {
+            CreateProcessW(
+                std::ptr::null(),
+                wide_cmd.as_ptr() as *mut _,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                creation_flags,
+                std::ptr::null(),
+                std::ptr::null(),
+                &startup_info,
+                &mut process_info,
+            )
+        };
+
+        if success == 0 {
+            let error = std::io::Error::last_os_error();
+            error!("Failed to create background process: {}", error);
+            ExecutionResult::new(
+                ExecutionMode::Baseline,
+                false,
+                format!("Failed to create background process: {}", error),
+            )
+        } else {
+            // Close handles immediately since we don't need them
+            unsafe {
+                CloseHandle(process_info.hProcess);
+                CloseHandle(process_info.hThread);
             }
-            Err(e) => {
-                error!("Failed to create baseline scheduled task: {}", e);
-                ExecutionResult::new(
-                    ExecutionMode::Baseline,
-                    false,
-                    format!("Failed to create baseline scheduled task: {}", e),
-                )
-            }
+
+            ExecutionResult::new(
+                ExecutionMode::Baseline,
+                true,
+                "Baseline started in background".to_string(),
+            )
         }
     }
-
+    
     #[cfg(unix)]
     {
         use nix::unistd::execvp;

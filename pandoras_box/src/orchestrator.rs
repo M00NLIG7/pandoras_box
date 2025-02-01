@@ -726,7 +726,7 @@ impl Orchestrator {
             error!("No hosts successfully deployed");
             return Err(Error::CommandError("No successful deployments".into()));
         }
-        */
+       */ 
         let deployed_hosts = connected_hosts.clone();
 
         let start = std::time::Instant::now();
@@ -1071,6 +1071,7 @@ impl Orchestrator {
                     all_results.extend(u_res);
                 }
                 (Some(w), None) => {
+                    
                     all_results.extend(w.await);
                 }
                 (None, Some(u)) => {
@@ -1079,6 +1080,25 @@ impl Orchestrator {
                 (None, None) => {}
             }
         }
+
+        for result in &all_results {
+            match &result.result {
+                Ok(output) => {
+                    info!("Successfully executed Chimera on {}", &result.ip);
+                    // Log the actual output
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if !stdout.trim().is_empty() {
+                        info!("[{}] Command output:\n{}", result.ip, stdout.trim());
+                    }
+                    if !stderr.trim().is_empty() {
+                        warn!("[{}] Command stderr:\n{}", result.ip, stderr.trim());
+                    }
+                },
+                Err(e) => error!("Failed to execute Chimera on {}: {}", result.ip, e),
+            }
+        }
+
         all_results
     }
 

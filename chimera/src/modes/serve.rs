@@ -6,6 +6,16 @@ use log::{error, info};
 use std::process;
 use tokio::spawn;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Foundation::CloseHandle;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Threading::{
+    CreateProcessW, CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
+    DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW,
+};
+
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
     pub port: u16,
@@ -36,13 +46,6 @@ impl ModeExecutor for ServeMode {
 
         #[cfg(windows)]
         {
-            use windows_sys::Win32::Foundation::CloseHandle;
-            use std::os::windows::ffi::OsStrExt;
-            use windows_sys::Win32::System::Threading::{
-                CreateProcessW, CREATE_NO_WINDOW, DETACHED_PROCESS, PROCESS_INFORMATION,
-                STARTUPINFOW,
-            };
-
             // Prepare command line
             let mut cmd = format!(
                 "\"{}\" serve-internal --port {}",
@@ -58,7 +61,12 @@ impl ModeExecutor for ServeMode {
 
             let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
-            // Create detached process
+            // Create fully independent process with combined flags
+            let creation_flags = DETACHED_PROCESS
+                | CREATE_NEW_PROCESS_GROUP
+                | CREATE_NO_WINDOW
+                | CREATE_BREAKAWAY_FROM_JOB;
+
             let success = unsafe {
                 CreateProcessW(
                     std::ptr::null(),
@@ -66,7 +74,7 @@ impl ModeExecutor for ServeMode {
                     std::ptr::null(),
                     std::ptr::null(),
                     0,
-                    DETACHED_PROCESS | CREATE_NO_WINDOW,
+                    creation_flags,
                     std::ptr::null(),
                     std::ptr::null(),
                     &startup_info,
@@ -83,7 +91,7 @@ impl ModeExecutor for ServeMode {
                     format!("Failed to create background process: {}", error),
                 )
             } else {
-                // Close handle immediately since we don't need them
+                // Close handles immediately since we don't need them
                 unsafe {
                     CloseHandle(process_info.hProcess);
                     CloseHandle(process_info.hThread);
