@@ -991,7 +991,7 @@ async fn test_main() -> Result<()> {
     std::env::set_var("RUST_LOG", "info,rustrc=trace");
     env_logger::init();
 
-    let subnet = Subnet::try_from("10.100.136.0/24")?;
+    let subnet = Subnet::try_from("10.100.136.128/25")?; 
     let mut orchestrator = Orchestrator::new(subnet);
 
     orchestrator.run("Cheesed2MeetU!").await
