@@ -75,16 +75,20 @@ impl FileServer {
         )
         .await
         {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                !stdout.contains(&self.rule_name)
-            }
-            Ok(Err(e)) => {
-                warn!(
-                    "Failed to execute firewall check command: {}. Will attempt to create rule.",
-                    e
-                );
-                true
+            Ok(output) => {
+                match output {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        !stdout.contains(&self.rule_name)
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to execute firewall check command: {}. Will attempt to create rule.",
+                            e
+                        );
+                        true
+                    }
+                }
             }
             Err(_) => {
                 warn!("Firewall check command timed out after 5 seconds. Will attempt to create rule.");
@@ -96,7 +100,7 @@ impl FileServer {
         if should_create_rule {
             info!("Attempting to create firewall rule...");
 
-            let add_result = timeout(
+            match timeout(
                 Duration::from_secs(5),
                 Command::new("netsh")
                     .args(&[
@@ -114,30 +118,31 @@ impl FileServer {
                     ])
                     .output(),
             )
-            .await;
+            .await
+            {
+                Ok(result) => match result {
+                    Ok(output) => {
+                        if !output.status.success() {
+                            let error_msg = String::from_utf8_lossy(&output.stderr);
+                            error!("Failed to add firewall rule: {}", error_msg);
 
-            match add_result {
-                Ok(Ok(output)) => {
-                    if !output.status.success() {
-                        let error_msg = String::from_utf8_lossy(&output.stderr);
-                        error!("Failed to add firewall rule: {}", error_msg);
+                            // Check if it's a permission error
+                            if error_msg.contains("access is denied") {
+                                error!("Access denied - ensure the application is running with administrative privileges");
+                                return Err(
+                                    "Administrative privileges required to configure firewall".into()
+                                );
+                            }
 
-                        // Check if it's a permission error
-                        if error_msg.contains("access is denied") {
-                            error!("Access denied - ensure the application is running with administrative privileges");
-                            return Err(
-                                "Administrative privileges required to configure firewall".into()
-                            );
+                            return Err(format!("Failed to add firewall rule: {}", error_msg).into());
                         }
-
-                        return Err(format!("Failed to add firewall rule: {}", error_msg).into());
+                        info!("Successfully added firewall rule for port {}", self.port);
                     }
-                    info!("Successfully added firewall rule for port {}", self.port);
-                }
-                Ok(Err(e)) => {
-                    error!("Failed to execute add rule command: {}", e);
-                    return Err(format!("Add rule command failed: {}", e).into());
-                }
+                    Err(e) => {
+                        error!("Failed to execute add rule command: {}", e);
+                        return Err(format!("Add rule command failed: {}", e).into());
+                    }
+                },
                 Err(_) => {
                     error!("Add rule command timed out after 5 seconds");
                     return Err("Add rule command timed out".into());
