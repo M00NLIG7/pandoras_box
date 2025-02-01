@@ -84,6 +84,17 @@ impl NetworkManager {
         }
     }
 
+    pub fn with_hosts(hosts: Vec<Arc<Host>>) -> Self {
+        // We still need a subnet, but it won't be used for enumeration
+        // Using a dummy subnet that encompasses all possible IPs
+        let subnet = Subnet::try_from("0.0.0.0/0").expect("Failed to create dummy subnet");
+        let enumerator = Enumerator::new(subnet);
+        Self {
+            enumerator,
+            communicator: None,
+        }
+    }
+
     pub async fn enumerate(&self) -> Result<Vec<Arc<Host>>> {
         info!("Starting network enumeration");
         let hosts = self.enumerator.sweep().await?;
@@ -343,6 +354,11 @@ impl Orchestrator {
     pub fn new(subnet: Subnet) -> Self {
         info!("Initializing Orchestrator for subnet {}", subnet);
         let network_manager = NetworkManager::new(subnet);
+        Self { network_manager }
+    }
+
+    pub fn with_hosts(hosts: Vec<Arc<Host>>) -> Self {
+        let network_manager = NetworkManager::with_hosts(hosts);
         Self { network_manager }
     }
 
@@ -614,6 +630,145 @@ impl Orchestrator {
         }
 
         log_host_results(final_results, &host_map, "chimera download")
+    }
+
+    pub async fn run_with_hosts(&mut self, hosts: Vec<Arc<Host>>, network_password: &str) -> Result<()> {
+         info!("Starting Orchestrator run with {} pre-enumerated hosts", hosts.len());
+
+        let start = std::time::Instant::now();
+        // Step 2: Initialize communication
+        let connected_hosts = match self
+            .network_manager
+            .initialize_communication(&hosts, network_password)
+            .await
+        {
+            Ok(connected) => {
+                info!(
+                    "Communication initialized successfully for {}/{} hosts",
+                    connected.len(),
+                    hosts.len()
+                );
+                connected
+            }
+            Err(e) => {
+                error!("All communication initialization attempts failed: {}", e);
+                return Err(e);
+            }
+        };
+
+
+        let host_map: std::collections::HashMap<String, Arc<Host>> = connected_hosts
+            .iter()
+            .map(|h| (h.ip.clone(), Arc::clone(h)))
+            .collect();
+
+        if connected_hosts.is_empty() {
+            error!("No hosts successfully connected");
+            return Err(Error::CommandError("No hosts available".into()));
+        }
+
+        info!("Initialized communication in {}s", start.elapsed().as_secs());
+
+        /*
+
+        // Step 3: Deploy Chimera to successfully connected hosts
+        let deployment_results = self.deploy_chimera(&connected_hosts).await;
+        let deployed_hosts: Vec<Arc<Host>> = deployment_results
+            .iter()
+            .filter_map(|(host, result)| match result {
+                Ok(_) => Some(host.clone()),
+                Err(e) => {
+                    error!("Failed to deploy to {}: {}", host.ip, e);
+                    None
+                }
+            })
+            .collect();
+        */
+
+
+        let communicator = match self.network_manager.get_communicator() {
+            Some(comm) => comm,
+            None => return Err(Error::CommandError("Communicator not initialized".into())),
+        };
+
+        let start = std::time::Instant::now();
+        let _ = self.append_to_hosts_file(&communicator, OS::Unix).await;
+        info!("Appended Unix hosts file in {}s", start.elapsed().as_secs());
+
+        let start = std::time::Instant::now();
+        let _ = self.append_to_hosts_file(&communicator, OS::Windows).await;
+        info!("Appended Windows hosts file in {}s", start.elapsed().as_secs());
+        
+        /*
+        let start = std::time::Instant::now();
+        let deployment_results = self.download_chimera(&communicator, host_map).await;
+        info!("Downloaded Chimera in {}s", start.elapsed().as_secs());
+
+        let deployed_hosts: Vec<Arc<Host>> = {
+            // First collect IPs we've seen into a HashSet
+            let mut seen_ips = HashSet::new();
+            
+            deployment_results
+                .iter()
+                .filter_map(|(host, result)| match result {
+                    Ok(_) if seen_ips.insert(host.ip.clone()) => Some(host.clone()),
+                    Ok(_) => None, // Skip if we've seen this IP before
+                    Err(e) => {
+                        error!("Failed to deploy to {}: {}", host.ip, e);
+                        None
+                    }
+                })
+                .collect()
+        };
+
+
+        if deployed_hosts.is_empty() {
+            error!("No hosts successfully deployed");
+            return Err(Error::CommandError("No successful deployments".into()));
+        }
+        */
+        let deployed_hosts = connected_hosts.clone();
+
+        let start = std::time::Instant::now();
+        // Step 4: Execute Chimera modes on successfully deployed hosts
+        let execution_results = self.execute_chimera_modes(&deployed_hosts).await;
+        for result in &execution_results {
+            match &result.result {
+                Ok(_) => {
+                    info!("Successfully executed Chimera on {}", &result.ip);
+                    // print stdout
+                    match &result.result {
+                        Ok(output) => {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            info!("Chimera output: {}", stdout);
+                        }
+                        Err(e) => error!("Failed to execute Chimera on {}: {}", result.ip, e),
+                    }
+
+                }
+                ,
+                Err(e) => error!("Failed to execute Chimera on {}: {}", result.ip, e),
+            }
+        }
+
+        info!("Executed Chimera modes in {}s", start.elapsed().as_secs());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let start = std::time::Instant::now();
+        self.fetch_inventory(&deployed_hosts).await?;
+        self.fetch_application_log(&deployed_hosts).await?;
+        info!("Fetched files in {}s", start.elapsed().as_secs());
+
+        info!(
+            "Orchestrator run completed. Summary:\n\
+             Total hosts: {}\n\
+             Successfully connected: {}\n\
+             Successfully deployed: {}",
+            hosts.len(),
+            connected_hosts.len(),
+            deployed_hosts.len()
+        );
+        Ok(())
     }
 
     pub async fn run(&mut self, network_password: &str) -> Result<()> {
@@ -991,10 +1146,68 @@ async fn test_main() -> Result<()> {
     std::env::set_var("RUST_LOG", "info,rustrc=trace");
     env_logger::init();
 
-    let subnet = Subnet::try_from("10.100.136.128/25")?; 
-    let mut orchestrator = Orchestrator::new(subnet);
+    // Create pre-enumerated hosts
+    /*
+    let hosts = vec![
+        Arc::new(Host {
+            ip: "10.100.136.7".parse().unwrap(),
+            os: OS::Windows,
+            open_ports: vec![139, 22],
+        }),
+        Arc::new(Host {
+            ip: "10.100.136.30".parse().unwrap(),
+            os: OS::Unix,
+            open_ports: vec![22],
+        }),
+        Arc::new(Host {
+            ip: "10.100.136.43".parse().unwrap(),
+            os: OS::Unix,
+            open_ports: vec![22],
+        }),
+        Arc::new(Host {
+            ip: "10.100.136.66".parse().unwrap(),
+            os: OS::Unix,
+            open_ports: vec![139, 22],
+        }),
+        Arc::new(Host {
+            ip: "10.100.136.84".parse().unwrap(),
+            os: OS::Unix,
+            open_ports: vec![22],
+        }),
+        Arc::new(Host {
+            ip: "10.100.136.85".parse().unwrap(),
+            os: OS::Unix,
+            open_ports: vec![139, 22],
+        }),
+        Arc::new(Host {
+            ip: "10.100.136.111".parse().unwrap(),
+            os: OS::Windows,
+            open_ports: vec![139, 22],
+        }),
+        Arc::new(Host {
+            ip: "10.100.136.121".parse().unwrap(),
+            os: OS::Unix,
+            open_ports: vec![22],
+        }),
+        Arc::new(Host {
+            ip: "10.100.136.132".parse().unwrap(),
+            os: OS::Windows,
+            open_ports: vec![139, 22],
+        }),
+    ];
+    */
+    let hosts = vec![
+        Arc::new(Host {
+            ip: "10.100.136.132".parse().unwrap(),
+            os: OS::Windows,
+            open_ports: vec![139, 22],
+        })];
 
-    orchestrator.run("Cheesed2MeetU!").await
+    // Initialize orchestrator with pre-enumerated hosts
+    let mut orchestrator = Orchestrator::with_hosts(hosts.clone());
+
+    // Run orchestrator with password
+    orchestrator.run_with_hosts(hosts, "Cheesed2MeetU!").await
 }
 
 #[tokio::test]
