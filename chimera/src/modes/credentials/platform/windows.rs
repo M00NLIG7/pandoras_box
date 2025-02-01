@@ -78,44 +78,52 @@ pub fn change_password(username: &str, new_password: &mut str) -> Result<()> {
     }
 
     // Check if this is a domain controller
-    match is_domain_controller() {
-        Ok(true) => {
-            info!("Machine is a domain controller.");
-            if username.eq_ignore_ascii_case("Administrator") {
+    let is_dc = match is_domain_controller() {
+        Ok(is_dc) => {
+            info!("Machine is{} a domain controller.", if is_dc { "" } else { " not" });
+            if is_dc && username.eq_ignore_ascii_case("Administrator") {
                 warn!("Cannot change Administrator password on a domain controller.");
                 return Err(Error::PasswordChange(
                     "Cannot change Administrator password on a domain controller".into(),
                 ));
             }
-        }
-        Ok(false) => {
-            info!("Machine is not a domain controller.");
+            is_dc
         }
         Err(e) => {
             error!("Error checking domain controller status: {:?}", e);
             return Err(e);
         }
-    }
+    };
 
     info!("Proceeding with password change for user: {}", username);
 
     let wide_username = encode_string_to_wide(username);
     let mut wide_password = encode_string_to_wide(new_password);
+    
+    // Use NULL for domain operations, "." for local operations
+    let wide_server = if is_dc {
+        Vec::new() // Empty vec will result in null pointer
+    } else {
+        encode_string_to_wide(r".")
+    };
 
     let user_info = USER_INFO_1003 {
         usri1003_password: wide_password.as_mut_ptr(),
     };
 
     unsafe {
-        info!("Calling NetUserSetInfo to change password.");
+        info!("Calling NetUserSetInfo to change {} password.", 
+            if is_dc { "domain" } else { "local" });
+            
         let result = NetUserSetInfo(
-            std::ptr::null_mut(), // NULL means local computer
+            if is_dc { std::ptr::null_mut() } else { wide_server.as_ptr() },
             wide_username.as_ptr(),
             1003,
             &user_info as *const _ as *const u8,
             std::ptr::null_mut(),
         );
 
+        // Securely clear sensitive data
         wide_password.zeroize();
         new_password.zeroize();
 
@@ -128,7 +136,10 @@ pub fn change_password(username: &str, new_password: &mut str) -> Result<()> {
             )));
         }
 
-        info!("Password changed successfully for user: {}", username);
+        info!("{} password changed successfully for user: {}", 
+            if is_dc { "Domain" } else { "Local" },
+            username
+        );
         Ok(())
     }
 }
