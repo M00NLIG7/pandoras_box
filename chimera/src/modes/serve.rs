@@ -2,7 +2,7 @@ use super::ModeExecutor;
 use crate::server::FileServer;
 use crate::types::{ExecutionMode, ExecutionResult};
 use crate::utils::get_default_output_dir;
-use log::{error, info};
+use log::{error, info, warn};
 use std::process;
 use tokio::spawn;
 
