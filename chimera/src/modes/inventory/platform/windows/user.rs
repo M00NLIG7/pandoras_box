@@ -2,13 +2,13 @@ use sysinfo::{User, UserExt, SystemExt};
 use crate::types::UserInfo;
 use once_cell::sync::Lazy;
 
-static LOCAL_DOMAIN_ID: Lazy<String> = Lazy::new(|| {
+static LOCAL_DOMAIN_ID: Lazy<Option<String>> = Lazy::new(|| {
     // Get seperate list of users and filter for local admin
     let binding = sysinfo::System::new_all();
     let all_users = binding.users();
 
     // Extract domain id from local admin
-    let domain_id = all_users
+    all_users
         .iter()
         .filter_map(|user| {
             let uid = &user.id().to_string();
@@ -20,9 +20,7 @@ static LOCAL_DOMAIN_ID: Lazy<String> = Lazy::new(|| {
                 _ => None,
             }
         })
-        .next();
-
-    return domain_id.unwrap();
+        .next()
 });
 
 fn get_rid_from_sid(sid: &str) -> Option<&str> {
@@ -56,10 +54,16 @@ impl UserInfo for sysinfo::User {
 
     fn is_local(&self) -> bool {
         // Compare local domain id to domain ids of current user
-        return match get_domain_id_from_sid(&self.id().to_string()) {
-            Ok(local_sid_value) => *LOCAL_DOMAIN_ID == local_sid_value,
+        match get_domain_id_from_sid(&self.id().to_string()) {
+            Ok(local_sid_value) => {
+                // Check if LOCAL_DOMAIN_ID is available and matches
+                match LOCAL_DOMAIN_ID.as_ref() {
+                    Some(domain_id) => *domain_id == local_sid_value,
+                    None => false, // If no local domain ID found, assume not local
+                }
+            }
             Err(_) => false,
-        };
+        }
     }
 }
 
