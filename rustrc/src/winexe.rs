@@ -9,6 +9,7 @@ use crate::cmd;
 use crate::smb::negotiate_session;
 use crate::stateful_process::{Message, StatefulProcess};
 use crate::Result;
+use base64::Engine;
 use byteorder::{BigEndian, WriteBytesExt};
 use download_embed_macro::download_and_embed;
 use flate2::read::GzDecoder;
@@ -483,7 +484,7 @@ impl WinexeContainer {
 
         // Write the entire content in one echo command
         let transfer_helper = include_str!("../resources/transfer_file.bat");
-        let base64_content = base64::encode(transfer_helper);
+        let base64_content = base64::engine::general_purpose::STANDARD.encode(transfer_helper);
 
         // First write the base64 string
         let echo_command = format!("echo {}> C:\\Temp\\transfer_file.b64", base64_content);
@@ -656,19 +657,22 @@ impl Session for WinexeContainer {
         );
         let helper = self.exec(&cmd!(start_helper)).await?;
 
-        match format!("{}:{}", self.ip(), port_number).parse() {
+        let result = match format!("{}:{}", self.ip(), port_number).parse() {
             Ok(socket) => Self::fetch_file(&socket, local_path).await,
-            Err(_) => {
-                self.exec(&crate::cmd!(format!(
-                    "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
-                    port_number
-                )))
-                .await;
-                Err(crate::Error::ConnectionError(
-                    "Invalid socket address".to_string(),
-                ))
-            }
+            Err(_) => Err(crate::Error::ConnectionError(
+                "Invalid socket address".to_string(),
+            )),
+        };
+
+        // Always cleanup firewall rule regardless of success/failure
+        if let Err(e) = self.exec(&crate::cmd!(format!(
+            "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
+            port_number
+        ))).await {
+            log::warn!("Failed to cleanup firewall rule for port {}: {}", port_number, e);
         }
+
+        result
     }
 
     async fn transfer_file(
@@ -712,26 +716,30 @@ impl Session for WinexeContainer {
             }
         }
 
-        match stream {
+        let result = match stream {
             Some(mut stream) => {
                 let file_size = file_contents.len() as u64;
                 let mut size_buffer = vec![];
                 WriteBytesExt::write_u64::<BigEndian>(&mut size_buffer, file_size)?;
 
                 stream.write_all(&size_buffer).await?;
-                Ok(stream.write_all(&file_contents).await?)
+                stream.write_all(&file_contents).await?;
+                Ok(())
             }
-            None => {
-                self.exec(&crate::cmd!(format!(
-                    "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
-                    port_number
-                )))
-                .await?;
-                return Err(crate::Error::FileTransferError(
-                    "Failed to connect after 15 attempts".to_string(),
-                ));
-            }
+            None => Err(crate::Error::FileTransferError(
+                "Failed to connect after 15 attempts".to_string(),
+            )),
+        };
+
+        // Always cleanup firewall rule regardless of success/failure
+        if let Err(e) = self.exec(&crate::cmd!(format!(
+            "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
+            port_number
+        ))).await {
+            log::warn!("Failed to cleanup firewall rule for port {}: {}", port_number, e);
         }
+
+        result
     }
 }
 
