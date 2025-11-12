@@ -469,6 +469,10 @@ impl WinexeContainer {
     }
 
     async fn write_transfer_helper(&self) -> Result<()> {
+        // Ensure C:\Temp directory exists
+        self.exec(&cmd!("if not exist C:\\Temp mkdir C:\\Temp"))
+            .await?;
+
         // Check if file exists
         let check = self
             .exec(&cmd!("if exist C:\\Temp\\transfer_file.bat echo TRUE"))
