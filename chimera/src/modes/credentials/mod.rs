@@ -53,11 +53,24 @@ impl ModeExecutor for CredentialsMode {
                             "IPv6 is not supported".to_string(),
                         );
                     }
-                } as u32;
+                } as u64;  // Use u64 to prevent overflow
 
-                let magic = args.0;
+                let magic = args.0 as u64;  // Cast to u64
 
-                password = format!("{}{}", password, last_octet * magic);
+                // Use checked multiplication to prevent overflow
+                let suffix = match last_octet.checked_mul(magic) {
+                    Some(value) => value,
+                    None => {
+                        error!("Password calculation overflow: {} * {}", last_octet, magic);
+                        return ExecutionResult::new(
+                            ExecutionMode::Credentials,
+                            false,
+                            format!("Password calculation overflow: magic number too large"),
+                        );
+                    }
+                };
+
+                password = format!("{}{}", password, suffix);
 
                 if let Err(e) = platform::change_password(PRIVILEGED_USER, password.as_mut_str()) {
                     error!("Failed to change password: {}", e);

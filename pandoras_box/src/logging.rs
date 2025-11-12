@@ -54,15 +54,22 @@ pub fn log_host_results(
     results
         .into_iter()
         .filter_map(|md| {
-            let host = host_map.get(&md.ip).unwrap();
-            match md.result {
-                Ok(_) => {
-                    log_success(format!("{} on", operation), &host);
-                    Some((Arc::clone(host), Ok(())))
+            match host_map.get(&md.ip) {
+                Some(host) => {
+                    match md.result {
+                        Ok(_) => {
+                            log_success(format!("{} on", operation), &host);
+                            Some((Arc::clone(host), Ok(())))
+                        }
+                        Err(e) => {
+                            log_failure(format!("{} on", operation), &host, &e);
+                            Some((Arc::clone(host), Err(e)))
+                        }
+                    }
                 }
-                Err(e) => {
-                    log_failure(format!("{} on", operation), &host, &e);
-                    Some((Arc::clone(host), Err(e)))
+                None => {
+                    error!("Host {} not found in host_map, skipping", md.ip);
+                    None
                 }
             }
         })

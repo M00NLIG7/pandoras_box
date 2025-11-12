@@ -188,7 +188,16 @@ impl NetworkManager {
         let (successful_configs, successful_hosts): (Vec<_>, Vec<_>) = config_results
             .into_iter()
             .filter_map(|(host, config_result)| match config_result {
-                Ok(config) => Some(((host.ip.parse().expect("Invalid IP"), config), host)), // Now includes IP in the tuple
+                Ok(config) => {
+                    // Parse IP address, skip if invalid
+                    match host.ip.parse() {
+                        Ok(ip_addr) => Some(((ip_addr, config), host)),
+                        Err(e) => {
+                            error!("Failed to parse IP address for {}: {}", host.ip, e);
+                            None
+                        }
+                    }
+                }
                 Err(e) => {
                     warn!("Failed to create config for {}: {}", host.ip, e);
                     None
@@ -680,13 +689,25 @@ impl Orchestrator {
         };
 
         let start = std::time::Instant::now();
-        let _ = self.append_to_hosts_file(&communicator, OS::Unix).await;
+        let unix_hosts_results = self.append_to_hosts_file(&communicator, OS::Unix).await;
+        for result in &unix_hosts_results {
+            match &result.result {
+                Ok(_) => info!("Successfully appended Unix hosts file on {}", result.ip),
+                Err(e) => error!("Failed to append Unix hosts file on {}: {}", result.ip, e),
+            }
+        }
         info!("Appended Unix hosts file in {}s", start.elapsed().as_secs());
 
         let start = std::time::Instant::now();
-        let _ = self.append_to_hosts_file(&communicator, OS::Windows).await;
+        let windows_hosts_results = self.append_to_hosts_file(&communicator, OS::Windows).await;
+        for result in &windows_hosts_results {
+            match &result.result {
+                Ok(_) => info!("Successfully appended Windows hosts file on {}", result.ip),
+                Err(e) => error!("Failed to append Windows hosts file on {}: {}", result.ip, e),
+            }
+        }
         info!("Appended Windows hosts file in {}s", start.elapsed().as_secs());
-        
+
         let start = std::time::Instant::now();
         let deployment_results = self.download_chimera(&communicator, host_map).await;
         info!("Downloaded Chimera in {}s", start.elapsed().as_secs());
@@ -833,13 +854,25 @@ impl Orchestrator {
         };
 
         let start = std::time::Instant::now();
-        let _ = self.append_to_hosts_file(&communicator, OS::Unix).await;
+        let unix_hosts_results = self.append_to_hosts_file(&communicator, OS::Unix).await;
+        for result in &unix_hosts_results {
+            match &result.result {
+                Ok(_) => info!("Successfully appended Unix hosts file on {}", result.ip),
+                Err(e) => error!("Failed to append Unix hosts file on {}: {}", result.ip, e),
+            }
+        }
         info!("Appended Unix hosts file in {}s", start.elapsed().as_secs());
 
         let start = std::time::Instant::now();
-        let _ = self.append_to_hosts_file(&communicator, OS::Windows).await;
+        let windows_hosts_results = self.append_to_hosts_file(&communicator, OS::Windows).await;
+        for result in &windows_hosts_results {
+            match &result.result {
+                Ok(_) => info!("Successfully appended Windows hosts file on {}", result.ip),
+                Err(e) => error!("Failed to append Windows hosts file on {}: {}", result.ip, e),
+            }
+        }
         info!("Appended Windows hosts file in {}s", start.elapsed().as_secs());
-        
+
         let start = std::time::Instant::now();
         let deployment_results = self.download_chimera(&communicator, host_map).await;
         info!("Downloaded Chimera in {}s", start.elapsed().as_secs());
