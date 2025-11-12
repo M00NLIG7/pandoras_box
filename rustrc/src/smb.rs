@@ -105,17 +105,17 @@ impl NetBIOSSessionService {
     }
 
     async fn send_packet(&mut self, data: &[u8]) -> crate::Result<()> {
-        self.stream.write_all(&write_u32_be(data.len() as u32)).await;
-        self.stream.write_all(data).await;
+        self.stream.write_all(&write_u32_be(data.len() as u32)).await?;
+        self.stream.write_all(data).await?;
         Ok(())
     }
 
     async fn recv_packet(&mut self) -> std::io::Result<Vec<u8>> {
         let mut length_buf = [0u8; 4];
-        self.stream.read_exact(&mut length_buf).await;
+        self.stream.read_exact(&mut length_buf).await?;
         let length = read_u32_be(&length_buf);
         let mut data = vec![0; length as usize];
-        self.stream.read_exact(&mut data).await;
+        self.stream.read_exact(&mut data).await?;
         Ok(data)
     }
 }
