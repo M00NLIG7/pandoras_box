@@ -184,18 +184,30 @@ impl Enumerator {
 
     async fn icmp_ping(ip: Ipv4AddrExt, open_ports: Vec<u16>) -> Option<Host> {
         let output = if cfg!(target_os = "windows") {
-            Command::new("ping")
+            match Command::new("ping")
                 .arg("-n 1")
                 .arg(ip.to_string())
                 .output()
-                .expect("Failed to run ping command")
+            {
+                Ok(output) => output,
+                Err(e) => {
+                    warn!("Failed to run ping command for {}: {}", ip, e);
+                    return None;
+                }
+            }
         } else {
-            Command::new("ping")
+            match Command::new("ping")
                 .arg("-c 1")
                 .arg("-W 1")
                 .arg(ip.to_string())
                 .output()
-                .expect("Failed to run ping command")
+            {
+                Ok(output) => output,
+                Err(e) => {
+                    warn!("Failed to run ping command for {}: {}", ip, e);
+                    return None;
+                }
+            }
         };
 
         if output.status.success() {
