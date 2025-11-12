@@ -42,7 +42,17 @@ impl ModeExecutor for ServeMode {
         }
 
         info!("Starting file server on port {} in background", config.port);
-        let current_exe = std::env::current_exe().expect("Failed to get current executable path");
+        let current_exe = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(e) => {
+                error!("Failed to get current executable path: {}", e);
+                return ExecutionResult::new(
+                    ExecutionMode::Serve,
+                    false,
+                    format!("Failed to get current executable path: {}", e),
+                );
+            }
+        };
 
         #[cfg(windows)]
         {
@@ -119,10 +129,32 @@ impl ModeExecutor for ServeMode {
                 ),
                 Ok(ForkResult::Child) => {
                     // Convert the executable path and arguments to CString
-                    let exe = CString::new(current_exe.to_str().unwrap()).unwrap();
-                    let arg0 = CString::new("serve-internal").unwrap();
-                    let arg1 = CString::new("--port").unwrap();
-                    let arg2 = CString::new(config.port.to_string()).unwrap();
+                    // Handle errors gracefully since we're in child process
+                    let exe_str = match current_exe.to_str() {
+                        Some(s) => s,
+                        None => {
+                            error!("Executable path contains invalid UTF-8");
+                            std::process::exit(1);
+                        }
+                    };
+
+                    let exe = match CString::new(exe_str) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!("Executable path contains null bytes: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
+
+                    let arg0 = CString::new("serve-internal").expect("hardcoded string should not contain null");
+                    let arg1 = CString::new("--port").expect("hardcoded string should not contain null");
+                    let arg2 = match CString::new(config.port.to_string()) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!("Port number contains null bytes: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
 
                     // Replace the current process with serve-internal
                     match execvp(&exe, &[&exe, &arg0, &arg1, &arg2]) {
@@ -172,11 +204,26 @@ impl ServeMode {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-                // Check if output directory is empty
-                if let Ok(entries) = std::fs::read_dir(&output_dir) {
-                    if entries.count() == 0 {
-                        info!("Output directory is empty, triggering shutdown");
-                        return;
+                // Check if output directory is empty using async fs to avoid blocking
+                match tokio::fs::read_dir(&output_dir).await {
+                    Ok(mut entries) => {
+                        // Check if there are any entries
+                        match entries.next_entry().await {
+                            Ok(None) => {
+                                // Directory is empty
+                                info!("Output directory is empty, triggering shutdown");
+                                return;
+                            }
+                            Ok(Some(_)) => {
+                                // Directory has files, continue monitoring
+                            }
+                            Err(e) => {
+                                warn!("Error reading directory entry: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Error reading directory: {}", e);
                     }
                 }
             }

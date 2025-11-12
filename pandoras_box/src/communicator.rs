@@ -69,7 +69,11 @@ where
     }
 
     fn get_ip(&self) -> IpAddr {
-        unimplemented!("Implementation would depend on Client struct")
+        // Note: IP address is tracked separately in Communicator.clients Vec<(OS, IpAddr, Arc<dyn ClientWrapper>)>
+        // This method is not currently used, but must be implemented for the trait.
+        // Return placeholder to prevent panic if ever called.
+        warn!("get_ip() called on ClientWrapper - IP is tracked in Communicator, not Client");
+        IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0))
     }
 }
 
@@ -90,7 +94,9 @@ impl OSConfig {
                     let mut last_error = None;
                     for attempt in 0..3 {
                         if attempt > 0 {
-                            let delay = Duration::from_secs(2u64.pow(attempt));
+                            // Use checked_pow to prevent overflow for defensive coding
+                            let delay_secs = 2u64.checked_pow(attempt).unwrap_or(60);
+                            let delay = Duration::from_secs(delay_secs);
                             debug!("Retrying Winexe connection to {} (attempt {}/3) after {}s", ip, attempt + 1, delay.as_secs());
                             tokio::time::sleep(delay).await;
                         }
@@ -187,7 +193,9 @@ impl OSConfig {
                 let mut last_error = None;
                 for attempt in 0..3 {
                     if attempt > 0 {
-                        let delay = Duration::from_secs(2u64.pow(attempt));
+                        // Use checked_pow to prevent overflow for defensive coding
+                        let delay_secs = 2u64.checked_pow(attempt).unwrap_or(60);
+                        let delay = Duration::from_secs(delay_secs);
                         debug!("Retrying SSH connection to Unix host {} (attempt {}/3) after {}s", ip, attempt + 1, delay.as_secs());
                         tokio::time::sleep(delay).await;
                     }
@@ -301,7 +309,8 @@ impl Communicator {
         cmd: &Command,
         os_type: OS,
     ) -> Vec<HostOperationResult<CommandOutput>> {
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Removed unconditional 1-second delay for better performance
+        // Network latency provides natural pacing for parallel operations
 
         join_all(
             self.clients
@@ -335,7 +344,9 @@ impl Communicator {
                                         || attempt == 0) {
 
                                     debug!("Attempting command with sudo on {}", ip);
-                                    let sudo_cmd = format!("sudo {}", cmd.to_string());
+                                    // Wrap command in sh -c with proper quoting to preserve escaping
+                                    let original_cmd = cmd.to_string();
+                                    let sudo_cmd = format!("sudo sh -c '{}'", original_cmd.replace('\'', "'\\''"));
                                     let cmd = &cmd!(sudo_cmd);
 
                                     match client.exec(cmd).await {
@@ -482,7 +493,9 @@ impl Communicator {
 
                         for attempt in 0..3 {
                             if attempt > 0 {
-                                let delay = Duration::from_secs(2u64.pow(attempt));
+                                // Use checked_pow to prevent overflow for defensive coding
+                                let delay_secs = 2u64.checked_pow(attempt).unwrap_or(60);
+                                let delay = Duration::from_secs(delay_secs);
                                 debug!("Retrying file download from {} (attempt {}/3) after {}s", ip, attempt + 1, delay.as_secs());
                                 tokio::time::sleep(delay).await;
                             }

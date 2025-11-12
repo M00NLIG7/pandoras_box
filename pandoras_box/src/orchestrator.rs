@@ -448,8 +448,19 @@ impl Orchestrator {
 
     fn generate_perl_url_parts(url: &str) -> (String, String) {
         let url_parts: Vec<&str> = url.split("://").nth(1).unwrap_or("").split('/').collect();
-        let host = url_parts[0].to_string();
-        let path = url_parts[1..].join("/");
+
+        // Bounds check to prevent panic on malformed URLs
+        if url_parts.is_empty() {
+            warn!("Malformed URL provided: {}", url);
+            return (String::new(), String::new());
+        }
+
+        let host = url_parts.get(0).unwrap_or(&"").to_string();
+        let path = if url_parts.len() > 1 {
+            url_parts[1..].join("/")
+        } else {
+            String::new()
+        };
 
         // Basic validation to prevent shell injection and ensure command stability
         let host = host.replace('\'', "").replace('"', "").replace('`', "").replace('$', "").replace(';', "");
