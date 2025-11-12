@@ -93,12 +93,17 @@ impl OSConfig {
                     ))),
                 },
                 Either::Right(ssh_config) => {
-                    match Client::connect(ssh_config.clone()).await {
+                    // Try SSH first, keeping config for potential Winexe fallback
+                    let ssh_result = Client::connect(ssh_config.clone()).await;
+
+                    match ssh_result {
                         Ok(client) => {
+                            // SSH succeeded, config will be dropped here
+                            drop(ssh_config);
                             Ok((OS::Windows, ip, Arc::new(client) as Arc<dyn ClientWrapper>))
                         }
                         Err(_) => {
-                            // SSH failed, try Winexe fallback
+                            // SSH failed, try Winexe fallback with original config
                             match ssh_to_winexe(ssh_config, ip).await {
                                 Ok(winexe_config) => match Client::connect(winexe_config).await {
                                     Ok(client) => Ok((
