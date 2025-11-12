@@ -9,6 +9,7 @@ use crate::cmd;
 use crate::smb::negotiate_session;
 use crate::stateful_process::{Message, StatefulProcess};
 use crate::Result;
+use base64::Engine;
 use byteorder::{BigEndian, WriteBytesExt};
 use download_embed_macro::download_and_embed;
 use flate2::read::GzDecoder;
@@ -203,7 +204,7 @@ impl WinexeContainer {
             }
         }
 
-        //container.write_transfer_helper().await?;
+        container.write_transfer_helper().await?;
 
         Ok(container)
     }
@@ -308,12 +309,15 @@ impl WinexeContainer {
     }
 
     async fn fetch_file(addr: &SocketAddr, local_path: &str) -> crate::Result<()> {
-        // Try connection with retries
+        // Give the helper time to compile and start (it needs to run jsc.exe)
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // Try connection with retries - increased attempts and delay
         let mut stream = {
             let mut stream = None;
             let mut last_error = None;
 
-            for attempt in 1..=5 {
+            for attempt in 1..=15 {
                 match TcpStream::connect(&addr).await {
                     Ok(s) => {
                         stream = Some(s);
@@ -321,8 +325,8 @@ impl WinexeContainer {
                     }
                     Err(e) => {
                         last_error = Some(e);
-                        if attempt < 5 {
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        if attempt < 15 {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
                         }
                     }
                 }
@@ -332,7 +336,7 @@ impl WinexeContainer {
                 Some(s) => s,
                 None => {
                     return Err(crate::Error::ConnectionError(format!(
-                        "Failed to connect after 5 attempts: {}",
+                        "Failed to connect after 15 attempts: {}",
                         last_error.unwrap()
                     )))
                 }
@@ -480,7 +484,7 @@ impl WinexeContainer {
 
         // Write the entire content in one echo command
         let transfer_helper = include_str!("../resources/transfer_file.bat");
-        let base64_content = base64::encode(transfer_helper);
+        let base64_content = base64::engine::general_purpose::STANDARD.encode(transfer_helper);
 
         // First write the base64 string
         let echo_command = format!("echo {}> C:\\Temp\\transfer_file.b64", base64_content);
@@ -653,19 +657,22 @@ impl Session for WinexeContainer {
         );
         let helper = self.exec(&cmd!(start_helper)).await?;
 
-        match format!("{}:{}", self.ip(), port_number).parse() {
+        let result = match format!("{}:{}", self.ip(), port_number).parse() {
             Ok(socket) => Self::fetch_file(&socket, local_path).await,
-            Err(_) => {
-                self.exec(&crate::cmd!(format!(
-                    "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
-                    port_number
-                )))
-                .await;
-                Err(crate::Error::ConnectionError(
-                    "Invalid socket address".to_string(),
-                ))
-            }
+            Err(_) => Err(crate::Error::ConnectionError(
+                "Invalid socket address".to_string(),
+            )),
+        };
+
+        // Always cleanup firewall rule regardless of success/failure
+        if let Err(e) = self.exec(&crate::cmd!(format!(
+            "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
+            port_number
+        ))).await {
+            log::warn!("Failed to cleanup firewall rule for port {}: {}", port_number, e);
         }
+
+        result
     }
 
     async fn transfer_file(
@@ -689,43 +696,50 @@ impl Session for WinexeContainer {
 
         let socket = format!("{}:{}", self.ip(), port_number);
 
-        // Try to connect with retries
+        // Give the helper time to compile and start (it needs to run jsc.exe)
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // Try to connect with retries - increased attempts and delay
         let mut stream = None;
-        for attempt in 0..5 {
+        for attempt in 0..15 {
             match TcpStream::connect(&socket).await {
                 Ok(s) => {
                     stream = Some(s);
                     break;
                 }
                 Err(e) => {
-                    if attempt < 4 {
+                    if attempt < 14 {
                         // Don't sleep on last attempt
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 }
             }
         }
 
-        match stream {
+        let result = match stream {
             Some(mut stream) => {
                 let file_size = file_contents.len() as u64;
                 let mut size_buffer = vec![];
                 WriteBytesExt::write_u64::<BigEndian>(&mut size_buffer, file_size)?;
 
                 stream.write_all(&size_buffer).await?;
-                Ok(stream.write_all(&file_contents).await?)
+                stream.write_all(&file_contents).await?;
+                Ok(())
             }
-            None => {
-                self.exec(&crate::cmd!(format!(
-                    "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
-                    port_number
-                )))
-                .await?;
-                return Err(crate::Error::FileTransferError(
-                    "Failed to connect after 5 attempts".to_string(),
-                ));
-            }
+            None => Err(crate::Error::FileTransferError(
+                "Failed to connect after 15 attempts".to_string(),
+            )),
+        };
+
+        // Always cleanup firewall rule regardless of success/failure
+        if let Err(e) = self.exec(&crate::cmd!(format!(
+            "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
+            port_number
+        ))).await {
+            log::warn!("Failed to cleanup firewall rule for port {}: {}", port_number, e);
         }
+
+        result
     }
 }
 
