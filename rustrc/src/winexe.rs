@@ -310,23 +310,33 @@ impl WinexeContainer {
 
     async fn fetch_file(addr: &SocketAddr, local_path: &str) -> crate::Result<()> {
         // Give the helper time to compile and start (it needs to run jsc.exe)
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Increased from 3s to 5s for slower systems/networks
+        tokio::time::sleep(Duration::from_secs(5)).await;
 
         // Try connection with retries - increased attempts and delay
         let mut stream = {
             let mut stream = None;
             let mut last_error = None;
 
-            for attempt in 1..=15 {
+            for attempt in 1..=20 {
                 match TcpStream::connect(&addr).await {
                     Ok(s) => {
+                        if attempt > 1 {
+                            log::info!("Connection succeeded on attempt {}/20", attempt);
+                        }
                         stream = Some(s);
                         break;
                     }
                     Err(e) => {
                         last_error = Some(e);
-                        if attempt < 15 {
-                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        if attempt < 20 {
+                            // Exponential backoff for first 5 attempts, then 2s
+                            let delay = if attempt <= 5 {
+                                Duration::from_millis(500 * attempt as u64)
+                            } else {
+                                Duration::from_secs(2)
+                            };
+                            tokio::time::sleep(delay).await;
                         }
                     }
                 }
@@ -336,7 +346,7 @@ impl WinexeContainer {
                 Some(s) => s,
                 None => {
                     return Err(crate::Error::ConnectionError(format!(
-                        "Failed to connect after 15 attempts: {}",
+                        "Failed to connect after 20 attempts: {}",
                         last_error.unwrap()
                     )))
                 }
@@ -701,20 +711,29 @@ impl Session for WinexeContainer {
         let socket = format!("{}:{}", self.ip(), port_number);
 
         // Give the helper time to compile and start (it needs to run jsc.exe)
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Increased from 3s to 5s for slower systems/networks
+        tokio::time::sleep(Duration::from_secs(5)).await;
 
         // Try to connect with retries - increased attempts and delay
         let mut stream = None;
-        for attempt in 0..15 {
+        for attempt in 0..20 {
             match TcpStream::connect(&socket).await {
                 Ok(s) => {
+                    if attempt > 0 {
+                        log::info!("Connection for file transfer succeeded on attempt {}/20", attempt + 1);
+                    }
                     stream = Some(s);
                     break;
                 }
                 Err(e) => {
-                    if attempt < 14 {
-                        // Don't sleep on last attempt
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    if attempt < 19 {
+                        // Exponential backoff for first 5 attempts, then 2s
+                        let delay = if attempt < 5 {
+                            Duration::from_millis(500 * (attempt + 1) as u64)
+                        } else {
+                            Duration::from_secs(2)
+                        };
+                        tokio::time::sleep(delay).await;
                     }
                 }
             }
@@ -731,7 +750,7 @@ impl Session for WinexeContainer {
                 Ok(())
             }
             None => Err(crate::Error::FileTransferError(
-                "Failed to connect after 15 attempts".to_string(),
+                "Failed to connect after 20 attempts".to_string(),
             )),
         };
 

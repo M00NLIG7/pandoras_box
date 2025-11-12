@@ -85,56 +85,158 @@ impl OSConfig {
     pub async fn connect(self, ip: IpAddr) -> Result<(OS, IpAddr, Arc<dyn ClientWrapper>)> {
         match self {
             OSConfig::Windows(config) => match config {
-                Either::Left(winexe_config) => match Client::connect(winexe_config).await {
-                    Ok(client) => Ok((OS::Windows, ip, Arc::new(client) as Arc<dyn ClientWrapper>)),
-                    Err(e) => Err(Error::CommunicatorError(format!(
-                        "Winexe connection failed for {}: {}",
-                        ip, e
-                    ))),
-                },
-                Either::Right(ssh_config) => {
-                    // Try SSH first, keeping config for potential Winexe fallback
-                    let ssh_result = Client::connect(ssh_config.clone()).await;
-
-                    match ssh_result {
-                        Ok(client) => {
-                            // SSH succeeded, config will be dropped here
-                            drop(ssh_config);
-                            Ok((OS::Windows, ip, Arc::new(client) as Arc<dyn ClientWrapper>))
+                Either::Left(winexe_config) => {
+                    // Retry Winexe connections up to 3 times with exponential backoff
+                    let mut last_error = None;
+                    for attempt in 0..3 {
+                        if attempt > 0 {
+                            let delay = Duration::from_secs(2u64.pow(attempt));
+                            debug!("Retrying Winexe connection to {} (attempt {}/3) after {}s", ip, attempt + 1, delay.as_secs());
+                            tokio::time::sleep(delay).await;
                         }
-                        Err(_) => {
-                            // SSH failed, try Winexe fallback with original config
-                            match ssh_to_winexe(ssh_config, ip).await {
-                                Ok(winexe_config) => match Client::connect(winexe_config).await {
-                                    Ok(client) => Ok((
-                                        OS::Windows,
-                                        ip,
-                                        Arc::new(client) as Arc<dyn ClientWrapper>,
-                                    )),
-                                    Err(e) => Err(Error::CommunicatorError(format!(
-                                        "Both SSH and Winexe failed for {}: {}",
-                                        ip, e
-                                    ))),
-                                },
-                                Err(e) => Err(e),
+
+                        match Client::connect(winexe_config.clone()).await {
+                            Ok(client) => {
+                                if attempt > 0 {
+                                    info!("Winexe connection to {} succeeded on attempt {}/3", ip, attempt + 1);
+                                }
+                                return Ok((OS::Windows, ip, Arc::new(client) as Arc<dyn ClientWrapper>));
+                            }
+                            Err(e) => {
+                                last_error = Some(e);
                             }
                         }
                     }
+
+                    Err(Error::CommunicatorError(format!(
+                        "Winexe connection failed for {} after 3 attempts: {}",
+                        ip, last_error.unwrap()
+                    )))
+                },
+                Either::Right(ssh_config) => {
+                    // Try SSH first with retries, keeping config for potential Winexe fallback
+                    let mut ssh_last_error = None;
+
+                    for attempt in 0..2 {
+                        if attempt > 0 {
+                            let delay = Duration::from_secs(2);
+                            debug!("Retrying SSH connection to Windows host {} (attempt {}/2)", ip, attempt + 1);
+                            tokio::time::sleep(delay).await;
+                        }
+
+                        match Client::connect(ssh_config.clone()).await {
+                            Ok(client) => {
+                                drop(ssh_config);
+                                if attempt > 0 {
+                                    info!("SSH connection to Windows host {} succeeded on attempt {}/2", ip, attempt + 1);
+                                }
+                                return Ok((OS::Windows, ip, Arc::new(client) as Arc<dyn ClientWrapper>));
+                            }
+                            Err(e) => {
+                                ssh_last_error = Some(e);
+                            }
+                        }
+                    }
+
+                    // SSH failed after retries, try Winexe fallback with original config
+                    debug!("SSH failed for Windows host {} after 2 attempts, trying Winexe fallback", ip);
+                    match ssh_to_winexe(ssh_config, ip).await {
+                        Ok(winexe_config) => {
+                            // Retry Winexe fallback up to 2 times
+                            for attempt in 0..2 {
+                                if attempt > 0 {
+                                    let delay = Duration::from_secs(2);
+                                    tokio::time::sleep(delay).await;
+                                }
+
+                                match Client::connect(winexe_config.clone()).await {
+                                    Ok(client) => {
+                                        if attempt > 0 {
+                                            info!("Winexe fallback to {} succeeded on attempt {}/2", ip, attempt + 1);
+                                        }
+                                        return Ok((
+                                            OS::Windows,
+                                            ip,
+                                            Arc::new(client) as Arc<dyn ClientWrapper>,
+                                        ));
+                                    }
+                                    Err(e) if attempt == 1 => {
+                                        return Err(Error::CommunicatorError(format!(
+                                            "Both SSH and Winexe failed for {}: SSH error: {}, Winexe error: {}",
+                                            ip, ssh_last_error.unwrap(), e
+                                        )));
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            Err(Error::CommunicatorError(format!(
+                                "Both SSH and Winexe failed for {}: SSH error: {}",
+                                ip, ssh_last_error.unwrap()
+                            )))
+                        }
+                        Err(e) => Err(Error::CommunicatorError(format!(
+                            "SSH failed and could not create Winexe fallback for {}: {}",
+                            ip, e
+                        ))),
+                    }
                 }
             },
-            OSConfig::Unix(config) => match Client::connect(config).await {
-                Ok(client) => Ok((OS::Unix, ip, Arc::new(client) as Arc<dyn ClientWrapper>)),
-                Err(e) => Err(Error::CommunicatorError(format!(
-                    "SSH connection failed for {}: {}",
-                    ip, e
-                ))),
+            OSConfig::Unix(config) => {
+                // Retry Unix SSH connections up to 3 times with exponential backoff
+                let mut last_error = None;
+                for attempt in 0..3 {
+                    if attempt > 0 {
+                        let delay = Duration::from_secs(2u64.pow(attempt));
+                        debug!("Retrying SSH connection to Unix host {} (attempt {}/3) after {}s", ip, attempt + 1, delay.as_secs());
+                        tokio::time::sleep(delay).await;
+                    }
+
+                    match Client::connect(config.clone()).await {
+                        Ok(client) => {
+                            if attempt > 0 {
+                                info!("SSH connection to Unix host {} succeeded on attempt {}/3", ip, attempt + 1);
+                            }
+                            return Ok((OS::Unix, ip, Arc::new(client) as Arc<dyn ClientWrapper>));
+                        }
+                        Err(e) => {
+                            last_error = Some(e);
+                        }
+                    }
+                }
+
+                Err(Error::CommunicatorError(format!(
+                    "SSH connection failed for {} after 3 attempts: {}",
+                    ip, last_error.unwrap()
+                )))
             },
-            OSConfig::Unknown(config) => match Client::connect(config).await {
-                Ok(client) => Ok((OS::Unknown, ip, Arc::new(client) as Arc<dyn ClientWrapper>)),
-                Err(e) => Err(Error::CommunicatorError(format!(
-                    "Connection failed for unknown OS at {}: {}",
-                    ip, e
-                ))),
+            OSConfig::Unknown(config) => {
+                // Retry unknown OS connections up to 2 times
+                let mut last_error = None;
+                for attempt in 0..2 {
+                    if attempt > 0 {
+                        let delay = Duration::from_secs(2);
+                        debug!("Retrying connection to unknown OS at {} (attempt {}/2)", ip, attempt + 1);
+                        tokio::time::sleep(delay).await;
+                    }
+
+                    match Client::connect(config.clone()).await {
+                        Ok(client) => {
+                            if attempt > 0 {
+                                info!("Connection to unknown OS at {} succeeded on attempt {}/2", ip, attempt + 1);
+                            }
+                            return Ok((OS::Unknown, ip, Arc::new(client) as Arc<dyn ClientWrapper>));
+                        }
+                        Err(e) => {
+                            last_error = Some(e);
+                        }
+                    }
+                }
+
+                Err(Error::CommunicatorError(format!(
+                    "Connection failed for unknown OS at {} after 2 attempts: {}",
+                    ip, last_error.unwrap()
+                )))
             },
         }
     }
@@ -206,25 +308,56 @@ impl Communicator {
                 .iter()
                 .filter(|(client_os, _, _)| *client_os == os_type)
                 .map(|(os, ip, client)| async move {
-                    let result = client.exec(cmd).await;
-                    if let Err(e) = &result {
-                        if matches!(*os, OS::Unix) && !e.to_string().contains("timed out") {
-                            error!("Retrying with sudo");
-                            let sudo_cmd = format!("sudo {}", cmd.to_string());
+                    // Try command execution with retries for transient failures
+                    let mut result = None;
+                    let mut last_error = None;
 
-                            let cmd = &cmd!(sudo_cmd);
+                    for attempt in 0..2 {
+                        if attempt > 0 {
+                            debug!("Retrying command execution on {} (attempt {}/2)", ip, attempt + 1);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
 
-                            return HostOperationResult {
-                                ip: ip.to_string(),
-                                os: *os,
-                                result: client.exec(cmd).await,
-                            };
+                        match client.exec(cmd).await {
+                            Ok(output) => {
+                                if attempt > 0 {
+                                    info!("Command execution on {} succeeded on retry", ip);
+                                }
+                                result = Some(Ok(output));
+                                break;
+                            }
+                            Err(e) => {
+                                // Check if this is a permission error on Unix
+                                if matches!(*os, OS::Unix)
+                                    && !e.to_string().contains("timed out")
+                                    && (e.to_string().contains("Permission denied")
+                                        || e.to_string().contains("not permitted")
+                                        || attempt == 0) {
+
+                                    debug!("Attempting command with sudo on {}", ip);
+                                    let sudo_cmd = format!("sudo {}", cmd.to_string());
+                                    let cmd = &cmd!(sudo_cmd);
+
+                                    match client.exec(cmd).await {
+                                        Ok(output) => {
+                                            result = Some(Ok(output));
+                                            break;
+                                        }
+                                        Err(sudo_err) => {
+                                            last_error = Some(sudo_err);
+                                        }
+                                    }
+                                } else {
+                                    last_error = Some(e);
+                                }
+                            }
                         }
                     }
+
                     HostOperationResult {
                         ip: ip.to_string(),
                         os: *os,
-                        result,
+                        result: result.unwrap_or_else(|| Err(last_error.unwrap())),
                     }
                 }),
         )
@@ -304,47 +437,62 @@ impl Communicator {
 
                         info!("Downloading from {} to {}", dest_clone, local_path);
 
-                        // Try the download with detailed error logging
-                        let result = match client
-                            .download_file(dest_clone.clone(), local_path.clone())
-                            .await
-                        {
-                            Ok(_) => {
-                                // Verify the downloaded file
-                                match tokio::fs::metadata(&local_path).await {
-                                    Ok(metadata) => {
-                                        if metadata.len() == 0 {
-                                            error!("Downloaded empty file for {}", ip);
-                                            Err(Error::FileTransferError(format!(
-                                                "Downloaded empty file from {}",
-                                                ip
-                                            )))
-                                        } else {
-                                            info!(
-                                                "Successfully downloaded {}B from {}",
-                                                metadata.len(),
-                                                ip
+                        // Try the download with retries up to 3 times
+                        let mut result = None;
+                        let mut last_error = None;
+
+                        for attempt in 0..3 {
+                            if attempt > 0 {
+                                let delay = Duration::from_secs(2u64.pow(attempt));
+                                debug!("Retrying file download from {} (attempt {}/3) after {}s", ip, attempt + 1, delay.as_secs());
+                                tokio::time::sleep(delay).await;
+                            }
+
+                            match client
+                                .download_file(dest_clone.clone(), local_path.clone())
+                                .await
+                            {
+                                Ok(_) => {
+                                    // Verify the downloaded file
+                                    match tokio::fs::metadata(&local_path).await {
+                                        Ok(metadata) => {
+                                            if metadata.len() == 0 {
+                                                error!("Downloaded empty file for {} on attempt {}", ip, attempt + 1);
+                                                last_error = Some(Error::FileTransferError(format!(
+                                                    "Downloaded empty file from {}",
+                                                    ip
+                                                )));
+                                            } else {
+                                                info!(
+                                                    "Successfully downloaded {}B from {}{}",
+                                                    metadata.len(),
+                                                    ip,
+                                                    if attempt > 0 { format!(" on attempt {}/3", attempt + 1) } else { String::new() }
+                                                );
+                                                result = Some(Ok(()));
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "Failed to verify downloaded file for {} on attempt {}: {}",
+                                                ip, attempt + 1, e
                                             );
-                                            Ok(())
+                                            last_error = Some(Error::FileTransferError(format!(
+                                                "Failed to verify downloaded file: {}",
+                                                e
+                                            )));
                                         }
                                     }
-                                    Err(e) => {
-                                        error!(
-                                            "Failed to verify downloaded file for {}: {}",
-                                            ip, e
-                                        );
-                                        Err(Error::FileTransferError(format!(
-                                            "Failed to verify downloaded file: {}",
-                                            e
-                                        )))
-                                    }
+                                }
+                                Err(e) => {
+                                    error!("Download failed for {} on attempt {}: {}", ip, attempt + 1, e);
+                                    last_error = Some(e);
                                 }
                             }
-                            Err(e) => {
-                                error!("Download failed for {}: {}", ip, e);
-                                Err(e)
-                            }
-                        };
+                        }
+
+                        let result = result.unwrap_or_else(|| Err(last_error.unwrap()));
 
                         HostOperationResult {
                             ip: ip.to_string(),
@@ -375,10 +523,37 @@ impl Communicator {
                     let dest_clone = destination.clone();
                     async move {
                         debug!("Starting transfer for {}", ip);
+
+                        // Retry file transfer up to 3 times with exponential backoff
+                        let mut last_error = None;
+                        for attempt in 0..3 {
+                            if attempt > 0 {
+                                let delay = Duration::from_secs(2u64.pow(attempt));
+                                debug!("Retrying file transfer to {} (attempt {}/3) after {}s", ip, attempt + 1, delay.as_secs());
+                                tokio::time::sleep(delay).await;
+                            }
+
+                            match client.transfer_file(Arc::clone(&file_clone), dest_clone.clone()).await {
+                                Ok(_) => {
+                                    if attempt > 0 {
+                                        info!("File transfer to {} succeeded on attempt {}/3", ip, attempt + 1);
+                                    }
+                                    return HostOperationResult {
+                                        ip: ip.to_string(),
+                                        os: *os,
+                                        result: Ok(()),
+                                    };
+                                }
+                                Err(e) => {
+                                    last_error = Some(e);
+                                }
+                            }
+                        }
+
                         HostOperationResult {
                             ip: ip.to_string(),
                             os: *os,
-                            result: client.transfer_file(file_clone, dest_clone).await,
+                            result: Err(last_error.unwrap()),
                         }
                     }
                 }),
