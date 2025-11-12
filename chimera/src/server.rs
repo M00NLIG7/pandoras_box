@@ -244,7 +244,26 @@ impl FileServer {
                         info!("Shutdown flag detected during periodic check, stopping server");
                         break;
                     }
-                    connection_tasks.retain(|task| !task.is_finished());
+
+                    // Separate finished and running tasks to check for panics
+                    let (finished, running): (Vec<_>, Vec<_>) = connection_tasks
+                        .into_iter()
+                        .partition(|task| task.is_finished());
+
+                    // Check finished tasks for panics
+                    for task in finished {
+                        // Task is finished, try to get result to detect panics
+                        // Note: This will consume the task, but it's finished anyway
+                        if let Err(e) = task.await {
+                            if e.is_panic() {
+                                error!("Connection handler task panicked: {:?}", e);
+                            } else if e.is_cancelled() {
+                                debug!("Connection handler task was cancelled");
+                            }
+                        }
+                    }
+
+                    connection_tasks = running;
                 }
             }
         }
@@ -262,9 +281,6 @@ impl FileServer {
         self.cleanup_windows_firewall().await?;
 
         info!("File server shutdown complete");
-        std::process::exit(0);
-
-        #[allow(unreachable_code)]
         Ok(())
     }
 }
@@ -356,9 +372,11 @@ async fn serve_file(
                         shutdown_flag.store(true, Ordering::SeqCst);
                     }
 
-                    // Try to delete the file, but don't require it to succeed
+                    // Try to delete the file after serving
                     if let Err(e) = tokio::fs::remove_file(&full_path).await {
-                        error!("Failed to delete file after serving: {}", e);
+                        error!("CRITICAL: Failed to delete file after serving: {} - File will remain on disk at {:?}", e, full_path);
+                        warn!("Accumulated file retention may cause disk space exhaustion");
+                        // Still return successful response as file was served
                     } else {
                         info!("Successfully served and deleted file: {}", path);
                     }

@@ -98,8 +98,17 @@ impl Subnet {
     }
 
     fn iter_hosts(&self) -> impl Iterator<Item = Ipv4AddrExt> + '_ {
-        let start = u32::from(*self.ip) & !((1 << (32 - self.mask)) - 1);
-        let end = start | ((1 << (32 - self.mask)) - 1);
+        // Prevent overflow: when mask = 0, shift would be 32 which is undefined behavior
+        // For /0, iterate entire IPv4 space (impractical, but safe)
+        if self.mask == 0 {
+            warn!("Subnet mask /0 covers entire IPv4 space (4.3 billion addresses), limiting iteration");
+            // Return empty iterator for /0 to prevent DoS
+            return (0..0).map(|ip| Ipv4AddrExt(Ipv4Addr::from(ip)));
+        }
+
+        let shift_amount = 32 - self.mask;
+        let start = u32::from(*self.ip) & !((1u32 << shift_amount) - 1);
+        let end = start | ((1u32 << shift_amount) - 1);
         (start + 1..end).map(|ip| Ipv4AddrExt(Ipv4Addr::from(ip)))
     }
 }
@@ -114,7 +123,17 @@ impl TryFrom<&str> for Subnet {
         }
 
         let ip: Ipv4AddrExt = parts[0].parse()?;
-        let mask = parts[1].parse()?;
+        let mask: u8 = parts[1].parse()
+            .map_err(|_| Self::Error::ArgumentError(format!("Invalid CIDR mask: {}", parts[1])))?;
+
+        // Validate mask is in valid range for IPv4 (0-32)
+        if mask > 32 {
+            return Err(Self::Error::ArgumentError(format!(
+                "CIDR mask {} is out of range (0-32)",
+                mask
+            )));
+        }
+
         Ok(Self { ip, mask })
     }
 }
