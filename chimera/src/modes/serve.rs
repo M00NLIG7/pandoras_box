@@ -168,30 +168,42 @@ impl ServeMode {
         let server = FileServer::new(output_dir.clone(), port);
 
         // Start a monitoring task
-        let monitor_handle = spawn(async move {
+        let monitor_task = spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
                 // Check if output directory is empty
                 if let Ok(entries) = std::fs::read_dir(&output_dir) {
                     if entries.count() == 0 {
-                        info!("Output directory is empty, shutting down server");
-                        process::exit(0);
+                        info!("Output directory is empty, triggering shutdown");
+                        return;
                     }
                 }
             }
         });
 
-        // Run the server
-        match server.serve().await {
-            Ok(_) => ExecutionResult::new(
-                ExecutionMode::Serve,
-                true,
-                format!("Server completed successfully on port {}", port),
-            ),
-            Err(e) => {
-                error!("Server failed: {}", e);
-                ExecutionResult::new(ExecutionMode::Serve, false, format!("Server failed: {}", e))
+        // Run the server and monitor task concurrently
+        tokio::select! {
+            result = server.serve() => {
+                match result {
+                    Ok(_) => ExecutionResult::new(
+                        ExecutionMode::Serve,
+                        true,
+                        format!("Server completed successfully on port {}", port),
+                    ),
+                    Err(e) => {
+                        error!("Server failed: {}", e);
+                        ExecutionResult::new(ExecutionMode::Serve, false, format!("Server failed: {}", e))
+                    }
+                }
+            },
+            _ = monitor_task => {
+                info!("Monitor task detected empty directory, shutting down gracefully");
+                ExecutionResult::new(
+                    ExecutionMode::Serve,
+                    true,
+                    "Server shutdown due to empty output directory".to_string(),
+                )
             }
         }
     }

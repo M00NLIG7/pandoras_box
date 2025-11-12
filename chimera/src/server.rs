@@ -183,16 +183,18 @@ impl FileServer {
         let root_dir = Arc::clone(&self.root_dir);
         let shutdown_flag = Arc::clone(&self.shutdown_flag);
 
-        let mut connection_tasks = Vec::new();
+        const MAX_CONCURRENT_TASKS: usize = 1000;
+        let mut connection_tasks = Vec::with_capacity(MAX_CONCURRENT_TASKS);
 
         loop {
-            if self.shutdown_flag.load(Ordering::SeqCst) {
-                info!("Shutdown flag detected, stopping server");
-                break;
-            }
-
             tokio::select! {
                 accept_result = listener.accept() => {
+                    // Check shutdown flag immediately after accepting
+                    if self.shutdown_flag.load(Ordering::SeqCst) {
+                        info!("Shutdown flag detected after accept, stopping server");
+                        break;
+                    }
+
                     match accept_result {
                         Ok((stream, _)) => {
                             let io = TokioIo::new(stream);
@@ -214,6 +216,22 @@ impl FileServer {
                             });
 
                             connection_tasks.push(handle);
+
+                            // Enforce task limit to prevent memory leak
+                            if connection_tasks.len() >= MAX_CONCURRENT_TASKS {
+                                warn!("Reached max concurrent tasks ({}), cleaning up finished tasks", MAX_CONCURRENT_TASKS);
+                                connection_tasks.retain(|task| !task.is_finished());
+
+                                // If still at limit after cleanup, wait for some to finish
+                                if connection_tasks.len() >= MAX_CONCURRENT_TASKS {
+                                    warn!("Still at task limit, waiting for tasks to complete");
+                                    while connection_tasks.len() > MAX_CONCURRENT_TASKS / 2 {
+                                        if let Some(task) = connection_tasks.pop() {
+                                            let _ = task.await;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             error!("Failed to accept connection: {:?}", e);
@@ -221,7 +239,11 @@ impl FileServer {
                     }
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                    // Cleanup finished tasks
+                    // Check shutdown flag periodically and cleanup finished tasks
+                    if self.shutdown_flag.load(Ordering::SeqCst) {
+                        info!("Shutdown flag detected during periodic check, stopping server");
+                        break;
+                    }
                     connection_tasks.retain(|task| !task.is_finished());
                 }
             }
