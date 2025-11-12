@@ -689,13 +689,25 @@ impl Orchestrator {
         };
 
         let start = std::time::Instant::now();
-        let _ = self.append_to_hosts_file(&communicator, OS::Unix).await;
+        let unix_hosts_results = self.append_to_hosts_file(&communicator, OS::Unix).await;
+        for result in &unix_hosts_results {
+            match &result.result {
+                Ok(_) => info!("Successfully appended Unix hosts file on {}", result.ip),
+                Err(e) => error!("Failed to append Unix hosts file on {}: {}", result.ip, e),
+            }
+        }
         info!("Appended Unix hosts file in {}s", start.elapsed().as_secs());
 
         let start = std::time::Instant::now();
-        let _ = self.append_to_hosts_file(&communicator, OS::Windows).await;
+        let windows_hosts_results = self.append_to_hosts_file(&communicator, OS::Windows).await;
+        for result in &windows_hosts_results {
+            match &result.result {
+                Ok(_) => info!("Successfully appended Windows hosts file on {}", result.ip),
+                Err(e) => error!("Failed to append Windows hosts file on {}: {}", result.ip, e),
+            }
+        }
         info!("Appended Windows hosts file in {}s", start.elapsed().as_secs());
-        
+
         let start = std::time::Instant::now();
         let deployment_results = self.download_chimera(&communicator, host_map).await;
         info!("Downloaded Chimera in {}s", start.elapsed().as_secs());
@@ -842,13 +854,25 @@ impl Orchestrator {
         };
 
         let start = std::time::Instant::now();
-        let _ = self.append_to_hosts_file(&communicator, OS::Unix).await;
+        let unix_hosts_results = self.append_to_hosts_file(&communicator, OS::Unix).await;
+        for result in &unix_hosts_results {
+            match &result.result {
+                Ok(_) => info!("Successfully appended Unix hosts file on {}", result.ip),
+                Err(e) => error!("Failed to append Unix hosts file on {}: {}", result.ip, e),
+            }
+        }
         info!("Appended Unix hosts file in {}s", start.elapsed().as_secs());
 
         let start = std::time::Instant::now();
-        let _ = self.append_to_hosts_file(&communicator, OS::Windows).await;
+        let windows_hosts_results = self.append_to_hosts_file(&communicator, OS::Windows).await;
+        for result in &windows_hosts_results {
+            match &result.result {
+                Ok(_) => info!("Successfully appended Windows hosts file on {}", result.ip),
+                Err(e) => error!("Failed to append Windows hosts file on {}: {}", result.ip, e),
+            }
+        }
         info!("Appended Windows hosts file in {}s", start.elapsed().as_secs());
-        
+
         let start = std::time::Instant::now();
         let deployment_results = self.download_chimera(&communicator, host_map).await;
         info!("Downloaded Chimera in {}s", start.elapsed().as_secs());

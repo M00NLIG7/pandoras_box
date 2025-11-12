@@ -280,28 +280,52 @@ async fn main() {
             run_all_modes(&output_dir, magic_value).await;
         }
         Some(("inventory", _)) => {
-            let _ = run_inventory_mode(&output_dir).await;
+            let result = run_inventory_mode(&output_dir).await;
+            if !result.success {
+                error!("Inventory mode failed: {}", result.message);
+                std::process::exit(1);
+            }
         }
         Some(("credentials", sub_matches)) => {
             let magic_value = sub_matches
                 .get_one::<u32>("magic")
                 .copied()
                 .expect("Required argument");
-            let _ = run_credentials_mode(magic_value).await;
+            let result = run_credentials_mode(magic_value).await;
+            if !result.success {
+                error!("Credentials mode failed: {}", result.message);
+                std::process::exit(1);
+            }
         }
         Some(("baseline", _)) => {
-            let _ = run_baseline_mode().await;
+            let result = run_baseline_mode().await;
+            if !result.success {
+                error!("Baseline mode failed: {}", result.message);
+                std::process::exit(1);
+            }
         }
         Some(("update", _)) => {
-            let _ = run_update_mode().await;
+            let result = run_update_mode().await;
+            if !result.success {
+                error!("Update mode failed: {}", result.message);
+                std::process::exit(1);
+            }
         }
         Some(("serve", sub_matches)) => {
             let port = sub_matches.get_one::<u16>("port").copied().unwrap_or(44372);
-            let _ = run_serve_mode(port).await;
+            let result = run_serve_mode(port).await;
+            if !result.success {
+                error!("Serve mode failed: {}", result.message);
+                std::process::exit(1);
+            }
         }
         Some(("serve-internal", sub_matches)) => {
             let port = sub_matches.get_one::<u16>("port").copied().unwrap_or(44372);
-            let _ = run_serve_internal(port).await;
+            let result = run_serve_internal(port).await;
+            if !result.success {
+                error!("Serve-internal mode failed: {}", result.message);
+                std::process::exit(1);
+            }
         }
         _ => {}
     }
