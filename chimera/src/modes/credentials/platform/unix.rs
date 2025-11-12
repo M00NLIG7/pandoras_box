@@ -11,48 +11,69 @@ pub fn change_password(username: &str, new_password: &mut str) -> Result<()> {
         return Err(err);
     }
 
-    // Quick check for Kerberos using .output() which won't hang
-    let output = Command::new("passwd")
-        .arg(username)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()?;
-
-    let combined_output = format!(
-        "{}{}", 
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    ).to_lowercase();
-    
-    if combined_output.contains("kerberos") {
-        let err = Error::PasswordChange("Cannot change Kerberos-linked passwords".into());
-        err.log();
-        println!("Error: {:?}", err);
-        return Err(err);
+    // Check if Kerberos is configured by checking for krb5.conf
+    if std::path::Path::new("/etc/krb5.conf").exists() {
+        log::warn!("Kerberos configuration detected, password change may fail");
     }
 
-    // Regular password change
+    // Try chpasswd first (works without prompting, requires root)
+    let chpasswd_result = Command::new("chpasswd")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    if let Ok(mut child) = chpasswd_result {
+        if let Some(mut stdin) = child.stdin.take() {
+            // chpasswd format: username:password
+            let _ = stdin.write_all(format!("{}:{}\n", username, new_password).as_bytes());
+        }
+
+        match child.wait() {
+            Ok(status) if status.success() => {
+                new_password.zeroize();
+                log::info!("Successfully changed password for user: {} using chpasswd", username);
+                return Ok(());
+            }
+            _ => {
+                log::debug!("chpasswd failed, falling back to passwd command");
+            }
+        }
+    }
+
+    // Fallback to passwd command (interactive)
     let mut child = Command::new("passwd")
         .arg(username)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(format!("{}\n{}\n", new_password, new_password).as_bytes())?;
+        // Some systems ask for old password (current user), some don't (root changing others)
+        // Send password 3 times to cover all cases: old (if asked), new, confirm
+        let _ = stdin.write_all(format!("{}\n{}\n{}\n", new_password, new_password, new_password).as_bytes());
     }
 
-    let status = child.wait()?;
+    let output = child.wait_with_output()?;
+    let combined_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
     new_password.zeroize();
 
-    if !status.success() {
-        let err = Error::PasswordChange("Password change failed".into());
-        err.log();
-        println!("Error: {:?}", err);
-        Err(err)
-    } else {
+    if output.status.success() {
         log::info!("Successfully changed password for user: {}", username);
         Ok(())
+    } else {
+        let err = if combined_output.to_lowercase().contains("kerberos") {
+            Error::PasswordChange("Cannot change Kerberos-linked passwords".into())
+        } else {
+            Error::PasswordChange(format!("Password change failed: {}", combined_output))
+        };
+        err.log();
+        Err(err)
     }
 }

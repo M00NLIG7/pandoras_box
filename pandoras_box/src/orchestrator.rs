@@ -188,7 +188,16 @@ impl NetworkManager {
         let (successful_configs, successful_hosts): (Vec<_>, Vec<_>) = config_results
             .into_iter()
             .filter_map(|(host, config_result)| match config_result {
-                Ok(config) => Some(((host.ip.parse().expect("Invalid IP"), config), host)), // Now includes IP in the tuple
+                Ok(config) => {
+                    // Parse IP address, skip if invalid
+                    match host.ip.parse() {
+                        Ok(ip_addr) => Some(((ip_addr, config), host)),
+                        Err(e) => {
+                            error!("Failed to parse IP address for {}: {}", host.ip, e);
+                            None
+                        }
+                    }
+                }
                 Err(e) => {
                     warn!("Failed to create config for {}: {}", host.ip, e);
                     None
