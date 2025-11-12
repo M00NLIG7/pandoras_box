@@ -4,7 +4,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -183,16 +183,18 @@ impl FileServer {
         let root_dir = Arc::clone(&self.root_dir);
         let shutdown_flag = Arc::clone(&self.shutdown_flag);
 
-        let mut connection_tasks = Vec::new();
+        const MAX_CONCURRENT_TASKS: usize = 1000;
+        let mut connection_tasks = Vec::with_capacity(MAX_CONCURRENT_TASKS);
 
         loop {
-            if self.shutdown_flag.load(Ordering::SeqCst) {
-                info!("Shutdown flag detected, stopping server");
-                break;
-            }
-
             tokio::select! {
                 accept_result = listener.accept() => {
+                    // Check shutdown flag immediately after accepting
+                    if self.shutdown_flag.load(Ordering::SeqCst) {
+                        info!("Shutdown flag detected after accept, stopping server");
+                        break;
+                    }
+
                     match accept_result {
                         Ok((stream, _)) => {
                             let io = TokioIo::new(stream);
@@ -214,6 +216,22 @@ impl FileServer {
                             });
 
                             connection_tasks.push(handle);
+
+                            // Enforce task limit to prevent memory leak
+                            if connection_tasks.len() >= MAX_CONCURRENT_TASKS {
+                                warn!("Reached max concurrent tasks ({}), cleaning up finished tasks", MAX_CONCURRENT_TASKS);
+                                connection_tasks.retain(|task| !task.is_finished());
+
+                                // If still at limit after cleanup, wait for some to finish
+                                if connection_tasks.len() >= MAX_CONCURRENT_TASKS {
+                                    warn!("Still at task limit, waiting for tasks to complete");
+                                    while connection_tasks.len() > MAX_CONCURRENT_TASKS / 2 {
+                                        if let Some(task) = connection_tasks.pop() {
+                                            let _ = task.await;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             error!("Failed to accept connection: {:?}", e);
@@ -221,8 +239,31 @@ impl FileServer {
                     }
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                    // Cleanup finished tasks
-                    connection_tasks.retain(|task| !task.is_finished());
+                    // Check shutdown flag periodically and cleanup finished tasks
+                    if self.shutdown_flag.load(Ordering::SeqCst) {
+                        info!("Shutdown flag detected during periodic check, stopping server");
+                        break;
+                    }
+
+                    // Separate finished and running tasks to check for panics
+                    let (finished, running): (Vec<_>, Vec<_>) = connection_tasks
+                        .into_iter()
+                        .partition(|task| task.is_finished());
+
+                    // Check finished tasks for panics
+                    for task in finished {
+                        // Task is finished, try to get result to detect panics
+                        // Note: This will consume the task, but it's finished anyway
+                        if let Err(e) = task.await {
+                            if e.is_panic() {
+                                error!("Connection handler task panicked: {:?}", e);
+                            } else if e.is_cancelled() {
+                                debug!("Connection handler task was cancelled");
+                            }
+                        }
+                    }
+
+                    connection_tasks = running;
                 }
             }
         }
@@ -240,9 +281,6 @@ impl FileServer {
         self.cleanup_windows_firewall().await?;
 
         info!("File server shutdown complete");
-        std::process::exit(0);
-
-        #[allow(unreachable_code)]
         Ok(())
     }
 }
@@ -334,9 +372,11 @@ async fn serve_file(
                         shutdown_flag.store(true, Ordering::SeqCst);
                     }
 
-                    // Try to delete the file, but don't require it to succeed
+                    // Try to delete the file after serving
                     if let Err(e) = tokio::fs::remove_file(&full_path).await {
-                        error!("Failed to delete file after serving: {}", e);
+                        error!("CRITICAL: Failed to delete file after serving: {} - File will remain on disk at {:?}", e, full_path);
+                        warn!("Accumulated file retention may cause disk space exhaustion");
+                        // Still return successful response as file was served
                     } else {
                         info!("Successfully served and deleted file: {}", path);
                     }

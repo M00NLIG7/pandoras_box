@@ -241,7 +241,7 @@ impl NetworkManager {
             return Err(Error::NoSSHPort);
         }
 
-        match SSHConfig::password("root", password, socket_addr, Duration::from_secs(300)).await {
+        match SSHConfig::password("root", password, socket_addr, Duration::from_secs(60)).await {
             Ok(config) => {
                 let updated_host = if host.os == OS::Unknown {
                     // Create new Host with Unix OS
@@ -287,7 +287,7 @@ impl NetworkManager {
             "Administrator",
             password,
             socket_addr,
-            Duration::from_secs(500),
+            Duration::from_secs(60),
         )
         .await
         .map(windows_config)
@@ -299,7 +299,7 @@ impl NetworkManager {
             "Administrator",
             password,
             &host.ip,
-            Duration::from_secs(500),
+            Duration::from_secs(60),
         )
         .await
         .map(windows_config)
@@ -317,10 +317,11 @@ async fn fetch_with_retry(
     ip: &str,
     uri_path: &str,
 ) -> Result<()> {
-    let mut attempt = 0;
     let mut delay_ms = INITIAL_DELAY_MS;
+    const MAX_DELAY_MS: u64 = 30000; // Cap at 30 seconds
+    let mut last_error = None;
 
-    loop {
+    for attempt in 0..=MAX_RETRIES {
         match client.get(url).send().await {
             Ok(response) => {
                 match response.text().await {
@@ -331,26 +332,34 @@ async fn fetch_with_retry(
                         return Ok(());
                     },
                     Err(e) => {
+                        error!("Failed to read response from {} on attempt {}: {}", ip, attempt + 1, e);
+                        last_error = Some(format!("Failed to read response: {}", e));
                         if attempt >= MAX_RETRIES {
-                            error!("Failed to read response from {} after {} attempts: {}", ip, attempt + 1, e);
-                            return Err(Error::CommandError(format!("Failed to read response: {}", e)));
+                            break;
                         }
                     }
                 }
             },
             Err(e) => {
+                error!("Failed to fetch {} from {} on attempt {}: {}", uri_path, ip, attempt + 1, e);
+                last_error = Some(format!("Failed to fetch file: {}", e));
                 if attempt >= MAX_RETRIES {
-                    error!("Failed to fetch {} from {} after {} attempts: {}", uri_path, ip, attempt + 1, e);
-                    return Err(Error::CommandError(format!("Failed to fetch file: {}", e)));
+                    break;
                 }
             }
         }
 
-        attempt += 1;
-        info!("Retry attempt {} for {} after {}s delay", attempt, ip, delay_ms);
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        delay_ms *= 2; // Exponential backoff
+        if attempt < MAX_RETRIES {
+            info!("Retry attempt {} for {} after {}ms delay", attempt + 1, ip, delay_ms);
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            delay_ms = std::cmp::min(delay_ms * 2, MAX_DELAY_MS); // Capped exponential backoff
+        }
     }
+
+    // If we get here, all retries failed
+    Err(Error::CommandError(
+        last_error.unwrap_or_else(|| "Unknown error during fetch".to_string())
+    ))
 }
 
 pub struct Orchestrator {
@@ -439,8 +448,24 @@ impl Orchestrator {
 
     fn generate_perl_url_parts(url: &str) -> (String, String) {
         let url_parts: Vec<&str> = url.split("://").nth(1).unwrap_or("").split('/').collect();
-        let host = url_parts[0].to_string();
-        let path = url_parts[1..].join("/");
+
+        // Bounds check to prevent panic on malformed URLs
+        if url_parts.is_empty() {
+            warn!("Malformed URL provided: {}", url);
+            return (String::new(), String::new());
+        }
+
+        let host = url_parts.get(0).unwrap_or(&"").to_string();
+        let path = if url_parts.len() > 1 {
+            url_parts[1..].join("/")
+        } else {
+            String::new()
+        };
+
+        // Basic validation to prevent shell injection and ensure command stability
+        let host = host.replace('\'', "").replace('"', "").replace('`', "").replace('$', "").replace(';', "");
+        let path = path.replace('\'', "").replace('"', "").replace('`', "").replace('$', "").replace(';', "");
+
         (host, path)
     }
 
@@ -526,6 +551,12 @@ impl Orchestrator {
            .collect();
 
        if successful_mkdir_ips.is_empty() {
+           error!("Failed to create temp directory on all Windows hosts");
+           for result in mkdir_results.iter() {
+               if let Err(e) = &result.result {
+                   error!("mkdir failed for {}: {}", result.ip, e);
+               }
+           }
            return vec![];
        }
 
@@ -550,11 +581,14 @@ impl Orchestrator {
         let hosts_file = match os {
             OS::Windows => "C:\\Windows\\System32\\drivers\\etc\\hosts",
             OS::Unix => "/etc/hosts",
-            OS::Unknown => return Vec::new(),
+            OS::Unknown => {
+                error!("Cannot append to hosts file for unknown OS type");
+                return Vec::new();
+            }
         };
 
         let mut final_results = Vec::new();
-        
+
         match os {
             OS::Unix => {
                 let command = format!(
@@ -570,7 +604,9 @@ impl Orchestrator {
                );
                final_results.extend(communicator.exec_by_os(&cmd!(command), os).await);
             },
-            OS::Unknown => (),
+            OS::Unknown => {
+                warn!("Skipping hosts file operation for unknown OS type");
+            }
 
                 }
 
@@ -746,8 +782,16 @@ impl Orchestrator {
                     // print stdout
                     match &result.result {
                         Ok(output) => {
-                            let stdout = String::from_utf8_lossy(&output.stdout);
-                            info!("Chimera output: {}", stdout);
+                            match String::from_utf8(output.stdout.clone()) {
+                                Ok(stdout) => {
+                                    info!("Chimera output: {}", stdout);
+                                }
+                                Err(_) => {
+                                    warn!("Chimera output contains invalid UTF-8 for {}, showing lossy conversion", result.ip);
+                                    let stdout = String::from_utf8_lossy(&output.stdout);
+                                    info!("Chimera output (lossy): {}", stdout);
+                                }
+                            }
                         }
                         Err(e) => error!("Failed to execute Chimera on {}: {}", result.ip, e),
                     }
@@ -775,6 +819,15 @@ impl Orchestrator {
             connected_hosts.len(),
             deployed_hosts.len()
         );
+
+        // Clean up all connections
+        info!("Cleaning up connections to all hosts");
+        if let Some(communicator) = self.network_manager.get_communicator() {
+            let disconnect_results = communicator.disconnect_all().await;
+            let successful_disconnects = disconnect_results.iter().filter(|r| r.result.is_ok()).count();
+            info!("Disconnected from {}/{} hosts", successful_disconnects, disconnect_results.len());
+        }
+
         Ok(())
     }
 
@@ -945,6 +998,15 @@ impl Orchestrator {
             connected_hosts.len(),
             deployed_hosts.len()
         );
+
+        // Clean up all connections
+        info!("Cleaning up connections to all hosts");
+        if let Some(communicator) = self.network_manager.get_communicator() {
+            let disconnect_results = communicator.disconnect_all().await;
+            let successful_disconnects = disconnect_results.iter().filter(|r| r.result.is_ok()).count();
+            info!("Disconnected from {}/{} hosts", successful_disconnects, disconnect_results.len());
+        }
+
         Ok(())
     }
 

@@ -69,7 +69,11 @@ where
     }
 
     fn get_ip(&self) -> IpAddr {
-        unimplemented!("Implementation would depend on Client struct")
+        // Note: IP address is tracked separately in Communicator.clients Vec<(OS, IpAddr, Arc<dyn ClientWrapper>)>
+        // This method is not currently used, but must be implemented for the trait.
+        // Return placeholder to prevent panic if ever called.
+        warn!("get_ip() called on ClientWrapper - IP is tracked in Communicator, not Client");
+        IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0))
     }
 }
 
@@ -90,7 +94,9 @@ impl OSConfig {
                     let mut last_error = None;
                     for attempt in 0..3 {
                         if attempt > 0 {
-                            let delay = Duration::from_secs(2u64.pow(attempt));
+                            // Use checked_pow to prevent overflow for defensive coding
+                            let delay_secs = 2u64.checked_pow(attempt).unwrap_or(60);
+                            let delay = Duration::from_secs(delay_secs);
                             debug!("Retrying Winexe connection to {} (attempt {}/3) after {}s", ip, attempt + 1, delay.as_secs());
                             tokio::time::sleep(delay).await;
                         }
@@ -110,7 +116,7 @@ impl OSConfig {
 
                     Err(Error::CommunicatorError(format!(
                         "Winexe connection failed for {} after 3 attempts: {}",
-                        ip, last_error.unwrap()
+                        ip, last_error.unwrap_or_else(|| Error::CommunicatorError("Unknown error".to_string()))
                     )))
                 },
                 Either::Right(ssh_config) => {
@@ -163,7 +169,7 @@ impl OSConfig {
                                     Err(e) if attempt == 1 => {
                                         return Err(Error::CommunicatorError(format!(
                                             "Both SSH and Winexe failed for {}: SSH error: {}, Winexe error: {}",
-                                            ip, ssh_last_error.unwrap(), e
+                                            ip, ssh_last_error.unwrap_or_else(|| Error::CommunicatorError("Unknown SSH error".to_string())), e
                                         )));
                                     }
                                     _ => {}
@@ -172,7 +178,7 @@ impl OSConfig {
 
                             Err(Error::CommunicatorError(format!(
                                 "Both SSH and Winexe failed for {}: SSH error: {}",
-                                ip, ssh_last_error.unwrap()
+                                ip, ssh_last_error.unwrap_or_else(|| Error::CommunicatorError("Unknown SSH error".to_string()))
                             )))
                         }
                         Err(e) => Err(Error::CommunicatorError(format!(
@@ -187,7 +193,9 @@ impl OSConfig {
                 let mut last_error = None;
                 for attempt in 0..3 {
                     if attempt > 0 {
-                        let delay = Duration::from_secs(2u64.pow(attempt));
+                        // Use checked_pow to prevent overflow for defensive coding
+                        let delay_secs = 2u64.checked_pow(attempt).unwrap_or(60);
+                        let delay = Duration::from_secs(delay_secs);
                         debug!("Retrying SSH connection to Unix host {} (attempt {}/3) after {}s", ip, attempt + 1, delay.as_secs());
                         tokio::time::sleep(delay).await;
                     }
@@ -207,7 +215,7 @@ impl OSConfig {
 
                 Err(Error::CommunicatorError(format!(
                     "SSH connection failed for {} after 3 attempts: {}",
-                    ip, last_error.unwrap()
+                    ip, last_error.unwrap_or_else(|| Error::CommunicatorError("Unknown error".to_string()))
                 )))
             },
             OSConfig::Unknown(config) => {
@@ -235,7 +243,7 @@ impl OSConfig {
 
                 Err(Error::CommunicatorError(format!(
                     "Connection failed for unknown OS at {} after 2 attempts: {}",
-                    ip, last_error.unwrap()
+                    ip, last_error.unwrap_or_else(|| Error::CommunicatorError("Unknown error".to_string()))
                 )))
             },
         }
@@ -301,7 +309,8 @@ impl Communicator {
         cmd: &Command,
         os_type: OS,
     ) -> Vec<HostOperationResult<CommandOutput>> {
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Removed unconditional 1-second delay for better performance
+        // Network latency provides natural pacing for parallel operations
 
         join_all(
             self.clients
@@ -335,7 +344,9 @@ impl Communicator {
                                         || attempt == 0) {
 
                                     debug!("Attempting command with sudo on {}", ip);
-                                    let sudo_cmd = format!("sudo {}", cmd.to_string());
+                                    // Wrap command in sh -c with proper quoting to preserve escaping
+                                    let original_cmd = cmd.to_string();
+                                    let sudo_cmd = format!("sudo sh -c '{}'", original_cmd.replace('\'', "'\\''"));
                                     let cmd = &cmd!(sudo_cmd);
 
                                     match client.exec(cmd).await {
@@ -357,7 +368,13 @@ impl Communicator {
                     HostOperationResult {
                         ip: ip.to_string(),
                         os: *os,
-                        result: result.unwrap_or_else(|| Err(last_error.unwrap())),
+                        result: result.unwrap_or_else(|| {
+                            Err(last_error.unwrap_or_else(|| {
+                                Error::CommunicatorError(
+                                    format!("Command execution failed on {} with no error details", ip)
+                                )
+                            }))
+                        }),
                     }
                 }),
         )
@@ -393,7 +410,7 @@ impl Communicator {
                     async move {
                         let local_path = format!("{}{}", local_dir, ip);
 
-                        // First verify the remote file
+                        // First verify the remote file with retries for consistency
                         let verify_cmd = match os {
                             OS::Windows => format!("cmd.exe /c dir \"{}\"", dest_clone),
                             OS::Unix => format!("ls -l \"{}\"", dest_clone),
@@ -406,33 +423,66 @@ impl Communicator {
                             }
                         };
 
-                        match client.exec(&rustrc::cmd!(verify_cmd)).await {
-                            Ok(output) => {
-                                let output_str = String::from_utf8_lossy(&output.stdout);
-                                debug!("File verification output for {}: {}", ip, output_str);
+                        let mut verify_success = false;
+                        for verify_attempt in 0..3 {
+                            if verify_attempt > 0 {
+                                let delay = Duration::from_secs(2);
+                                debug!("Retrying file verification on {} (attempt {}/3) after {}s", ip, verify_attempt + 1, delay.as_secs());
+                                tokio::time::sleep(delay).await;
+                            }
 
-                                if output_str.contains("not found")
-                                    || output_str.contains("No such file")
-                                {
-                                    error!("Remote file not found on {}: {}", ip, dest_clone);
-                                    return HostOperationResult {
-                                        ip: ip.to_string(),
-                                        os: *os,
-                                        result: Err(Error::FileTransferError(format!(
-                                            "Remote file not found on {}",
-                                            ip
-                                        ))),
+                            match client.exec(&rustrc::cmd!(verify_cmd)).await {
+                                Ok(output) => {
+                                    let output_str = match String::from_utf8(output.stdout.clone()) {
+                                        Ok(s) => s,
+                                        Err(_) => {
+                                            warn!("File verification output contains invalid UTF-8 for {}", ip);
+                                            String::from_utf8_lossy(&output.stdout).to_string()
+                                        }
                                     };
+                                    debug!("File verification output for {}: {}", ip, output_str);
+
+                                    if output_str.contains("not found")
+                                        || output_str.contains("No such file")
+                                    {
+                                        if verify_attempt >= 2 {
+                                            error!("Remote file not found on {} after {} attempts: {}", ip, verify_attempt + 1, dest_clone);
+                                            return HostOperationResult {
+                                                ip: ip.to_string(),
+                                                os: *os,
+                                                result: Err(Error::FileTransferError(format!(
+                                                    "Remote file not found on {}",
+                                                    ip
+                                                ))),
+                                            };
+                                        }
+                                    } else {
+                                        verify_success = true;
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    if verify_attempt >= 2 {
+                                        error!("Failed to verify file on {} after {} attempts: {}", ip, verify_attempt + 1, e);
+                                        return HostOperationResult {
+                                            ip: ip.to_string(),
+                                            os: *os,
+                                            result: Err(e),
+                                        };
+                                    }
                                 }
                             }
-                            Err(e) => {
-                                error!("Failed to verify file on {}: {}", ip, e);
-                                return HostOperationResult {
-                                    ip: ip.to_string(),
-                                    os: *os,
-                                    result: Err(e),
-                                };
-                            }
+                        }
+
+                        if !verify_success {
+                            return HostOperationResult {
+                                ip: ip.to_string(),
+                                os: *os,
+                                result: Err(Error::FileTransferError(format!(
+                                    "Failed to verify file on {} after retries",
+                                    ip
+                                ))),
+                            };
                         }
 
                         info!("Downloading from {} to {}", dest_clone, local_path);
@@ -443,7 +493,9 @@ impl Communicator {
 
                         for attempt in 0..3 {
                             if attempt > 0 {
-                                let delay = Duration::from_secs(2u64.pow(attempt));
+                                // Use checked_pow to prevent overflow for defensive coding
+                                let delay_secs = 2u64.checked_pow(attempt).unwrap_or(60);
+                                let delay = Duration::from_secs(delay_secs);
                                 debug!("Retrying file download from {} (attempt {}/3) after {}s", ip, attempt + 1, delay.as_secs());
                                 tokio::time::sleep(delay).await;
                             }
@@ -492,7 +544,13 @@ impl Communicator {
                             }
                         }
 
-                        let result = result.unwrap_or_else(|| Err(last_error.unwrap()));
+                        let result = result.unwrap_or_else(|| {
+                            Err(last_error.unwrap_or_else(|| {
+                                Error::FileTransferError(
+                                    format!("File download failed on {} with no error details", ip)
+                                )
+                            }))
+                        });
 
                         HostOperationResult {
                             ip: ip.to_string(),
@@ -553,7 +611,11 @@ impl Communicator {
                         HostOperationResult {
                             ip: ip.to_string(),
                             os: *os,
-                            result: Err(last_error.unwrap()),
+                            result: Err(last_error.unwrap_or_else(|| {
+                                Error::FileTransferError(
+                                    format!("File transfer failed on {} with no error details", ip)
+                                )
+                            })),
                         }
                     }
                 }),
