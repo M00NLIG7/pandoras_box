@@ -241,7 +241,7 @@ impl NetworkManager {
             return Err(Error::NoSSHPort);
         }
 
-        match SSHConfig::password("root", password, socket_addr, Duration::from_secs(60)).await {
+        match SSHConfig::password("root", password, socket_addr, Duration::from_secs(180)).await {
             Ok(config) => {
                 let updated_host = if host.os == OS::Unknown {
                     // Create new Host with Unix OS
@@ -287,7 +287,7 @@ impl NetworkManager {
             "Administrator",
             password,
             socket_addr,
-            Duration::from_secs(60),
+            Duration::from_secs(180),
         )
         .await
         .map(windows_config)
