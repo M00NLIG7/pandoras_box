@@ -556,16 +556,41 @@ impl Orchestrator {
     async fn download_chimera(&self, communicator: &Communicator, host_map: HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)>{
         let mut final_results = Vec::new();
 
-        // Run Windows and Unix downloads concurrently
-        // Critical: chmod must happen immediately after Unix download completes to keep SSH alive
+        // Run Windows and Unix downloads + execution concurrently
+        // Critical: Each OS group must execute immediately after download to prevent SSH timeout
         let (win_results, unix_results) = tokio::join!(
-            self.download_chimera_win(communicator, &host_map),
             async {
-                // Download on Unix hosts
+                // Windows: download, then execute immediately
+                let download_results = self.download_chimera_win(communicator, &host_map).await;
+
+                // Get successfully deployed Windows hosts
+                let deployed_windows: Vec<Arc<Host>> = download_results
+                    .iter()
+                    .filter_map(|(host, result)| {
+                        if result.is_ok() {
+                            Some(Arc::clone(host))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if !deployed_windows.is_empty() {
+                    // Wait 3 seconds for file system flush on Windows (especially DCs)
+                    info!("Waiting 3 seconds for Windows file system sync and security scans...");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+
+                    // Execute immediately while SSH is still active
+                    self.execute_chimera_modes_for_os(&deployed_windows, OS::Windows).await;
+                }
+
+                download_results
+            },
+            async {
+                // Unix: download, chmod, then execute immediately
                 let download_results = self.download_chimera_unix(communicator, &host_map).await;
 
                 // Immediately chmod while SSH connections are still active
-                // (waiting for Windows downloads to finish would cause SSH timeout)
                 let chmod_results = communicator.exec_by_os(&cmd!("chmod +x /tmp/chimera && ls -la /tmp/chimera"), OS::Unix).await;
                 for result in &chmod_results {
                     match &result.result {
@@ -581,6 +606,23 @@ impl Orchestrator {
                         }
                         Err(e) => error!("Failed to chmod chimera on {}: {}", result.ip, e),
                     }
+                }
+
+                // Get successfully deployed Unix hosts
+                let deployed_unix: Vec<Arc<Host>> = download_results
+                    .iter()
+                    .filter_map(|(host, result)| {
+                        if result.is_ok() {
+                            Some(Arc::clone(host))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if !deployed_unix.is_empty() {
+                    // Execute immediately while SSH is still active (no delay needed for Unix)
+                    self.execute_chimera_modes_for_os(&deployed_unix, OS::Unix).await;
                 }
 
                 download_results
@@ -801,43 +843,11 @@ impl Orchestrator {
             error!("No hosts successfully deployed");
             return Err(Error::CommandError("No successful deployments".into()));
         }
-        //let deployed_hosts = connected_hosts.clone();
 
-        // Wait for file system to flush and AV scans to complete (especially on DCs with strict policies)
-        info!("Waiting 3 seconds for file system sync and security scans...");
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Note: Execution already happened inside download_chimera() immediately after each OS group was ready
+        // This prevents SSH timeouts by executing as soon as downloads complete rather than waiting
 
-        let start = std::time::Instant::now();
-        // Step 4: Execute Chimera modes on successfully deployed hosts
-        let execution_results = self.execute_chimera_modes(&deployed_hosts).await;
-        for result in &execution_results {
-            match &result.result {
-                Ok(_) => {
-                    info!("Successfully executed Chimera on {}", &result.ip);
-                    // print stdout
-                    match &result.result {
-                        Ok(output) => {
-                            match String::from_utf8(output.stdout.clone()) {
-                                Ok(stdout) => {
-                                    info!("Chimera output: {}", stdout);
-                                }
-                                Err(_) => {
-                                    warn!("Chimera output contains invalid UTF-8 for {}, showing lossy conversion", result.ip);
-                                    let stdout = String::from_utf8_lossy(&output.stdout);
-                                    info!("Chimera output (lossy): {}", stdout);
-                                }
-                            }
-                        }
-                        Err(e) => error!("Failed to execute Chimera on {}: {}", result.ip, e),
-                    }
-
-                }
-                ,
-                Err(e) => error!("Failed to execute Chimera on {}: {}", result.ip, e),
-            }
-        }
-
-        info!("Executed Chimera modes in {}s", start.elapsed().as_secs());
+        info!("Chimera execution completed (ran immediately after each OS group deployed)");
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let start = std::time::Instant::now();
@@ -1006,21 +1016,9 @@ impl Orchestrator {
             return Err(Error::CommandError("No successful deployments".into()));
         }
 
-        // Wait for file system to flush and AV scans to complete (especially on DCs with strict policies)
-        info!("Waiting 3 seconds for file system sync and security scans...");
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Note: Execution already happened inside download_chimera() immediately after each OS group was ready
+        // This prevents SSH timeouts by executing as soon as downloads complete rather than waiting
 
-        let start = std::time::Instant::now();
-        // Step 4: Execute Chimera modes on successfully deployed hosts
-        let execution_results = self.execute_chimera_modes(&deployed_hosts).await;
-        for result in &execution_results {
-            match &result.result {
-                Ok(_) => info!("Successfully executed Chimera on {}", result.ip),
-                Err(e) => error!("Failed to execute Chimera on {}: {}", result.ip, e),
-            }
-        }
-
-        info!("Executed Chimera modes in {}s", start.elapsed().as_secs());
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let start = std::time::Instant::now();
@@ -1155,6 +1153,36 @@ impl Orchestrator {
         match mode.args {
             Some(args) => format!("{} {} {}", binary_path, mode.name, args),
             None => format!("{} {}", binary_path, mode.name),
+        }
+    }
+
+    async fn execute_chimera_modes_for_os(&self, hosts: &[Arc<Host>], os_filter: OS) {
+        let communicator = match self.network_manager.get_communicator() {
+            Some(comm) => comm,
+            None => {
+                error!("Communicator not initialized for OS {:?} execution", os_filter);
+                return;
+            }
+        };
+
+        for mode in CHIMERA_MODES.iter() {
+            info!("Executing {} mode on {:?} hosts {}", mode.name, os_filter, mode.args.unwrap_or(""));
+
+            let results = match os_filter {
+                OS::Windows => Self::execute_mode_windows(communicator, mode).await,
+                OS::Unix => Self::execute_mode_unix(communicator, mode).await,
+                OS::Unknown => {
+                    warn!("Skipping execution for Unknown OS type");
+                    continue;
+                }
+            };
+
+            for result in &results {
+                match &result.result {
+                    Ok(_) => info!("Successfully executed {} mode on {}", mode.name, result.ip),
+                    Err(e) => error!("Failed to execute {} mode on {}: {}", mode.name, result.ip, e),
+                }
+            }
         }
     }
 
