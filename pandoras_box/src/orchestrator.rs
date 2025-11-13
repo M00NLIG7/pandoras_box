@@ -601,15 +601,15 @@ impl Orchestrator {
         match os {
             OS::Unix => {
                 let command = format!(
-                    r#"[ -w {} ] && echo -e "140.82.116.4 github.com\n185.199.108.133 objects.githubusercontent.com\n185.199.109.133 objects.githubusercontent.com\n185.199.110.133 objects.githubusercontent.com\n185.199.111.133 objects.githubusercontent.com" >> {} || sudo sh -c 'echo -e "140.82.116.4 github.com\n185.199.108.133 objects.githubusercontent.com\n185.199.109.133 objects.githubusercontent.com\n185.199.110.133 objects.githubusercontent.com\n185.199.111.133 objects.githubusercontent.com" >> {}'"#,
+                    r#"[ -w {} ] && echo -e "140.82.116.4 github.com\n185.199.108.133 objects.githubusercontent.com\n185.199.109.133 objects.githubusercontent.com\n185.199.110.133 objects.githubusercontent.com\n185.199.111.133 objects.githubusercontent.com\n185.199.108.133 release-assets.githubusercontent.com\n185.199.109.133 release-assets.githubusercontent.com\n185.199.110.133 release-assets.githubusercontent.com\n185.199.111.133 release-assets.githubusercontent.com" >> {} || sudo sh -c 'echo -e "140.82.116.4 github.com\n185.199.108.133 objects.githubusercontent.com\n185.199.109.133 objects.githubusercontent.com\n185.199.110.133 objects.githubusercontent.com\n185.199.111.133 objects.githubusercontent.com\n185.199.108.133 release-assets.githubusercontent.com\n185.199.109.133 release-assets.githubusercontent.com\n185.199.110.133 release-assets.githubusercontent.com\n185.199.111.133 release-assets.githubusercontent.com" >> {}'"#,
                     hosts_file, hosts_file, hosts_file
                 );
                 final_results.extend(communicator.exec_by_os(&cmd!(command), os).await);
             },
             OS::Windows => {
                let command = format!(
-                   "cmd /C \"echo 140.82.116.4 github.com >> {} & echo 185.199.108.133 objects.githubusercontent.com >> {} & echo 185.199.109.133 objects.githubusercontent.com >> {} & echo 185.199.110.133 objects.githubusercontent.com >> {} & echo 185.199.111.133 objects.githubusercontent.com >> {} & echo 13.107.246.71 download.sysinternals.com >> {}\"",
-                   hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file
+                   "cmd /C \"echo 140.82.116.4 github.com >> {} & echo 185.199.108.133 objects.githubusercontent.com >> {} & echo 185.199.109.133 objects.githubusercontent.com >> {} & echo 185.199.110.133 objects.githubusercontent.com >> {} & echo 185.199.111.133 objects.githubusercontent.com >> {} & echo 185.199.108.133 release-assets.githubusercontent.com >> {} & echo 185.199.109.133 release-assets.githubusercontent.com >> {} & echo 185.199.110.133 release-assets.githubusercontent.com >> {} & echo 185.199.111.133 release-assets.githubusercontent.com >> {} & echo 13.107.246.71 download.sysinternals.com >> {}\"",
+                   hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file
                );
                final_results.extend(communicator.exec_by_os(&cmd!(command), os).await);
             },
