@@ -556,30 +556,36 @@ impl Orchestrator {
     async fn download_chimera(&self, communicator: &Communicator, host_map: HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)>{
         let mut final_results = Vec::new();
 
-        // Run Windows and Unix downloads concurrently to prevent SSH session timeouts
-        // If run sequentially, Unix sessions sit idle during Windows downloads and get closed by server
+        // Run Windows and Unix downloads concurrently
+        // Critical: chmod must happen immediately after Unix download completes to keep SSH alive
         let (win_results, unix_results) = tokio::join!(
             self.download_chimera_win(communicator, &host_map),
-            self.download_chimera_unix(communicator, &host_map)
-        );
+            async {
+                // Download on Unix hosts
+                let download_results = self.download_chimera_unix(communicator, &host_map).await;
 
-        // Make chimera executable on Unix hosts and verify
-        let chmod_results = communicator.exec_by_os(&cmd!("chmod +x /tmp/chimera && ls -la /tmp/chimera"), OS::Unix).await;
-        for result in &chmod_results {
-            match &result.result {
-                Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    info!("Successfully set execute permission on chimera for {}", result.ip);
-                    if !stdout.trim().is_empty() {
-                        info!("[{}] chmod verification: {}", result.ip, stdout.trim());
-                    }
-                    if !output.stderr.is_empty() {
-                        warn!("[{}] chmod stderr: {}", result.ip, String::from_utf8_lossy(&output.stderr).trim());
+                // Immediately chmod while SSH connections are still active
+                // (waiting for Windows downloads to finish would cause SSH timeout)
+                let chmod_results = communicator.exec_by_os(&cmd!("chmod +x /tmp/chimera && ls -la /tmp/chimera"), OS::Unix).await;
+                for result in &chmod_results {
+                    match &result.result {
+                        Ok(output) => {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            info!("Successfully set execute permission on chimera for {}", result.ip);
+                            if !stdout.trim().is_empty() {
+                                info!("[{}] chmod verification: {}", result.ip, stdout.trim());
+                            }
+                            if !output.stderr.is_empty() {
+                                warn!("[{}] chmod stderr: {}", result.ip, String::from_utf8_lossy(&output.stderr).trim());
+                            }
+                        }
+                        Err(e) => error!("Failed to chmod chimera on {}: {}", result.ip, e),
                     }
                 }
-                Err(e) => error!("Failed to chmod chimera on {}: {}", result.ip, e),
+
+                download_results
             }
-        }
+        );
 
         final_results.extend(win_results);
         final_results.extend(unix_results);
