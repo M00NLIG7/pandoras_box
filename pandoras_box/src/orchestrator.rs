@@ -29,8 +29,8 @@ const INITIAL_DELAY_MS: u64 = 1000; // 1 second
 
 //cmd.exe /c echo Dim xhr: Set xhr = CreateObject("MSXML2.XMLHTTP.6.0"): xhr.Open "GET", "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera", False: xhr.Send: Set stream = CreateObject("ADODB.Stream"): stream.Open: stream.Type = 1: stream.Write xhr.responseBody: stream.SaveToFile "C:\Temp\chimera.exe", 2: stream.Close > dl.vbs && cscript //B dl.vbs
 
-static CHIMERA_URL_UNIX: &str = "https://github.com/CSUSB-CISO/csusb-ccdc/releases/download/CCDC-2024-2025/chimera";
-static CHIMERA_URL_WIN: &str = "https://github.com/CSUSB-CISO/csusb-ccdc/releases/download/CCDC-2024-2025/chimera.exe";
+static CHIMERA_URL_UNIX: &str = "https://github.com/M00NLIG7/pandoras_box/releases/download/CCDC-2024-2025/chimera";
+static CHIMERA_URL_WIN: &str = "https://github.com/M00NLIG7/pandoras_box/releases/download/CCDC-2024-2025/chimera.exe";
 static OUTPUT_PATH: &str = "/tmp/chimera";
 
 // Define a struct for mode configuration
