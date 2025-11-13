@@ -413,9 +413,10 @@ impl SSHSession {
                     }
                 }
 
-                // Check for inactivity timeout (30 seconds of no messages)
-                if last_activity.elapsed() > Duration::from_secs(30) {
-                    warn!("Channel inactive for 30 seconds");
+                // Check for inactivity timeout (120 seconds of no messages)
+                // Long timeout needed for downloads that produce no intermediate output
+                if last_activity.elapsed() > Duration::from_secs(120) {
+                    warn!("Channel inactive for 120 seconds");
                     break;
                 }
             }
