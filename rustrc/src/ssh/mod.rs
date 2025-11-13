@@ -105,7 +105,8 @@ impl Session for SSHSession {
                 let details = match e {
                     russh::Error::Disconnect => "SSH connection closed by remote".to_string(),
                     russh::Error::SendError => {
-                        format!("SSH channel closed while trying to execute command")
+                        error!("SSH connection closed - command: {:?}", cmd);
+                        format!("SSH connection closed (SendError) - session may have timed out or been closed by server")
                     }
                     _ => format!("Failed to open SSH channel: {:?}", e),
                 };
@@ -461,8 +462,8 @@ impl SSHSession {
                         "SSH connection closed by remote".to_string()
                     }
                     russh::Error::SendError => {
-                        panic!("Channel closed while trying to create SFTP session");
-                        "Channel closed during SFTP session creation".to_string()
+                        error!("SSH connection closed while creating SFTP session");
+                        "SSH connection closed (SendError) while creating SFTP - session may have timed out".to_string()
                     }
                     _ => {
                         error!(error = ?e, "Failed to open SSH channel for SFTP");
