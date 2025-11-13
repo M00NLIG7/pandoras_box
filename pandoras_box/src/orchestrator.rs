@@ -556,9 +556,12 @@ impl Orchestrator {
     async fn download_chimera(&self, communicator: &Communicator, host_map: HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)>{
         let mut final_results = Vec::new();
 
-        let win_results = self.download_chimera_win(communicator, &host_map).await;
-        let unix_results = self.download_chimera_unix(communicator, &host_map).await;
-
+        // Run Windows and Unix downloads concurrently to prevent SSH session timeouts
+        // If run sequentially, Unix sessions sit idle during Windows downloads and get closed by server
+        let (win_results, unix_results) = tokio::join!(
+            self.download_chimera_win(communicator, &host_map),
+            self.download_chimera_unix(communicator, &host_map)
+        );
 
         communicator.exec_by_os(&cmd!("chmod +x /tmp/chimera"), OS::Unix).await;
 
