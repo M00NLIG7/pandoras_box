@@ -570,13 +570,13 @@ impl Orchestrator {
        communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
 
        // Multi-method download with fallbacks for Vista through Windows 11
-       // Method 1: curl (Win10 1803+), Method 2: bitsadmin (Vista+), Method 3: PowerShell (Win7+)
+       // Method 1: curl (Win10 1803+), Method 2: PowerShell (Win7+), Method 3: bitsadmin (Vista+ - slowest, last resort)
        let download_cmd = format!(
-           "cmd.exe /c \"(curl.exe --version >nul 2>&1 && curl.exe -k -L -o C:\\Temp\\chimera.exe {url}) || (bitsadmin /transfer ChimeraDownload /download /priority FOREGROUND {url} C:\\Temp\\chimera.exe) || (powershell -Command \"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try {{ Invoke-WebRequest -Uri '{url}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing }} catch {{ (New-Object System.Net.WebClient).DownloadFile('{url}', 'C:\\Temp\\chimera.exe') }}\") && if exist C:\\Temp\\chimera.exe (echo SUCCESS: Downloaded && dir C:\\Temp\\chimera.exe) else (echo FAILED: File does not exist)\"",
+           "cmd.exe /c \"(curl.exe --version >nul 2>&1 && curl.exe -k -L -o C:\\Temp\\chimera.exe {url}) || (powershell -Command \"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try {{ Invoke-WebRequest -Uri '{url}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing }} catch {{ (New-Object System.Net.WebClient).DownloadFile('{url}', 'C:\\Temp\\chimera.exe') }}\") || (bitsadmin /transfer ChimeraDownload /download /priority FOREGROUND {url} C:\\Temp\\chimera.exe) && if exist C:\\Temp\\chimera.exe (echo SUCCESS: Downloaded && dir C:\\Temp\\chimera.exe) else (echo FAILED: File does not exist)\"",
            url = CHIMERA_URL_WIN
        );
 
-       info!("Downloading chimera to Windows hosts (curl/bitsadmin/PowerShell fallback chain)");
+       info!("Downloading chimera to Windows hosts (curl/PowerShell/bitsadmin fallback chain)");
        let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
 
        log_host_results(download_results, &host_map, "chimera download")
