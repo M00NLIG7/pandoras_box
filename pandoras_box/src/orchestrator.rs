@@ -779,7 +779,7 @@ impl Orchestrator {
         let deployed_hosts: Vec<Arc<Host>> = {
             // First collect IPs we've seen into a HashSet
             let mut seen_ips = HashSet::new();
-            
+
             deployment_results
                 .iter()
                 .filter_map(|(host, result)| match result {
@@ -799,6 +799,10 @@ impl Orchestrator {
             return Err(Error::CommandError("No successful deployments".into()));
         }
         //let deployed_hosts = connected_hosts.clone();
+
+        // Wait for file system to flush and AV scans to complete (especially on DCs with strict policies)
+        info!("Waiting 3 seconds for file system sync and security scans...");
+        tokio::time::sleep(Duration::from_secs(3)).await;
 
         let start = std::time::Instant::now();
         // Step 4: Execute Chimera modes on successfully deployed hosts
@@ -998,6 +1002,10 @@ impl Orchestrator {
             error!("No hosts successfully deployed");
             return Err(Error::CommandError("No successful deployments".into()));
         }
+
+        // Wait for file system to flush and AV scans to complete (especially on DCs with strict policies)
+        info!("Waiting 3 seconds for file system sync and security scans...");
+        tokio::time::sleep(Duration::from_secs(3)).await;
 
         let start = std::time::Instant::now();
         // Step 4: Execute Chimera modes on successfully deployed hosts
