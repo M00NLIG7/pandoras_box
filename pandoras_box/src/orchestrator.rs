@@ -848,7 +848,10 @@ impl Orchestrator {
         // This prevents SSH timeouts by executing as soon as downloads complete rather than waiting
 
         info!("Chimera execution completed (ran immediately after each OS group deployed)");
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Wait for HTTP server to fully start (process spawn, firewall config on Windows, port binding)
+        // Domain Controllers and loaded hosts may take longer due to security software and netsh operations
+        info!("Waiting 10 seconds for chimera HTTP servers to start on all hosts...");
+        tokio::time::sleep(Duration::from_secs(10)).await;
 
         let start = std::time::Instant::now();
         self.fetch_inventory(&deployed_hosts).await?;
@@ -1019,7 +1022,10 @@ impl Orchestrator {
         // Note: Execution already happened inside download_chimera() immediately after each OS group was ready
         // This prevents SSH timeouts by executing as soon as downloads complete rather than waiting
 
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Wait for HTTP server to fully start (process spawn, firewall config on Windows, port binding)
+        // Domain Controllers and loaded hosts may take longer due to security software and netsh operations
+        info!("Waiting 10 seconds for chimera HTTP servers to start on all hosts...");
+        tokio::time::sleep(Duration::from_secs(10)).await;
 
         let start = std::time::Instant::now();
         self.fetch_inventory(&deployed_hosts).await?;
