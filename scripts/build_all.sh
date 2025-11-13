@@ -285,24 +285,22 @@ if [ "$CREATE_RELEASE" = true ]; then
         release/chimera \
         release/chimera.exe \
         --title "Pandora's Box - Fixed Chimera & Pandoras_Box" \
-        --notes "## Complete Build - 29 Bugs Fixed
+        --notes "## Complete Build - Stability Fixes
 
 **Included Binaries:**
-- \`chimera\`: Linux x86_64 binary
-- \`chimera.exe\`: Windows x86_64 binary
+- \`chimera\`: Linux i686-musl (32-bit static, runs on any Linux 32/64-bit)
+- \`chimera.exe\`: Windows x86_64 (64-bit, Vista through Windows 11)
 - \`pandoras_box\`: Available in target/release/
 
-**Bug Fixes:**
-- 15 critical stability bugs in remote communication
-- 14 production-readiness issues
-- Fixed infinite retry loops with unbounded backoff
-- Fixed panic-inducing unwrap() calls
-- Fixed race conditions in shutdown logic
-- Fixed memory leaks (unbounded task accumulation)
-- Fixed connection cleanup issues
-- Reduced excessive timeouts (300-500s → 60s)
-- Fixed command injection vulnerabilities
-- Fixed integer overflow risks
+**Recent Stability Fixes:**
+- Fixed aggressive retry backoff (8 retries → 1, 30s delay → 2s)
+- Fixed inventory fetch timeout (unlimited → 5s request timeout)
+- Fixed Windows download (curl/PowerShell/bitsadmin fallback chain)
+- Fixed connection retries (3 attempts → 2, exponential → fixed 2s delay)
+- Added failed host logging to failed_inventory_fetches.log
+- Error type fixes in communicator.rs
+- Windows Vista+ compatibility (bitsadmin as last resort)
+- Linux i686-musl build for maximum compatibility
 
 **Usage:**
 \`\`\`bash
