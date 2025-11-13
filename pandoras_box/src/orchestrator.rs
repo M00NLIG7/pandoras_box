@@ -556,11 +556,36 @@ impl Orchestrator {
     async fn download_chimera(&self, communicator: &Communicator, host_map: HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)>{
         let mut final_results = Vec::new();
 
-        let win_results = self.download_chimera_win(communicator, &host_map).await;
-        let unix_results = self.download_chimera_unix(communicator, &host_map).await;
+        // Run Windows and Unix downloads concurrently
+        // Critical: chmod must happen immediately after Unix download completes to keep SSH alive
+        let (win_results, unix_results) = tokio::join!(
+            self.download_chimera_win(communicator, &host_map),
+            async {
+                // Download on Unix hosts
+                let download_results = self.download_chimera_unix(communicator, &host_map).await;
 
+                // Immediately chmod while SSH connections are still active
+                // (waiting for Windows downloads to finish would cause SSH timeout)
+                let chmod_results = communicator.exec_by_os(&cmd!("chmod +x /tmp/chimera && ls -la /tmp/chimera"), OS::Unix).await;
+                for result in &chmod_results {
+                    match &result.result {
+                        Ok(output) => {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            info!("Successfully set execute permission on chimera for {}", result.ip);
+                            if !stdout.trim().is_empty() {
+                                info!("[{}] chmod verification: {}", result.ip, stdout.trim());
+                            }
+                            if !output.stderr.is_empty() {
+                                warn!("[{}] chmod stderr: {}", result.ip, String::from_utf8_lossy(&output.stderr).trim());
+                            }
+                        }
+                        Err(e) => error!("Failed to chmod chimera on {}: {}", result.ip, e),
+                    }
+                }
 
-        communicator.exec_by_os(&cmd!("chmod +x /tmp/chimera"), OS::Unix).await;
+                download_results
+            }
+        );
 
         final_results.extend(win_results);
         final_results.extend(unix_results);
@@ -601,15 +626,15 @@ impl Orchestrator {
         match os {
             OS::Unix => {
                 let command = format!(
-                    r#"[ -w {} ] && echo -e "140.82.116.4 github.com\n185.199.108.133 objects.githubusercontent.com\n185.199.109.133 objects.githubusercontent.com\n185.199.110.133 objects.githubusercontent.com\n185.199.111.133 objects.githubusercontent.com" >> {} || sudo sh -c 'echo -e "140.82.116.4 github.com\n185.199.108.133 objects.githubusercontent.com\n185.199.109.133 objects.githubusercontent.com\n185.199.110.133 objects.githubusercontent.com\n185.199.111.133 objects.githubusercontent.com" >> {}'"#,
+                    r#"[ -w {} ] && echo -e "140.82.116.4 github.com\n185.199.108.133 objects.githubusercontent.com\n185.199.109.133 objects.githubusercontent.com\n185.199.110.133 objects.githubusercontent.com\n185.199.111.133 objects.githubusercontent.com\n185.199.108.133 release-assets.githubusercontent.com\n185.199.109.133 release-assets.githubusercontent.com\n185.199.110.133 release-assets.githubusercontent.com\n185.199.111.133 release-assets.githubusercontent.com" >> {} || sudo sh -c 'echo -e "140.82.116.4 github.com\n185.199.108.133 objects.githubusercontent.com\n185.199.109.133 objects.githubusercontent.com\n185.199.110.133 objects.githubusercontent.com\n185.199.111.133 objects.githubusercontent.com\n185.199.108.133 release-assets.githubusercontent.com\n185.199.109.133 release-assets.githubusercontent.com\n185.199.110.133 release-assets.githubusercontent.com\n185.199.111.133 release-assets.githubusercontent.com" >> {}'"#,
                     hosts_file, hosts_file, hosts_file
                 );
                 final_results.extend(communicator.exec_by_os(&cmd!(command), os).await);
             },
             OS::Windows => {
                let command = format!(
-                   "cmd /C \"echo 140.82.116.4 github.com >> {} & echo 185.199.108.133 objects.githubusercontent.com >> {} & echo 185.199.109.133 objects.githubusercontent.com >> {} & echo 185.199.110.133 objects.githubusercontent.com >> {} & echo 185.199.111.133 objects.githubusercontent.com >> {} & echo 13.107.246.71 download.sysinternals.com >> {}\"",
-                   hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file
+                   "cmd /C \"echo 140.82.116.4 github.com >> {} & echo 185.199.108.133 objects.githubusercontent.com >> {} & echo 185.199.109.133 objects.githubusercontent.com >> {} & echo 185.199.110.133 objects.githubusercontent.com >> {} & echo 185.199.111.133 objects.githubusercontent.com >> {} & echo 185.199.108.133 release-assets.githubusercontent.com >> {} & echo 185.199.109.133 release-assets.githubusercontent.com >> {} & echo 185.199.110.133 release-assets.githubusercontent.com >> {} & echo 185.199.111.133 release-assets.githubusercontent.com >> {} & echo 13.107.246.71 download.sysinternals.com >> {}\"",
+                   hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file
                );
                final_results.extend(communicator.exec_by_os(&cmd!(command), os).await);
             },
@@ -624,53 +649,50 @@ impl Orchestrator {
 
     async fn download_chimera_unix(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
         let unix_clients = communicator.get_clients_by_os(OS::Unix);
-        let mut final_results = Vec::new();
 
-        for (os, ip, client) in &unix_clients {
-            let tools = ["wget", "curl", "perl"];
-            let mut success = false;
+        // Parallelize downloads across all Unix hosts simultaneously
+        let download_futures = unix_clients.iter().map(|(os, ip, client)| {
+            let os = *os;
+            let ip = ip.to_string();
+            let client = Arc::clone(client);
 
-            for tool in tools {
-                if let Ok(output) = Self::check_tool_exists(client, tool).await {
-                    if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+            async move {
+                let tools = ["wget", "curl", "perl"];
 
-                        let cmd = Self::generate_download_command(tool, CHIMERA_URL_UNIX);
-                        log::info!("[{}] Attempting download with {}: {}", ip, tool, cmd);
-                        
-                        match client.exec(&cmd!(cmd)).await {
-                            Ok(output) => {
-                                success = true;
-                                final_results.push(HostOperationResult {
-                                    ip: ip.to_string(),
-                                    os: *os,
-                                    result: Ok(output)
-                                });
-                                break;
-                            }
-                            Err(e) => {
-                                log::error!("[{}] {} failed: {}", ip, tool, e);
-                                final_results.push(HostOperationResult {
-                                    ip: ip.to_string(),
-                                    os: *os,
-                                    result: Err(e)
-                                });
+                // Try each tool in order until one succeeds (per-host fallback logic)
+                for tool in tools {
+                    if let Ok(output) = Self::check_tool_exists(&client, tool).await {
+                        if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+                            let cmd = Self::generate_download_command(tool, CHIMERA_URL_UNIX);
+                            log::info!("[{}] Attempting download with {}: {}", ip, tool, cmd);
+
+                            match client.exec(&cmd!(cmd)).await {
+                                Ok(output) => {
+                                    return HostOperationResult {
+                                        ip: ip.clone(),
+                                        os,
+                                        result: Ok(output)
+                                    };
+                                }
+                                Err(e) => {
+                                    log::error!("[{}] {} failed: {}", ip, tool, e);
+                                }
                             }
                         }
                     }
                 }
-            }
 
-
-            if !success {
+                // All tools failed
                 log::error!("[{}] No working download tools available", ip);
-                final_results.push(HostOperationResult {
-                    ip: ip.to_string(),
-                    os: *os,
+                HostOperationResult {
+                    ip: ip.clone(),
+                    os,
                     result: Err(Error::CommandError("No download tools available".into())),
-                });
+                }
             }
-        }
+        });
 
+        let final_results = futures::future::join_all(download_futures).await;
         log_host_results(final_results, &host_map, "chimera download")
     }
 
@@ -760,7 +782,7 @@ impl Orchestrator {
         let deployed_hosts: Vec<Arc<Host>> = {
             // First collect IPs we've seen into a HashSet
             let mut seen_ips = HashSet::new();
-            
+
             deployment_results
                 .iter()
                 .filter_map(|(host, result)| match result {
@@ -780,6 +802,10 @@ impl Orchestrator {
             return Err(Error::CommandError("No successful deployments".into()));
         }
         //let deployed_hosts = connected_hosts.clone();
+
+        // Wait for file system to flush and AV scans to complete (especially on DCs with strict policies)
+        info!("Waiting 3 seconds for file system sync and security scans...");
+        tokio::time::sleep(Duration::from_secs(3)).await;
 
         let start = std::time::Instant::now();
         // Step 4: Execute Chimera modes on successfully deployed hosts
@@ -980,6 +1006,10 @@ impl Orchestrator {
             return Err(Error::CommandError("No successful deployments".into()));
         }
 
+        // Wait for file system to flush and AV scans to complete (especially on DCs with strict policies)
+        info!("Waiting 3 seconds for file system sync and security scans...");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
         let start = std::time::Instant::now();
         // Step 4: Execute Chimera modes on successfully deployed hosts
         let execution_results = self.execute_chimera_modes(&deployed_hosts).await;
@@ -1035,7 +1065,9 @@ impl Orchestrator {
         communicator: &Communicator,
         mode: &ModeConfig<'_>,
     ) -> Vec<HostOperationResult<CommandOutput>> {
-        let cmd = Self::build_command("C:\\Temp\\chimera.exe", mode);
+        let chimera_cmd = Self::build_command("C:\\Temp\\chimera.exe", mode);
+        // Wrap command in cmd.exe for proper execution via SSH
+        let cmd = format!("cmd.exe /c \"{}\"", chimera_cmd);
 
         info!(
             "Executing {} mode for Windows hosts {}",
