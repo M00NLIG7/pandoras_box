@@ -116,7 +116,7 @@ impl OSConfig {
 
                     Err(Error::CommunicatorError(format!(
                         "Winexe connection failed for {} after 3 attempts: {}",
-                        ip, last_error.unwrap_or_else(|| Error::CommunicatorError("Unknown error".to_string()))
+                        ip, last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string())
                     )))
                 },
                 Either::Right(ssh_config) => {
@@ -169,7 +169,7 @@ impl OSConfig {
                                     Err(e) if attempt == 1 => {
                                         return Err(Error::CommunicatorError(format!(
                                             "Both SSH and Winexe failed for {}: SSH error: {}, Winexe error: {}",
-                                            ip, ssh_last_error.unwrap_or_else(|| Error::CommunicatorError("Unknown SSH error".to_string())), e
+                                            ip, ssh_last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown SSH error".to_string()), e
                                         )));
                                     }
                                     _ => {}
@@ -178,7 +178,7 @@ impl OSConfig {
 
                             Err(Error::CommunicatorError(format!(
                                 "Both SSH and Winexe failed for {}: SSH error: {}",
-                                ip, ssh_last_error.unwrap_or_else(|| Error::CommunicatorError("Unknown SSH error".to_string()))
+                                ip, ssh_last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown SSH error".to_string())
                             )))
                         }
                         Err(e) => Err(Error::CommunicatorError(format!(
@@ -215,7 +215,7 @@ impl OSConfig {
 
                 Err(Error::CommunicatorError(format!(
                     "SSH connection failed for {} after 3 attempts: {}",
-                    ip, last_error.unwrap_or_else(|| Error::CommunicatorError("Unknown error".to_string()))
+                    ip, last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string())
                 )))
             },
             OSConfig::Unknown(config) => {
@@ -243,7 +243,7 @@ impl OSConfig {
 
                 Err(Error::CommunicatorError(format!(
                     "Connection failed for unknown OS at {} after 2 attempts: {}",
-                    ip, last_error.unwrap_or_else(|| Error::CommunicatorError("Unknown error".to_string()))
+                    ip, last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string())
                 )))
             },
         }
