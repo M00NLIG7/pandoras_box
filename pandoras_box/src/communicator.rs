@@ -90,21 +90,19 @@ impl OSConfig {
         match self {
             OSConfig::Windows(config) => match config {
                 Either::Left(winexe_config) => {
-                    // Retry Winexe connections up to 3 times with exponential backoff
+                    // Retry Winexe connections up to 2 times with fixed delay to avoid extending script runtime
                     let mut last_error = None;
-                    for attempt in 0..3 {
+                    for attempt in 0..2 {
                         if attempt > 0 {
-                            // Use checked_pow to prevent overflow for defensive coding
-                            let delay_secs = 2u64.checked_pow(attempt).unwrap_or(60);
-                            let delay = Duration::from_secs(delay_secs);
-                            debug!("Retrying Winexe connection to {} (attempt {}/3) after {}s", ip, attempt + 1, delay.as_secs());
+                            let delay = Duration::from_secs(2); // Fixed 2-second delay
+                            debug!("Retrying Winexe connection to {} (attempt {}/2) after 2s", ip, attempt + 1);
                             tokio::time::sleep(delay).await;
                         }
 
                         match Client::connect(winexe_config.clone()).await {
                             Ok(client) => {
                                 if attempt > 0 {
-                                    info!("Winexe connection to {} succeeded on attempt {}/3", ip, attempt + 1);
+                                    info!("Winexe connection to {} succeeded on attempt {}/2", ip, attempt + 1);
                                 }
                                 return Ok((OS::Windows, ip, Arc::new(client) as Arc<dyn ClientWrapper>));
                             }
@@ -115,7 +113,7 @@ impl OSConfig {
                     }
 
                     Err(Error::CommunicatorError(format!(
-                        "Winexe connection failed for {} after 3 attempts: {}",
+                        "Winexe connection failed for {} after 2 attempts: {}",
                         ip, last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string())
                     )))
                 },
@@ -189,21 +187,19 @@ impl OSConfig {
                 }
             },
             OSConfig::Unix(config) => {
-                // Retry Unix SSH connections up to 3 times with exponential backoff
+                // Retry Unix SSH connections up to 2 times with fixed delay to avoid extending script runtime
                 let mut last_error = None;
-                for attempt in 0..3 {
+                for attempt in 0..2 {
                     if attempt > 0 {
-                        // Use checked_pow to prevent overflow for defensive coding
-                        let delay_secs = 2u64.checked_pow(attempt).unwrap_or(60);
-                        let delay = Duration::from_secs(delay_secs);
-                        debug!("Retrying SSH connection to Unix host {} (attempt {}/3) after {}s", ip, attempt + 1, delay.as_secs());
+                        let delay = Duration::from_secs(2); // Fixed 2-second delay
+                        debug!("Retrying SSH connection to Unix host {} (attempt {}/2) after 2s", ip, attempt + 1);
                         tokio::time::sleep(delay).await;
                     }
 
                     match Client::connect(config.clone()).await {
                         Ok(client) => {
                             if attempt > 0 {
-                                info!("SSH connection to Unix host {} succeeded on attempt {}/3", ip, attempt + 1);
+                                info!("SSH connection to Unix host {} succeeded on attempt {}/2", ip, attempt + 1);
                             }
                             return Ok((OS::Unix, ip, Arc::new(client) as Arc<dyn ClientWrapper>));
                         }
@@ -214,7 +210,7 @@ impl OSConfig {
                 }
 
                 Err(Error::CommunicatorError(format!(
-                    "SSH connection failed for {} after 3 attempts: {}",
+                    "SSH connection failed for {} after 2 attempts: {}",
                     ip, last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown error".to_string())
                 )))
             },
