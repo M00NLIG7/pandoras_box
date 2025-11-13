@@ -105,7 +105,7 @@ impl Session for SSHSession {
                 let details = match e {
                     russh::Error::Disconnect => "SSH connection closed by remote".to_string(),
                     russh::Error::SendError => {
-                        panic!("Channel closed while trying to exec {:?}", cmd)
+                        format!("SSH channel closed while trying to execute command")
                     }
                     _ => format!("Failed to open SSH channel: {:?}", e),
                 };
