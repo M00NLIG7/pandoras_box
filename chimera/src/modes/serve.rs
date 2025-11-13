@@ -41,7 +41,34 @@ impl ModeExecutor for ServeMode {
             );
         }
 
-        info!("Starting file server on port {} in background", config.port);
+        // Check if port is already in use (server already running)
+        // This makes the serve mode idempotent - safe to run multiple times
+        let addr: std::net::SocketAddr = ([0, 0, 0, 0], config.port).into();
+        match std::net::TcpListener::bind(addr) {
+            Ok(_) => {
+                // Port is available, proceed with starting server
+                info!("Starting file server on port {} in background", config.port);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                // Port already in use - server is already running
+                info!("File server already running on port {}", config.port);
+                return ExecutionResult::new(
+                    ExecutionMode::Serve,
+                    true,
+                    format!("Server already running on port {}", config.port),
+                );
+            }
+            Err(e) => {
+                // Other bind error
+                error!("Failed to check port availability: {}", e);
+                return ExecutionResult::new(
+                    ExecutionMode::Serve,
+                    false,
+                    format!("Failed to check port {}: {}", config.port, e),
+                );
+            }
+        }
+
         let current_exe = match std::env::current_exe() {
             Ok(path) => path,
             Err(e) => {
