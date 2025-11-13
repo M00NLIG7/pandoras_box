@@ -348,7 +348,7 @@ impl SSHSession {
         &self,
         channel: &mut russh::Channel<russh::client::Msg>,
     ) -> crate::Result<CommandOutput> {
-        const TIMEOUT_SECONDS: u64 = 120;
+        const TIMEOUT_SECONDS: u64 = 300;  // Increased from 120s to 5 minutes for long-running operations
         const BUFFER_CAPACITY: usize = 1024 * 1024; // 1MB initial capacity
 
         let processing = async {
@@ -358,11 +358,14 @@ impl SSHSession {
             // Track EOF and exit status
             let mut remote_eof_received = false;
             let mut exit_status = None;
-            let last_activity = std::time::Instant::now();
+            let mut last_activity = std::time::Instant::now();
 
             loop {
                 match channel.wait().await {
                     Some(msg) => {
+                        // Update last activity timestamp on ANY message
+                        last_activity = std::time::Instant::now();
+
                         match msg {
                             russh::ChannelMsg::Data { ref data } => {
                                 if !data.is_empty() {
@@ -413,10 +416,10 @@ impl SSHSession {
                     }
                 }
 
-                // Check for inactivity timeout (120 seconds of no messages)
-                // Long timeout needed for downloads that produce no intermediate output
-                if last_activity.elapsed() > Duration::from_secs(120) {
-                    warn!("Channel inactive for 120 seconds");
+                // Check for inactivity timeout (300 seconds of no messages)
+                // Long timeout needed for inventory collection and downloads that produce no intermediate output
+                if last_activity.elapsed() > Duration::from_secs(300) {
+                    warn!("Channel inactive for 300 seconds");
                     break;
                 }
             }
