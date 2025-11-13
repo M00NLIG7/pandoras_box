@@ -47,7 +47,10 @@ where
     }
 
     fn disconnect(&self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move { self.disconnect().await.map_err(Into::into) })
+        // NOTE: Cannot call Client::disconnect() because it requires &mut self,
+        // but ClientWrapper trait only provides &self. Connections will be closed
+        // when the client is dropped. This prevents stack overflow from recursive calls.
+        Box::pin(async move { Ok(()) })
     }
 
     fn transfer_file(&self, file: Arc<Vec<u8>>, destination: String) -> BoxFuture<'_, Result<()>> {
