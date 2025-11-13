@@ -258,10 +258,23 @@ if [ "$CREATE_RELEASE" = true ]; then
 
     RELEASE_TAG="CCDC-2024-2025"
 
-    echo "Deleting existing release (if any)..."
-    gh release delete "$RELEASE_TAG" --yes 2>/dev/null || true
-    git tag -d "$RELEASE_TAG" 2>/dev/null || true
-    git push origin ":refs/tags/$RELEASE_TAG" 2>/dev/null || true
+    echo "Checking for existing release..."
+    if gh release view "$RELEASE_TAG" &>/dev/null; then
+        echo "Found existing release $RELEASE_TAG, deleting..."
+        gh release delete "$RELEASE_TAG" --yes --cleanup-tag || {
+            echo -e "${RED}Failed to delete existing release${NC}"
+            echo "Trying to delete manually..."
+            gh release delete "$RELEASE_TAG" --yes 2>/dev/null || true
+            sleep 2
+        }
+        echo "Deleting local and remote tags..."
+        git tag -d "$RELEASE_TAG" 2>/dev/null || true
+        git push origin ":refs/tags/$RELEASE_TAG" 2>/dev/null || true
+        sleep 2
+        echo -e "${GREEN}✓ Old release deleted${NC}"
+    else
+        echo "No existing release found, creating new one..."
+    fi
 
     echo "Preparing release files..."
     mkdir -p release
