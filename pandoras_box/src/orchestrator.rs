@@ -1035,7 +1035,9 @@ impl Orchestrator {
         communicator: &Communicator,
         mode: &ModeConfig<'_>,
     ) -> Vec<HostOperationResult<CommandOutput>> {
-        let cmd = Self::build_command("C:\\Temp\\chimera.exe", mode);
+        let chimera_cmd = Self::build_command("C:\\Temp\\chimera.exe", mode);
+        // Wrap command in cmd.exe for proper execution via SSH
+        let cmd = format!("cmd.exe /c \"{}\"", chimera_cmd);
 
         info!(
             "Executing {} mode for Windows hosts {}",

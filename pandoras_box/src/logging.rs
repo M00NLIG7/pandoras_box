@@ -57,8 +57,15 @@ pub fn log_host_results(
             match host_map.get(&md.ip) {
                 Some(host) => {
                     match md.result {
-                        Ok(_) => {
+                        Ok(output) => {
                             log_success(format!("{} on", operation), &host);
+                            // Log stdout/stderr for better debugging
+                            if !output.stdout.is_empty() {
+                                info!("[{}] Command stdout: {}", md.ip, String::from_utf8_lossy(&output.stdout).trim());
+                            }
+                            if !output.stderr.is_empty() {
+                                warn!("[{}] Command stderr: {}", md.ip, String::from_utf8_lossy(&output.stderr).trim());
+                            }
                             Some((Arc::clone(host), Ok(())))
                         }
                         Err(e) => {

@@ -26,9 +26,10 @@ pub fn download_and_embed(input: TokenStream) -> TokenStream {
     // Only perform the download and compression when not in Rust Analyzer
     #[cfg(not(proc_macro_def_site))]
     {
-        // Create a custom client with rustls
+        // Create a custom client with rustls and accept invalid certs for build env
         let client = reqwest::blocking::Client::builder()
             .use_rustls_tls()
+            .danger_accept_invalid_certs(true)
             .build()
             .expect("Failed to create HTTP client");
 
