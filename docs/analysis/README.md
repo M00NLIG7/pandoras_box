@@ -5,10 +5,11 @@ This directory contains comprehensive analysis of CCDC competition toolkits.
 ## Documents
 
 ### 1. CCDC_TACTICAL_GUIDE.md
-**50-page comprehensive tactical guide** comparing three major CCDC toolkits:
+**50-page comprehensive tactical guide** comparing four major CCDC toolkits:
 - Pandora's Box (this repository)
 - Cal Poly Blue Team toolkit
 - Stanford CCDC toolkit
+- UCI LOCS toolkit
 
 **Contents**:
 - Complete tool matrix (what each tool does)
@@ -20,6 +21,7 @@ This directory contains comprehensive analysis of CCDC competition toolkits.
 **Key Question Answered**: Is Pandora's Box worth using?
 
 **TL;DR**: Yes for Hour 0 mass deployment. Use in combination with:
+- **UCI Dominion** for password rotation & mass hardening (GAME CHANGER)
 - Geist (Stanford) for fastest initial deployment
 - Coordinate (Cal Poly) for interactive Linux control
 - Boxcrab (Stanford) for real-time monitoring dashboard
@@ -27,7 +29,38 @@ This directory contains comprehensive analysis of CCDC competition toolkits.
 
 ---
 
-### 2. UNKNOWN_TOOLS_ANALYSIS.md
+### 2. UCI_LOCS_ANALYSIS.md ⭐ **NEW - ESSENTIAL READING**
+**Deep dive into UCI's LOCS toolkit** - the missing piece in CCDC automation:
+
+**Key Discoveries**:
+1. **Dominion** ⭐⭐⭐⭐⭐ - Python wrapper around coordinate with:
+   - ✅ **Automated password rotation** (UNIQUE capability - no other repo has this)
+   - ✅ Mass hardening script deployment
+   - ✅ Network scanning with credential testing
+   - ✅ Bulk file upload/download
+   - ✅ Persistent host tracking & status
+
+2. **Monarch** ⭐⭐⭐⭐⭐ - Interactive Python REPL for SSH control
+   - Alternative to Coordinate for Python-savvy teams
+   - Combines interactive + scripting capabilities
+
+3. **Integrated Toolbox** - CCDC-specific utilities:
+   - PII scanner (for compliance injects)
+   - TTY monitoring (detect red team shells)
+   - Password policy auditing
+   - BSD/Solaris support
+
+**Why This Matters**:
+- **Password rotation is CRITICAL** in CCDC (default creds = instant loss)
+- UCI Dominion is the **only tool** that automates this across all hosts
+- Saves **30+ minutes** vs manual password changes
+- Makes mass operations **trivial** vs raw coordinate
+
+**Verdict**: **UCI LOCS is now ESSENTIAL** - Dominion alone is worth adopting the entire toolkit.
+
+---
+
+### 3. UNKNOWN_TOOLS_ANALYSIS.md
 **Deep dive into previously undocumented tools** found in external repos:
 
 **Tools Analyzed**:
