@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use crate::logging::{log_failure, log_output, log_results, log_skipped, log_success, log_host_results};
 
-const MAX_RETRIES: u32 = 8;
+const MAX_RETRIES: u32 = 1; // Only 1 retry to avoid extending script runtime
 const INITIAL_DELAY_MS: u64 = 1000; // 1 second
 
 //cmd.exe /c echo Dim xhr: Set xhr = CreateObject("MSXML2.XMLHTTP.6.0"): xhr.Open "GET", "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera", False: xhr.Send: Set stream = CreateObject("ADODB.Stream"): stream.Open: stream.Type = 1: stream.Write xhr.responseBody: stream.SaveToFile "C:\Temp\chimera.exe", 2: stream.Close > dl.vbs && cscript //B dl.vbs
@@ -318,7 +318,7 @@ async fn fetch_with_retry(
     uri_path: &str,
 ) -> Result<()> {
     let mut delay_ms = INITIAL_DELAY_MS;
-    const MAX_DELAY_MS: u64 = 30000; // Cap at 30 seconds
+    const MAX_DELAY_MS: u64 = 2000; // Cap at 2 seconds to avoid extending script runtime
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
@@ -356,10 +356,32 @@ async fn fetch_with_retry(
         }
     }
 
-    // If we get here, all retries failed
-    Err(Error::CommandError(
-        last_error.unwrap_or_else(|| "Unknown error during fetch".to_string())
-    ))
+    // If we get here, all retries failed - log to file for manual handling
+    let error_msg = last_error.unwrap_or_else(|| "Unknown error during fetch".to_string());
+    let log_entry = format!(
+        "{},{},{},{}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+        ip,
+        uri_path,
+        error_msg
+    );
+
+    // Append to failed hosts log file (non-fatal if this fails)
+    if let Err(e) = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("failed_inventory_fetches.log")
+        .await
+        .and_then(|mut file| async move {
+            file.write_all(log_entry.as_bytes()).await
+        }.await)
+    {
+        warn!("Failed to write to failed_inventory_fetches.log: {}", e);
+    } else {
+        info!("Logged failed fetch for {} to failed_inventory_fetches.log", ip);
+    }
+
+    Err(Error::CommandError(error_msg))
 }
 
 pub struct Orchestrator {
@@ -425,19 +447,18 @@ impl Orchestrator {
     }
 
     fn generate_base64_download_command(url: &str) -> String {
-        // Create the VBScript content
+        // Create the VBScript content with better error handling
         let vbs_script = format!(
-            "Dim xhr : Set xhr = CreateObject(\"MSXML2.ServerXMLHTTP\") : xhr.Open \"GET\",\"{}\",False : xhr.Send : Set stream = CreateObject(\"ADODB.Stream\") : stream.Open : stream.Type = 1 : stream.Write xhr.responseBody : stream.SaveToFile \"C:\\Temp\\chimera.exe\",2 : stream.Close",
+            "On Error Resume Next : Dim xhr : Set xhr = CreateObject(\"MSXML2.ServerXMLHTTP\") : xhr.Open \"GET\",\"{}\",False : xhr.Send : If Err.Number <> 0 Then WScript.Echo \"Error downloading: \" & Err.Description : WScript.Quit 1 : End If : Dim stream : Set stream = CreateObject(\"ADODB.Stream\") : stream.Open : stream.Type = 1 : stream.Write xhr.responseBody : stream.SaveToFile \"C:\\Temp\\chimera.exe\",2 : stream.Close : If Err.Number <> 0 Then WScript.Echo \"Error saving: \" & Err.Description : WScript.Quit 1 : End If : WScript.Echo \"Download complete\"",
             url
         );
 
         // Base64 encode the VBScript
         let encoded = base64::engine::general_purpose::STANDARD.encode(vbs_script);
 
-        // Generate the full command
+        // Generate the full command with verification - removed //B flag to see errors
         format!(
-            "cmd.exe /c \"echo {} > C:\\Temp\\encoded.b64 && certutil -decode C:\\Temp\\encoded.b64 C:\\Temp\\dl.vbs && cscript //D //B C:\\Temp\\dl.vbs && del C:\\Temp\\dl.vbs C:\\Temp\\encoded.b64\"",
-            //"cmd.exe /c \"echo {} > encoded.b64 && certutil -decode encoded.b64 dl.vbs",
+            "cmd.exe /c \"echo {} > C:\\Temp\\encoded.b64 && certutil -decode C:\\Temp\\encoded.b64 C:\\Temp\\dl.vbs && cscript //Nologo C:\\Temp\\dl.vbs && if exist C:\\Temp\\chimera.exe (echo SUCCESS: File exists && dir C:\\Temp\\chimera.exe) else (echo ERROR: File does not exist) && del C:\\Temp\\dl.vbs C:\\Temp\\encoded.b64\"",
             encoded
         )
     }
