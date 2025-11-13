@@ -649,53 +649,50 @@ impl Orchestrator {
 
     async fn download_chimera_unix(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
         let unix_clients = communicator.get_clients_by_os(OS::Unix);
-        let mut final_results = Vec::new();
 
-        for (os, ip, client) in &unix_clients {
-            let tools = ["wget", "curl", "perl"];
-            let mut success = false;
+        // Parallelize downloads across all Unix hosts simultaneously
+        let download_futures = unix_clients.iter().map(|(os, ip, client)| {
+            let os = *os;
+            let ip = ip.to_string();
+            let client = Arc::clone(client);
 
-            for tool in tools {
-                if let Ok(output) = Self::check_tool_exists(client, tool).await {
-                    if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+            async move {
+                let tools = ["wget", "curl", "perl"];
 
-                        let cmd = Self::generate_download_command(tool, CHIMERA_URL_UNIX);
-                        log::info!("[{}] Attempting download with {}: {}", ip, tool, cmd);
-                        
-                        match client.exec(&cmd!(cmd)).await {
-                            Ok(output) => {
-                                success = true;
-                                final_results.push(HostOperationResult {
-                                    ip: ip.to_string(),
-                                    os: *os,
-                                    result: Ok(output)
-                                });
-                                break;
-                            }
-                            Err(e) => {
-                                log::error!("[{}] {} failed: {}", ip, tool, e);
-                                final_results.push(HostOperationResult {
-                                    ip: ip.to_string(),
-                                    os: *os,
-                                    result: Err(e)
-                                });
+                // Try each tool in order until one succeeds (per-host fallback logic)
+                for tool in tools {
+                    if let Ok(output) = Self::check_tool_exists(&client, tool).await {
+                        if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+                            let cmd = Self::generate_download_command(tool, CHIMERA_URL_UNIX);
+                            log::info!("[{}] Attempting download with {}: {}", ip, tool, cmd);
+
+                            match client.exec(&cmd!(cmd)).await {
+                                Ok(output) => {
+                                    return HostOperationResult {
+                                        ip: ip.clone(),
+                                        os,
+                                        result: Ok(output)
+                                    };
+                                }
+                                Err(e) => {
+                                    log::error!("[{}] {} failed: {}", ip, tool, e);
+                                }
                             }
                         }
                     }
                 }
-            }
 
-
-            if !success {
+                // All tools failed
                 log::error!("[{}] No working download tools available", ip);
-                final_results.push(HostOperationResult {
-                    ip: ip.to_string(),
-                    os: *os,
+                HostOperationResult {
+                    ip: ip.clone(),
+                    os,
                     result: Err(Error::CommandError("No download tools available".into())),
-                });
+                }
             }
-        }
+        });
 
+        let final_results = futures::future::join_all(download_futures).await;
         log_host_results(final_results, &host_map, "chimera download")
     }
 
