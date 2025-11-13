@@ -129,14 +129,15 @@ echo "---"
 
 cd chimera
 
-echo "Building chimera for Linux (x86_64-unknown-linux-gnu)..."
+echo "Building chimera for Linux (i686-unknown-linux-musl - max compatibility)..."
 if command -v cross &> /dev/null; then
-    cross build --release --target x86_64-unknown-linux-gnu --bin chimera
+    cross build --release --target i686-unknown-linux-musl --bin chimera
 else
-    echo -e "${YELLOW}cross not found, using cargo for native build${NC}"
-    cargo build --release --bin chimera
+    echo -e "${YELLOW}cross not found, trying native build${NC}"
+    rustup target add i686-unknown-linux-musl 2>/dev/null || true
+    cargo build --release --target i686-unknown-linux-musl --bin chimera
 fi
-echo -e "${GREEN}✓ Linux build complete${NC}"
+echo -e "${GREEN}✓ Linux build complete (32-bit musl for max compatibility)${NC}"
 echo ""
 
 echo "Building chimera for Windows (x86_64-pc-windows-gnu)..."
@@ -226,8 +227,8 @@ else
 fi
 
 # Check chimera binaries
-if [ -f target/x86_64-unknown-linux-gnu/release/chimera ]; then
-    echo -e "${GREEN}✓ chimera (Linux): $(ls -lh target/x86_64-unknown-linux-gnu/release/chimera | awk '{print $5}')${NC}"
+if [ -f target/i686-unknown-linux-musl/release/chimera ]; then
+    echo -e "${GREEN}✓ chimera (Linux i686-musl): $(ls -lh target/i686-unknown-linux-musl/release/chimera | awk '{print $5}')${NC}"
 elif [ -f target/release/chimera ]; then
     echo -e "${GREEN}✓ chimera (native): $(ls -lh target/release/chimera | awk '{print $5}')${NC}"
 else
@@ -266,10 +267,12 @@ if [ "$CREATE_RELEASE" = true ]; then
     mkdir -p release
 
     # Copy binaries
-    if [ -f target/x86_64-unknown-linux-gnu/release/chimera ]; then
-        cp target/x86_64-unknown-linux-gnu/release/chimera release/chimera
+    if [ -f target/i686-unknown-linux-musl/release/chimera ]; then
+        cp target/i686-unknown-linux-musl/release/chimera release/chimera
+        echo "Copied i686-musl chimera (32-bit, static)"
     elif [ -f target/release/chimera ]; then
         cp target/release/chimera release/chimera
+        echo "Copied native chimera"
     fi
 
     if [ -f target/x86_64-pc-windows-gnu/release/chimera.exe ]; then
