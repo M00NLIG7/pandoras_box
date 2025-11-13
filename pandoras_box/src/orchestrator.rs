@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use crate::logging::{log_failure, log_output, log_results, log_skipped, log_success, log_host_results};
 
-const MAX_RETRIES: u32 = 8;
+const MAX_RETRIES: u32 = 1; // Only 1 retry to avoid extending script runtime
 const INITIAL_DELAY_MS: u64 = 1000; // 1 second
 
 //cmd.exe /c echo Dim xhr: Set xhr = CreateObject("MSXML2.XMLHTTP.6.0"): xhr.Open "GET", "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera", False: xhr.Send: Set stream = CreateObject("ADODB.Stream"): stream.Open: stream.Type = 1: stream.Write xhr.responseBody: stream.SaveToFile "C:\Temp\chimera.exe", 2: stream.Close > dl.vbs && cscript //B dl.vbs
@@ -318,7 +318,7 @@ async fn fetch_with_retry(
     uri_path: &str,
 ) -> Result<()> {
     let mut delay_ms = INITIAL_DELAY_MS;
-    const MAX_DELAY_MS: u64 = 30000; // Cap at 30 seconds
+    const MAX_DELAY_MS: u64 = 2000; // Cap at 2 seconds to avoid extending script runtime
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
@@ -356,10 +356,32 @@ async fn fetch_with_retry(
         }
     }
 
-    // If we get here, all retries failed
-    Err(Error::CommandError(
-        last_error.unwrap_or_else(|| "Unknown error during fetch".to_string())
-    ))
+    // If we get here, all retries failed - log to file for manual handling
+    let error_msg = last_error.unwrap_or_else(|| "Unknown error during fetch".to_string());
+    let log_entry = format!(
+        "{},{},{},{}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+        ip,
+        uri_path,
+        error_msg
+    );
+
+    // Append to failed hosts log file (non-fatal if this fails)
+    if let Err(e) = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("failed_inventory_fetches.log")
+        .await
+        .and_then(|mut file| async move {
+            file.write_all(log_entry.as_bytes()).await
+        }.await)
+    {
+        warn!("Failed to write to failed_inventory_fetches.log: {}", e);
+    } else {
+        info!("Logged failed fetch for {} to failed_inventory_fetches.log", ip);
+    }
+
+    Err(Error::CommandError(error_msg))
 }
 
 pub struct Orchestrator {
@@ -384,8 +406,13 @@ impl Orchestrator {
 
     async fn fetch_file(&self, hosts: &[Arc<Host>], uri_path: &str, output_prefix: &str) -> Result<()> {
         info!("Starting file fetch for {} hosts, uri: {}", hosts.len(), uri_path);
-        
-        let client = reqwest::Client::new();
+
+        // Create client with short timeout to avoid long waits on failed hosts
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))  // 5 second timeout per request
+            .connect_timeout(Duration::from_secs(3))  // 3 second connection timeout
+            .build()
+            .map_err(|e| Error::CommandError(format!("Failed to create HTTP client: {}", e)))?;
         let futures: Vec<_> = hosts.iter().map(|host| {
             let ip = host.ip.to_string();
             let client = client.clone();
@@ -425,19 +452,18 @@ impl Orchestrator {
     }
 
     fn generate_base64_download_command(url: &str) -> String {
-        // Create the VBScript content
+        // Create the VBScript content with better error handling
         let vbs_script = format!(
-            "Dim xhr : Set xhr = CreateObject(\"MSXML2.ServerXMLHTTP\") : xhr.Open \"GET\",\"{}\",False : xhr.Send : Set stream = CreateObject(\"ADODB.Stream\") : stream.Open : stream.Type = 1 : stream.Write xhr.responseBody : stream.SaveToFile \"C:\\Temp\\chimera.exe\",2 : stream.Close",
+            "On Error Resume Next : Dim xhr : Set xhr = CreateObject(\"MSXML2.ServerXMLHTTP\") : xhr.Open \"GET\",\"{}\",False : xhr.Send : If Err.Number <> 0 Then WScript.Echo \"Error downloading: \" & Err.Description : WScript.Quit 1 : End If : Dim stream : Set stream = CreateObject(\"ADODB.Stream\") : stream.Open : stream.Type = 1 : stream.Write xhr.responseBody : stream.SaveToFile \"C:\\Temp\\chimera.exe\",2 : stream.Close : If Err.Number <> 0 Then WScript.Echo \"Error saving: \" & Err.Description : WScript.Quit 1 : End If : WScript.Echo \"Download complete\"",
             url
         );
 
         // Base64 encode the VBScript
         let encoded = base64::engine::general_purpose::STANDARD.encode(vbs_script);
 
-        // Generate the full command
+        // Generate the full command with verification - removed //B flag to see errors
         format!(
-            "cmd.exe /c \"echo {} > C:\\Temp\\encoded.b64 && certutil -decode C:\\Temp\\encoded.b64 C:\\Temp\\dl.vbs && cscript //D //B C:\\Temp\\dl.vbs && del C:\\Temp\\dl.vbs C:\\Temp\\encoded.b64\"",
-            //"cmd.exe /c \"echo {} > encoded.b64 && certutil -decode encoded.b64 dl.vbs",
+            "cmd.exe /c \"echo {} > C:\\Temp\\encoded.b64 && certutil -decode C:\\Temp\\encoded.b64 C:\\Temp\\dl.vbs && cscript //Nologo C:\\Temp\\dl.vbs && if exist C:\\Temp\\chimera.exe (echo SUCCESS: File exists && dir C:\\Temp\\chimera.exe) else (echo ERROR: File does not exist) && del C:\\Temp\\dl.vbs C:\\Temp\\encoded.b64\"",
             encoded
         )
     }
@@ -539,42 +565,21 @@ impl Orchestrator {
     }
 
     async fn download_chimera_win(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
-       // Create temp directory
-       let mkdir_cmd = "cmd.exe /c md C:\\Temp && w32tm /resync";
-       let mkdir_results = communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
+       // Create temp directory and time sync
+       let mkdir_cmd = "cmd.exe /c md C:\\Temp 2>nul & w32tm /resync";
+       communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
 
-       
-       // Only proceed with download for hosts where mkdir succeeded
-       let successful_mkdir_ips: Vec<String> = mkdir_results.iter()
-           .filter(|result| result.result.is_ok())
-           .map(|result| result.ip.clone())
-           .collect();
+       // Multi-method download with fallbacks for Vista through Windows 11
+       // Method 1: curl (Win10 1803+), Method 2: PowerShell (Win7+), Method 3: bitsadmin (Vista+ - slowest, last resort)
+       let download_cmd = format!(
+           "cmd.exe /c \"(curl.exe --version >nul 2>&1 && curl.exe -k -L -o C:\\Temp\\chimera.exe {url}) || (powershell -Command \"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try {{ Invoke-WebRequest -Uri '{url}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing }} catch {{ (New-Object System.Net.WebClient).DownloadFile('{url}', 'C:\\Temp\\chimera.exe') }}\") || (bitsadmin /transfer ChimeraDownload /download /priority FOREGROUND {url} C:\\Temp\\chimera.exe) && if exist C:\\Temp\\chimera.exe (echo SUCCESS: Downloaded && dir C:\\Temp\\chimera.exe) else (echo FAILED: File does not exist)\"",
+           url = CHIMERA_URL_WIN
+       );
 
-       if successful_mkdir_ips.is_empty() {
-           error!("Failed to create temp directory on all Windows hosts");
-           for result in mkdir_results.iter() {
-               if let Err(e) = &result.result {
-                   error!("mkdir failed for {}: {}", result.ip, e);
-               }
-           }
-           return vec![];
-       }
-
-       
-
-       // Generate and execute the base64 download command
-       let download_cmd = Self::generate_base64_download_command(CHIMERA_URL_WIN);
-
+       info!("Downloading chimera to Windows hosts (curl/PowerShell/bitsadmin fallback chain)");
        let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
 
-       // Filter download results to only include hosts where mkdir succeeded
-       let filtered_results: Vec<HostOperationResult<CommandOutput>> = download_results
-           .into_iter()
-           .filter(|result| successful_mkdir_ips.contains(&result.ip))
-           .collect();
-
-       // Only return the download results
-       log_host_results(filtered_results, &host_map, "chimera download")
+       log_host_results(download_results, &host_map, "chimera download")
     }
 
     async fn append_to_hosts_file(&self, communicator: &Communicator, os: OS) -> Vec<HostOperationResult<CommandOutput>> {
