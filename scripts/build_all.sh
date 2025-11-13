@@ -259,6 +259,14 @@ if [ "$CREATE_RELEASE" = true ]; then
     RELEASE_TAG="CCDC-2024-2025"
 
     echo "Checking for existing release..."
+
+    # Always clean up local tag first to avoid conflicts
+    if git tag -l | grep -q "^${RELEASE_TAG}$"; then
+        echo "Found local tag $RELEASE_TAG, deleting..."
+        git tag -d "$RELEASE_TAG" 2>/dev/null || true
+    fi
+
+    # Check and delete remote release if it exists
     if gh release view "$RELEASE_TAG" &>/dev/null; then
         echo "Found existing release $RELEASE_TAG, deleting..."
         gh release delete "$RELEASE_TAG" --yes --cleanup-tag || {
@@ -267,8 +275,7 @@ if [ "$CREATE_RELEASE" = true ]; then
             gh release delete "$RELEASE_TAG" --yes 2>/dev/null || true
             sleep 2
         }
-        echo "Deleting local and remote tags..."
-        git tag -d "$RELEASE_TAG" 2>/dev/null || true
+        echo "Deleting remote tag..."
         git push origin ":refs/tags/$RELEASE_TAG" 2>/dev/null || true
         sleep 2
         echo -e "${GREEN}✓ Old release deleted${NC}"
@@ -360,8 +367,8 @@ else
     echo "  ${RED}✗${NC} pandoras_box: FAILED"
 fi
 
-if [ -f target/x86_64-unknown-linux-gnu/release/chimera ]; then
-    echo "  ${GREEN}✓${NC} chimera (Linux): target/x86_64-unknown-linux-gnu/release/chimera"
+if [ -f target/i686-unknown-linux-musl/release/chimera ]; then
+    echo "  ${GREEN}✓${NC} chimera (Linux i686-musl): target/i686-unknown-linux-musl/release/chimera"
 elif [ -f target/release/chimera ]; then
     echo "  ${GREEN}✓${NC} chimera (native): target/release/chimera"
 fi

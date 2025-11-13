@@ -2,7 +2,7 @@ use tokio::io::AsyncWriteExt;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use crate::communicator::{
-    self, unix_config, windows_config, ClientWrapper, Communicator, HostOperationResult, OSConfig
+    unix_config, windows_config, ClientWrapper, Communicator, HostOperationResult, OSConfig
 };
 use crate::enumerator::{Enumerator, Subnet};
 use crate::types::{Host, OS};
@@ -22,7 +22,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::logging::{log_failure, log_output, log_results, log_skipped, log_success, log_host_results};
+use crate::logging::{log_failure, log_output, log_skipped, log_success, log_host_results};
 
 const MAX_RETRIES: u32 = 1; // Only 1 retry to avoid extending script runtime
 const INITIAL_DELAY_MS: u64 = 1000; // 1 second
@@ -84,7 +84,7 @@ impl NetworkManager {
         }
     }
 
-    pub fn with_hosts(hosts: Vec<Arc<Host>>) -> Self {
+    pub fn with_hosts(_hosts: Vec<Arc<Host>>) -> Self {
         // We still need a subnet, but it won't be used for enumeration
         // Using a dummy subnet that encompasses all possible IPs
         let subnet = Subnet::try_from("0.0.0.0/0").expect("Failed to create dummy subnet");
@@ -367,18 +367,22 @@ async fn fetch_with_retry(
     );
 
     // Append to failed hosts log file (non-fatal if this fails)
-    if let Err(e) = tokio::fs::OpenOptions::new()
+    match tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open("failed_inventory_fetches.log")
         .await
-        .and_then(|mut file| async move {
-            file.write_all(log_entry.as_bytes()).await
-        }.await)
     {
-        warn!("Failed to write to failed_inventory_fetches.log: {}", e);
-    } else {
-        info!("Logged failed fetch for {} to failed_inventory_fetches.log", ip);
+        Ok(mut file) => {
+            if let Err(e) = file.write_all(log_entry.as_bytes()).await {
+                warn!("Failed to write to failed_inventory_fetches.log: {}", e);
+            } else {
+                info!("Logged failed fetch for {} to failed_inventory_fetches.log", ip);
+            }
+        }
+        Err(e) => {
+            warn!("Failed to open failed_inventory_fetches.log: {}", e);
+        }
     }
 
     Err(Error::CommandError(error_msg))
@@ -1198,7 +1202,7 @@ impl Orchestrator {
         info!("Executing {} mode for OS type: {:?}", mode, os_type);
 
         // Build command string based on OS
-        let (cmd_str, remote_path) = match os_type {
+        let (cmd_str, _remote_path) = match os_type {
             OS::Unix => {
                 let cmd = match params {
                     Some(p) => format!("/tmp/chimera {mode} {p}"),
