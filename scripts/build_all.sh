@@ -258,10 +258,23 @@ if [ "$CREATE_RELEASE" = true ]; then
 
     RELEASE_TAG="CCDC-2024-2025"
 
-    echo "Deleting existing release (if any)..."
-    gh release delete "$RELEASE_TAG" --yes 2>/dev/null || true
-    git tag -d "$RELEASE_TAG" 2>/dev/null || true
-    git push origin ":refs/tags/$RELEASE_TAG" 2>/dev/null || true
+    echo "Checking for existing release..."
+    if gh release view "$RELEASE_TAG" &>/dev/null; then
+        echo "Found existing release $RELEASE_TAG, deleting..."
+        gh release delete "$RELEASE_TAG" --yes --cleanup-tag || {
+            echo -e "${RED}Failed to delete existing release${NC}"
+            echo "Trying to delete manually..."
+            gh release delete "$RELEASE_TAG" --yes 2>/dev/null || true
+            sleep 2
+        }
+        echo "Deleting local and remote tags..."
+        git tag -d "$RELEASE_TAG" 2>/dev/null || true
+        git push origin ":refs/tags/$RELEASE_TAG" 2>/dev/null || true
+        sleep 2
+        echo -e "${GREEN}✓ Old release deleted${NC}"
+    else
+        echo "No existing release found, creating new one..."
+    fi
 
     echo "Preparing release files..."
     mkdir -p release
@@ -285,24 +298,22 @@ if [ "$CREATE_RELEASE" = true ]; then
         release/chimera \
         release/chimera.exe \
         --title "Pandora's Box - Fixed Chimera & Pandoras_Box" \
-        --notes "## Complete Build - 29 Bugs Fixed
+        --notes "## Complete Build - Stability Fixes
 
 **Included Binaries:**
-- \`chimera\`: Linux x86_64 binary
-- \`chimera.exe\`: Windows x86_64 binary
+- \`chimera\`: Linux i686-musl (32-bit static, runs on any Linux 32/64-bit)
+- \`chimera.exe\`: Windows x86_64 (64-bit, Vista through Windows 11)
 - \`pandoras_box\`: Available in target/release/
 
-**Bug Fixes:**
-- 15 critical stability bugs in remote communication
-- 14 production-readiness issues
-- Fixed infinite retry loops with unbounded backoff
-- Fixed panic-inducing unwrap() calls
-- Fixed race conditions in shutdown logic
-- Fixed memory leaks (unbounded task accumulation)
-- Fixed connection cleanup issues
-- Reduced excessive timeouts (300-500s → 60s)
-- Fixed command injection vulnerabilities
-- Fixed integer overflow risks
+**Recent Stability Fixes:**
+- Fixed aggressive retry backoff (8 retries → 1, 30s delay → 2s)
+- Fixed inventory fetch timeout (unlimited → 5s request timeout)
+- Fixed Windows download (curl/PowerShell/bitsadmin fallback chain)
+- Fixed connection retries (3 attempts → 2, exponential → fixed 2s delay)
+- Added failed host logging to failed_inventory_fetches.log
+- Error type fixes in communicator.rs
+- Windows Vista+ compatibility (bitsadmin as last resort)
+- Linux i686-musl build for maximum compatibility
 
 **Usage:**
 \`\`\`bash
