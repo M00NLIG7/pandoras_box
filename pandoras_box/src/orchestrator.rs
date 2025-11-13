@@ -406,8 +406,13 @@ impl Orchestrator {
 
     async fn fetch_file(&self, hosts: &[Arc<Host>], uri_path: &str, output_prefix: &str) -> Result<()> {
         info!("Starting file fetch for {} hosts, uri: {}", hosts.len(), uri_path);
-        
-        let client = reqwest::Client::new();
+
+        // Create client with short timeout to avoid long waits on failed hosts
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))  // 5 second timeout per request
+            .connect_timeout(Duration::from_secs(3))  // 3 second connection timeout
+            .build()
+            .map_err(|e| Error::CommandError(format!("Failed to create HTTP client: {}", e)))?;
         let futures: Vec<_> = hosts.iter().map(|host| {
             let ip = host.ip.to_string();
             let client = client.clone();
@@ -560,42 +565,20 @@ impl Orchestrator {
     }
 
     async fn download_chimera_win(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
-       // Create temp directory
-       let mkdir_cmd = "cmd.exe /c md C:\\Temp && w32tm /resync";
-       let mkdir_results = communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
+       // Create temp directory and time sync
+       let mkdir_cmd = "cmd.exe /c md C:\\Temp 2>nul & w32tm /resync";
+       communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
 
-       
-       // Only proceed with download for hosts where mkdir succeeded
-       let successful_mkdir_ips: Vec<String> = mkdir_results.iter()
-           .filter(|result| result.result.is_ok())
-           .map(|result| result.ip.clone())
-           .collect();
+       // Try curl first (available in Windows 10+ with OpenSSH), fallback to PowerShell
+       let curl_cmd = format!(
+           "cmd.exe /c curl.exe --version >nul 2>&1 && (curl.exe -k -L -o C:\\Temp\\chimera.exe {} && if exist C:\\Temp\\chimera.exe (echo SUCCESS && dir C:\\Temp\\chimera.exe) else echo FAILED) || (powershell -Command \"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing\" && if exist C:\\Temp\\chimera.exe (echo SUCCESS && dir C:\\Temp\\chimera.exe) else echo FAILED)",
+           CHIMERA_URL_WIN, CHIMERA_URL_WIN
+       );
 
-       if successful_mkdir_ips.is_empty() {
-           error!("Failed to create temp directory on all Windows hosts");
-           for result in mkdir_results.iter() {
-               if let Err(e) = &result.result {
-                   error!("mkdir failed for {}: {}", result.ip, e);
-               }
-           }
-           return vec![];
-       }
+       info!("Downloading chimera to Windows hosts using curl/PowerShell");
+       let download_results = communicator.exec_by_os(&cmd!(curl_cmd), OS::Windows).await;
 
-       
-
-       // Generate and execute the base64 download command
-       let download_cmd = Self::generate_base64_download_command(CHIMERA_URL_WIN);
-
-       let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
-
-       // Filter download results to only include hosts where mkdir succeeded
-       let filtered_results: Vec<HostOperationResult<CommandOutput>> = download_results
-           .into_iter()
-           .filter(|result| successful_mkdir_ips.contains(&result.ip))
-           .collect();
-
-       // Only return the download results
-       log_host_results(filtered_results, &host_map, "chimera download")
+       log_host_results(download_results, &host_map, "chimera download")
     }
 
     async fn append_to_hosts_file(&self, communicator: &Communicator, os: OS) -> Vec<HostOperationResult<CommandOutput>> {
