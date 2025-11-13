@@ -1,13 +1,11 @@
 use crate::{Error, Result, OS};
 use futures::future::{join_all, BoxFuture};
-use futures::StreamExt;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use rustrc::client::{Client, Command, CommandOutput, Config};
 use rustrc::cmd;
 use rustrc::ssh::SSHConfig;
 use rustrc::winexe::WinexeConfig;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -427,7 +425,7 @@ impl Communicator {
                                 tokio::time::sleep(delay).await;
                             }
 
-                            match client.exec(&rustrc::cmd!(verify_cmd)).await {
+                            match client.exec(&rustrc::cmd!(&verify_cmd)).await {
                                 Ok(output) => {
                                     let output_str = match String::from_utf8(output.stdout.clone()) {
                                         Ok(s) => s,

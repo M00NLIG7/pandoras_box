@@ -2,6 +2,7 @@ use crate::Host;
 use crate::Result;
 use crate::OS;
 use futures::future::join_all;
+use log::warn;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::{Deref, DerefMut};
 use std::process::Command;
@@ -97,19 +98,19 @@ impl Subnet {
         Self { ip, mask }
     }
 
-    fn iter_hosts(&self) -> impl Iterator<Item = Ipv4AddrExt> + '_ {
+    fn iter_hosts(&self) -> Box<dyn Iterator<Item = Ipv4AddrExt> + '_> {
         // Prevent overflow: when mask = 0, shift would be 32 which is undefined behavior
         // For /0, iterate entire IPv4 space (impractical, but safe)
         if self.mask == 0 {
             warn!("Subnet mask /0 covers entire IPv4 space (4.3 billion addresses), limiting iteration");
             // Return empty iterator for /0 to prevent DoS
-            return (0..0).map(|ip| Ipv4AddrExt(Ipv4Addr::from(ip)));
+            return Box::new((0..0).map(|ip| Ipv4AddrExt(Ipv4Addr::from(ip))));
         }
 
         let shift_amount = 32 - self.mask;
         let start = u32::from(*self.ip) & !((1u32 << shift_amount) - 1);
         let end = start | ((1u32 << shift_amount) - 1);
-        (start + 1..end).map(|ip| Ipv4AddrExt(Ipv4Addr::from(ip)))
+        Box::new((start + 1..end).map(|ip| Ipv4AddrExt(Ipv4Addr::from(ip))))
     }
 }
 
