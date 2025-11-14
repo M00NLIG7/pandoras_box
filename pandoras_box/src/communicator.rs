@@ -268,7 +268,11 @@ impl Communicator {
         for result in connection_results {
             match result.result {
                 Ok((os, ip, client)) => clients.push((os, ip, client)),
-                Err(e) => errors.push(format!("{}:{:?} - {}", result.ip, result.os, e)),
+                Err(e) => {
+                    let error_msg = format!("{}:{:?} - {}", result.ip, result.os, e);
+                    error!("Connection failed: {}", error_msg);
+                    errors.push(error_msg);
+                }
             }
         }
 
@@ -278,8 +282,15 @@ impl Communicator {
                 errors.join("; ")
             )))
         } else {
+            if !errors.is_empty() {
+                warn!("Some connections failed ({}/{}): {}", errors.len(), clients.len() + errors.len(), errors.join("; "));
+            }
             Ok(Communicator { clients })
         }
+    }
+
+    pub fn client_count(&self) -> usize {
+        self.clients.len()
     }
 
     pub fn get_clients_by_os(&self, os_type: OS) -> Vec<(OS, &IpAddr, &Arc<dyn ClientWrapper>)> {

@@ -214,11 +214,14 @@ impl NetworkManager {
 
         match Communicator::new(successful_configs).await {
             Ok(comm) => {
+                let connected_count = comm.client_count();
+                let attempted_count = successful_hosts.len();
                 self.communicator = Some(comm);
                 info!(
-                    "Successfully initialized communicator with {}/{} hosts",
-                    successful_hosts.len(),
-                    hosts.len()
+                    "Successfully initialized communicator with {}/{} hosts connected (attempted {} configs)",
+                    connected_count,
+                    hosts.len(),
+                    attempted_count
                 );
                 Ok(successful_hosts)
             }
@@ -662,7 +665,7 @@ impl Orchestrator {
        // Validate file size is > 10MB (chimera.exe should be ~15MB)
        // Note: Use single % for cmd.exe /c execution (not %% which is for .bat files)
        let download_cmd = format!(
-           "cmd.exe /c \"(curl.exe --version >nul 2>&1 && curl.exe -k -L -o C:\\Temp\\chimera.exe {url} && echo curl completed) || (powershell -Command \"$ErrorActionPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try {{ Invoke-WebRequest -Uri '{url}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing; Write-Host 'PowerShell WebRequest completed' }} catch {{ (New-Object System.Net.WebClient).DownloadFile('{url}', 'C:\\Temp\\chimera.exe'); Write-Host 'WebClient completed' }}\") || (bitsadmin /transfer ChimeraDownload /download /priority FOREGROUND {url} C:\\Temp\\chimera.exe && echo bitsadmin completed) && if exist C:\\Temp\\chimera.exe (for %A in (C:\\Temp\\chimera.exe) do if %~zA GTR 10000000 (echo SUCCESS: Download validated) else (echo FAILED: File too small)) else (echo FAILED: File missing)\"",
+           "cmd.exe /c \"((curl.exe --version >nul 2>&1 && curl.exe -k -L -o C:\\Temp\\chimera.exe {url} && echo curl completed) || (powershell -Command \"$ErrorActionPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try {{ Invoke-WebRequest -Uri '{url}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing; Write-Host 'PowerShell WebRequest completed' }} catch {{ (New-Object System.Net.WebClient).DownloadFile('{url}', 'C:\\Temp\\chimera.exe'); Write-Host 'WebClient completed' }}\") || (bitsadmin /transfer ChimeraDownload /download /priority FOREGROUND {url} C:\\Temp\\chimera.exe && echo bitsadmin completed)) & if exist C:\\Temp\\chimera.exe (for %A in (C:\\Temp\\chimera.exe) do if %~zA GTR 10000000 (echo SUCCESS: Download validated) else (echo FAILED: File too small)) else (echo FAILED: File missing)\"",
            url = CHIMERA_URL_WIN
        );
 
@@ -895,8 +898,8 @@ impl Orchestrator {
         info!("Chimera execution completed (ran immediately after each OS group deployed)");
         // Wait for HTTP server to fully start (process spawn, firewall config on Windows, port binding)
         // Domain Controllers and loaded hosts may take longer due to security software and netsh operations
-        info!("Waiting 10 seconds for chimera HTTP servers to start on all hosts...");
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        info!("Waiting 15 seconds for chimera HTTP servers to start on all hosts...");
+        tokio::time::sleep(Duration::from_secs(15)).await;
 
         let start = std::time::Instant::now();
         self.fetch_inventory(&deployed_hosts).await?;
@@ -1069,8 +1072,8 @@ impl Orchestrator {
 
         // Wait for HTTP server to fully start (process spawn, firewall config on Windows, port binding)
         // Domain Controllers and loaded hosts may take longer due to security software and netsh operations
-        info!("Waiting 10 seconds for chimera HTTP servers to start on all hosts...");
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        info!("Waiting 15 seconds for chimera HTTP servers to start on all hosts...");
+        tokio::time::sleep(Duration::from_secs(15)).await;
 
         let start = std::time::Instant::now();
         self.fetch_inventory(&deployed_hosts).await?;
