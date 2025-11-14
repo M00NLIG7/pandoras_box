@@ -268,7 +268,11 @@ impl Communicator {
         for result in connection_results {
             match result.result {
                 Ok((os, ip, client)) => clients.push((os, ip, client)),
-                Err(e) => errors.push(format!("{}:{:?} - {}", result.ip, result.os, e)),
+                Err(e) => {
+                    let error_msg = format!("{}:{:?} - {}", result.ip, result.os, e);
+                    error!("Connection failed: {}", error_msg);
+                    errors.push(error_msg);
+                }
             }
         }
 
@@ -278,16 +282,29 @@ impl Communicator {
                 errors.join("; ")
             )))
         } else {
+            if !errors.is_empty() {
+                warn!("Some connections failed ({}/{}): {}", errors.len(), clients.len() + errors.len(), errors.join("; "));
+            }
             Ok(Communicator { clients })
         }
     }
 
+    pub fn client_count(&self) -> usize {
+        self.clients.len()
+    }
+
     pub fn get_clients_by_os(&self, os_type: OS) -> Vec<(OS, &IpAddr, &Arc<dyn ClientWrapper>)> {
-        self.clients
+        debug!("get_clients_by_os({:?}): Total clients = {}", os_type, self.clients.len());
+        for (os, ip, _) in &self.clients {
+            debug!("  Client: {} -> {:?}", ip, os);
+        }
+        let filtered: Vec<_> = self.clients
             .iter()
             .filter(|(client_os, _, _)| *client_os == os_type)
             .map(|(os, ip, client)| (*os, ip, client))
-            .collect()
+            .collect();
+        debug!("get_clients_by_os({:?}): Filtered count = {}", os_type, filtered.len());
+        filtered
     }
 
     pub async fn disconnect_all(&self) -> Vec<HostOperationResult<()>> {
@@ -337,8 +354,7 @@ impl Communicator {
                                 if matches!(*os, OS::Unix)
                                     && !e.to_string().contains("timed out")
                                     && (e.to_string().contains("Permission denied")
-                                        || e.to_string().contains("not permitted")
-                                        || attempt == 0) {
+                                        || e.to_string().contains("not permitted")) {
 
                                     debug!("Attempting command with sudo on {}", ip);
                                     // Wrap command in sh -c with proper quoting to preserve escaping
@@ -422,8 +438,7 @@ impl Communicator {
                                 if matches!(*os, OS::Unix)
                                     && !e.to_string().contains("timed out")
                                     && (e.to_string().contains("Permission denied")
-                                        || e.to_string().contains("not permitted")
-                                        || attempt == 0) {
+                                        || e.to_string().contains("not permitted")) {
 
                                     debug!("Attempting command with sudo on {}", ip);
                                     // Wrap command in sh -c with proper quoting to preserve escaping

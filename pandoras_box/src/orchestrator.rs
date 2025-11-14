@@ -214,11 +214,14 @@ impl NetworkManager {
 
         match Communicator::new(successful_configs).await {
             Ok(comm) => {
+                let connected_count = comm.client_count();
+                let attempted_count = successful_hosts.len();
                 self.communicator = Some(comm);
                 info!(
-                    "Successfully initialized communicator with {}/{} hosts",
-                    successful_hosts.len(),
-                    hosts.len()
+                    "Successfully initialized communicator with {}/{} hosts connected (attempted {} configs)",
+                    connected_count,
+                    hosts.len(),
+                    attempted_count
                 );
                 Ok(successful_hosts)
             }
@@ -567,6 +570,7 @@ impl Orchestrator {
         // Critical: Each OS group must execute immediately after download to prevent SSH timeout
         let (win_results, unix_results) = tokio::join!(
             async {
+                info!("Starting Windows download and execution in parallel...");
                 // Windows: download, then execute immediately
                 let download_results = self.download_chimera_win(communicator, &host_map).await;
 
@@ -594,6 +598,7 @@ impl Orchestrator {
                 download_results
             },
             async {
+                info!("Starting Unix download and execution in parallel...");
                 // Unix: download, chmod, then execute immediately
                 let download_results = self.download_chimera_unix(communicator, &host_map).await;
 
@@ -658,32 +663,25 @@ impl Orchestrator {
        // Multi-method download with fallbacks for Vista through Windows 11
        // Method 1: curl (Win10 1803+), Method 2: PowerShell (Win7+), Method 3: bitsadmin (Vista+ - slowest, last resort)
        // Validate file size is > 10MB (chimera.exe should be ~15MB)
+       // Note: Use single % for cmd.exe /c execution (not %% which is for .bat files)
        let download_cmd = format!(
-           "cmd.exe /c \"(curl.exe --version >nul 2>&1 && curl.exe -k -L -o C:\\Temp\\chimera.exe {url} && echo curl completed) || (powershell -Command \"$ErrorActionPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try {{ Invoke-WebRequest -Uri '{url}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing; Write-Host 'PowerShell WebRequest completed' }} catch {{ (New-Object System.Net.WebClient).DownloadFile('{url}', 'C:\\Temp\\chimera.exe'); Write-Host 'WebClient completed' }}\") || (bitsadmin /transfer ChimeraDownload /download /priority FOREGROUND {url} C:\\Temp\\chimera.exe && echo bitsadmin completed) && powershell -Command \"if ((Test-Path 'C:\\Temp\\chimera.exe') -and ((Get-Item 'C:\\Temp\\chimera.exe').Length -gt 10MB)) {{ Write-Host 'SUCCESS: Download validated'; Get-Item 'C:\\Temp\\chimera.exe' | Select-Object Length, LastWriteTime }} else {{ Write-Host 'FAILED: File missing or too small'; exit 1 }}\"\"",
+           "cmd.exe /c \"((curl.exe --version >nul 2>&1 && curl.exe -k -L -o C:\\Temp\\chimera.exe {url} && echo curl completed) || (powershell -Command \"$ErrorActionPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try {{ Invoke-WebRequest -Uri '{url}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing; Write-Host 'PowerShell WebRequest completed' }} catch {{ (New-Object System.Net.WebClient).DownloadFile('{url}', 'C:\\Temp\\chimera.exe'); Write-Host 'WebClient completed' }}\") || (bitsadmin /transfer ChimeraDownload /download /priority FOREGROUND {url} C:\\Temp\\chimera.exe && echo bitsadmin completed)) & if exist C:\\Temp\\chimera.exe (for %A in (C:\\Temp\\chimera.exe) do if %~zA GTR 10000000 (echo SUCCESS: Download validated) else (echo FAILED: File too small)) else (echo FAILED: File missing)\"",
            url = CHIMERA_URL_WIN
        );
 
        info!("Downloading chimera to {} Windows hosts (curl/PowerShell/bitsadmin fallback chain)", windows_clients.len());
        let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
 
-       // Log detailed download results for Windows
+       // Log download validation results for Windows
        for result in &download_results {
            match &result.result {
                Ok(output) => {
                    let stdout = String::from_utf8_lossy(&output.stdout);
-                   let stderr = String::from_utf8_lossy(&output.stderr);
-
-                   if !stdout.is_empty() {
-                       info!("[{}] Windows download stdout: {}", result.ip, stdout.trim());
-                   }
-                   if !stderr.is_empty() {
-                       warn!("[{}] Windows download stderr: {}", result.ip, stderr.trim());
-                   }
 
                    if stdout.contains("SUCCESS: Download validated") {
                        info!("[{}] Windows chimera download validated successfully", result.ip);
                    } else {
-                       error!("[{}] Windows download validation failed - output: {}", result.ip, stdout.trim());
+                       error!("[{}] Windows download validation failed", result.ip);
                    }
                }
                Err(e) => {
@@ -753,14 +751,6 @@ impl Orchestrator {
                             match client.exec(&cmd!(cmd)).await {
                                 Ok(output) => {
                                     let stdout = String::from_utf8_lossy(&output.stdout);
-                                    let stderr = String::from_utf8_lossy(&output.stderr);
-
-                                    if !stdout.is_empty() {
-                                        log::info!("[{}] Download stdout: {}", ip, stdout.trim());
-                                    }
-                                    if !stderr.is_empty() {
-                                        log::warn!("[{}] Download stderr: {}", ip, stderr.trim());
-                                    }
 
                                     // Check if download was validated successfully
                                     if stdout.contains("Download validated") {
@@ -908,8 +898,8 @@ impl Orchestrator {
         info!("Chimera execution completed (ran immediately after each OS group deployed)");
         // Wait for HTTP server to fully start (process spawn, firewall config on Windows, port binding)
         // Domain Controllers and loaded hosts may take longer due to security software and netsh operations
-        info!("Waiting 10 seconds for chimera HTTP servers to start on all hosts...");
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        info!("Waiting 15 seconds for chimera HTTP servers to start on all hosts...");
+        tokio::time::sleep(Duration::from_secs(15)).await;
 
         let start = std::time::Instant::now();
         self.fetch_inventory(&deployed_hosts).await?;
@@ -1082,8 +1072,8 @@ impl Orchestrator {
 
         // Wait for HTTP server to fully start (process spawn, firewall config on Windows, port binding)
         // Domain Controllers and loaded hosts may take longer due to security software and netsh operations
-        info!("Waiting 10 seconds for chimera HTTP servers to start on all hosts...");
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        info!("Waiting 15 seconds for chimera HTTP servers to start on all hosts...");
+        tokio::time::sleep(Duration::from_secs(15)).await;
 
         let start = std::time::Instant::now();
         self.fetch_inventory(&deployed_hosts).await?;
