@@ -567,6 +567,7 @@ impl Orchestrator {
         // Critical: Each OS group must execute immediately after download to prevent SSH timeout
         let (win_results, unix_results) = tokio::join!(
             async {
+                info!("Starting Windows download and execution in parallel...");
                 // Windows: download, then execute immediately
                 let download_results = self.download_chimera_win(communicator, &host_map).await;
 
@@ -594,6 +595,7 @@ impl Orchestrator {
                 download_results
             },
             async {
+                info!("Starting Unix download and execution in parallel...");
                 // Unix: download, chmod, then execute immediately
                 let download_results = self.download_chimera_unix(communicator, &host_map).await;
 

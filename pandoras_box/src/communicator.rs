@@ -283,11 +283,17 @@ impl Communicator {
     }
 
     pub fn get_clients_by_os(&self, os_type: OS) -> Vec<(OS, &IpAddr, &Arc<dyn ClientWrapper>)> {
-        self.clients
+        debug!("get_clients_by_os({:?}): Total clients = {}", os_type, self.clients.len());
+        for (os, ip, _) in &self.clients {
+            debug!("  Client: {} -> {:?}", ip, os);
+        }
+        let filtered: Vec<_> = self.clients
             .iter()
             .filter(|(client_os, _, _)| *client_os == os_type)
             .map(|(os, ip, client)| (*os, ip, client))
-            .collect()
+            .collect();
+        debug!("get_clients_by_os({:?}): Filtered count = {}", os_type, filtered.len());
+        filtered
     }
 
     pub async fn disconnect_all(&self) -> Vec<HostOperationResult<()>> {
