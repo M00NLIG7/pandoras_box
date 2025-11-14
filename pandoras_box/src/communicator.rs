@@ -337,8 +337,7 @@ impl Communicator {
                                 if matches!(*os, OS::Unix)
                                     && !e.to_string().contains("timed out")
                                     && (e.to_string().contains("Permission denied")
-                                        || e.to_string().contains("not permitted")
-                                        || attempt == 0) {
+                                        || e.to_string().contains("not permitted")) {
 
                                     debug!("Attempting command with sudo on {}", ip);
                                     // Wrap command in sh -c with proper quoting to preserve escaping
@@ -422,8 +421,7 @@ impl Communicator {
                                 if matches!(*os, OS::Unix)
                                     && !e.to_string().contains("timed out")
                                     && (e.to_string().contains("Permission denied")
-                                        || e.to_string().contains("not permitted")
-                                        || attempt == 0) {
+                                        || e.to_string().contains("not permitted")) {
 
                                     debug!("Attempting command with sudo on {}", ip);
                                     // Wrap command in sh -c with proper quoting to preserve escaping
