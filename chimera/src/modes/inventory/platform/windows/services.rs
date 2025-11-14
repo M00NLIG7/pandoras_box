@@ -17,55 +17,91 @@ pub async fn services() -> Vec<Service> {
         _ => return Vec::new(), // or handle the error as appropriate
     };
 
-    // Only collect running services or services set to auto-start
-    // This significantly reduces output on Domain Controllers (from 200+ to ~30-50 services)
-    // Similar to Linux showing only active/enabled services
-    let results: Vec<HashMap<String, Variant>> = wmi_con
-        .raw_query("SELECT * FROM Win32_Service WHERE State='Running' OR StartMode='Auto'")
-        .unwrap();
+    // Only collect critical/commonly vulnerable services
+    // Focuses on services relevant for security auditing and attack vectors
+    let critical_services = vec![
+        "NTDS",                 // Active Directory Domain Services
+        "DNS",                  // DNS Server
+        "KDC",                  // Kerberos Key Distribution Center
+        "Netlogon",             // Net Logon
+        "W32Time",              // Windows Time (critical for Kerberos)
+        "LanmanServer",         // Server (SMB/CIFS) - commonly exploited
+        "LanmanWorkstation",    // Workstation (SMB client)
+        "RpcSs",                // RPC Endpoint Mapper - attack vector
+        "RpcLocator",           // RPC Locator
+        "Dhcp",                 // DHCP Server
+        "DHCPServer",           // DHCP Server (alt name)
+        "Spooler",              // Print Spooler - CVE-2021-1675 PrintNightmare
+        "RemoteRegistry",       // Remote Registry - often exploited
+        "WinRM",                // Windows Remote Management
+        "TermService",          // Remote Desktop Services
+        "MSSQLSERVER",          // SQL Server
+        "SQLAgent$*",           // SQL Server Agent
+        "W3SVC",                // IIS Web Server
+        "IISADMIN",             // IIS Admin Service
+        "FTPSvc",               // FTP Server
+        "Telnet",               // Telnet (should be disabled!)
+        "SNMP",                 // SNMP Service - weak auth
+        "WMPNetworkSvc",        // Windows Media Player Network Sharing
+        "EventLog",             // Event Log (for monitoring)
+        "ADWS",                 // Active Directory Web Services
+    ];
+
+    let service_filter = critical_services.iter()
+        .map(|s| format!("Name='{}'", s))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    let query = format!("SELECT * FROM Win32_Service WHERE {}", service_filter);
+
+    let results: Vec<HashMap<String, Variant>> = match wmi_con.raw_query(&query) {
+        Ok(results) => results,
+        Err(_) => return Vec::new(),
+    };
     let mut services = Vec::new();
     for os in results {
+        // Skip services with missing required fields instead of panicking
+        let name = match os.get("Name") {
+            Some(Variant::String(s)) => s.clone(),
+            _ => continue, // Skip services without names
+        };
+
+        let status = match os.get("State") {
+            Some(Variant::String(s)) => match s.as_str() {
+                "Running" => Some(ServiceStatus::Active),
+                "Stopped" => Some(ServiceStatus::Inactive),
+                "Paused" => Some(ServiceStatus::Inactive),
+                "Start Pending" => Some(ServiceStatus::Inactive),
+                "Stop Pending" => Some(ServiceStatus::Inactive),
+                "Continue Pending" => Some(ServiceStatus::Inactive),
+                "Pause Pending" => Some(ServiceStatus::Inactive),
+                "Unknown" => Some(ServiceStatus::Unknown),
+                _ => Some(ServiceStatus::Failed),
+            },
+            _ => None,
+        };
+
+        let start_mode = match os.get("StartMode") {
+            Some(Variant::String(s)) => {
+                if s == "Auto" {
+                    Some(ServiceStartType::Enabled)
+                } else {
+                    Some(ServiceStartType::Disabled)
+                }
+            }
+            _ => None, // Don't panic, just return None
+        };
+
+        let state = match os.get("Status") {
+            Some(Variant::String(s)) => s.to_string(),
+            _ => "Unknown".to_string(),
+        };
+
         services.push(Service {
-            name: match os.get("Name").unwrap() {
-                Variant::String(s) => s.clone(),
-                _ => "".to_string(),
-            },
-            status: match os.get("State").unwrap() {
-                Variant::String(s) => match s.as_str() {
-                    "Running" => Some(ServiceStatus::Active),
-                    "Stopped" => Some(ServiceStatus::Inactive),
-                    "Paused" => Some(ServiceStatus::Inactive),
-                    "Start Pending" => Some(ServiceStatus::Inactive),
-                    "Stop Pending" => Some(ServiceStatus::Inactive),
-                    "Continue Pending" => Some(ServiceStatus::Inactive),
-                    "Pause Pending" => Some(ServiceStatus::Inactive),
-                    "Unknown" => Some(ServiceStatus::Unknown),
-                    _ => Some(ServiceStatus::Failed),
-                },
-                _ => None,
-            },
-
-            start_mode: match os.get("StartMode").unwrap() {
-                Variant::String(s) => {
-                    if s == "Auto" {
-                        Some(ServiceStartType::Enabled)
-                    } else {
-                        Some(ServiceStartType::Disabled)
-                    }
-                }
-                _ => panic!("Unexpected type for StartMode"),
-            },
-
-            state: match os.get("Status").unwrap() {
-                Variant::String(s) => {
-                    if s == "OK" {
-                        s.to_string()
-                    } else {
-                        s.to_string()
-                    }
-                }
-                _ => "".to_string(),
-            },
+            name,
+            status,
+            start_mode,
+            state,
         });
     }
 
