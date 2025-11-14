@@ -1,0 +1,436 @@
+here is a run log of pandoras_box in a prod env. we dropped multiple hosts and failed to retrevie inventory it also looks like were gettign some timeout errors. We either need much better synchronizeation and keep-alive methods or we need to completley resturcutre the program so that each set of tasks is totally and uterraly serpearer from each other and decouple our code, what do you think. chimera is runnign and executed but tdue to a variation in execution times and other stuff like that our code is breaking. really think and make a plan of what to do. rmeber we need stabiltiy❯ ./pandoras_box -r 192.168.220.0/24 -p LowCostLunar1@
+Logging initialized to ./pandoras_box20251114_153120.log
+2025-11-14T23:31:20.972572Z  INFO main ThreadId(01) pandoras_box: pandoras_box/src/main.rs:106: Starting application with range: 192.168.220.0/24
+2025-11-14T23:31:21.024293Z  INFO main ThreadId(01) pandoras_box: pandoras_box/src/main.rs:116: Created subnet: 192.168.220.0/24
+2025-11-14T23:31:21.024358Z  INFO main ThreadId(01) pandoras_box::orchestrator: pandoras_box/src/orchestrator.rs:400: Initializing Orchestrator for subnet 192.168.220.0/24
+2025-11-14T23:31:21.024385Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:931: Starting Orchestrator run
+2025-11-14T23:31:21.024408Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:99: Starting network enumeration
+2025-11-14T23:31:23.136253Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:102: Enumerated host: 192.168.220.2 (OS: Unix, Open ports: [139, 22])
+2025-11-14T23:31:23.136639Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:102: Enumerated host: 192.168.220.42 (OS: Unix, Open ports: [22])
+2025-11-14T23:31:23.136681Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:102: Enumerated host: 192.168.220.44 (OS: Unix, Open ports: [22])
+2025-11-14T23:31:23.136709Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:102: Enumerated host: 192.168.220.111 (OS: Windows, Open ports: [139, 22])
+2025-11-14T23:31:23.136739Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:102: Enumerated host: 192.168.220.214 (OS: Unix, Open ports: [22])
+2025-11-14T23:31:23.136766Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:102: Enumerated host: 192.168.220.222 (OS: Windows, Open ports: [139, 22])
+2025-11-14T23:31:23.136792Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:102: Enumerated host: 192.168.220.254 (OS: Windows, Open ports: [139, 22])
+2025-11-14T23:31:23.136850Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:938: Successfully enumerated 7 hosts
+2025-11-14T23:31:23.136877Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:947: Enumerated hosts in 2s
+2025-11-14T23:31:23.136902Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:181: Starting communication initialization for 7 hosts
+2025-11-14T23:31:23.137014Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:119: Creating config for host 192.168.220.2 (OS: Unix, Open ports: [139, 22])
+2025-11-14T23:31:23.137169Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:119: Creating config for host 192.168.220.42 (OS: Unix, Open ports: [22])
+2025-11-14T23:31:23.137237Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:119: Creating config for host 192.168.220.44 (OS: Unix, Open ports: [22])
+2025-11-14T23:31:23.137271Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:119: Creating config for host 192.168.220.111 (OS: Windows, Open ports: [139, 22])
+2025-11-14T23:31:23.137303Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:273: Attempting SSH connection for Windows host 192.168.220.111
+2025-11-14T23:31:23.137334Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:119: Creating config for host 192.168.220.214 (OS: Unix, Open ports: [22])
+2025-11-14T23:31:23.137365Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:119: Creating config for host 192.168.220.222 (OS: Windows, Open ports: [139, 22])
+2025-11-14T23:31:23.137408Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:273: Attempting SSH connection for Windows host 192.168.220.222
+2025-11-14T23:31:23.137436Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:119: Creating config for host 192.168.220.254 (OS: Windows, Open ports: [139, 22])
+2025-11-14T23:31:23.137465Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:273: Attempting SSH connection for Windows host 192.168.220.254
+2025-11-14T23:31:27.857818Z ERROR main ThreadId(01) pandoras_box::communicator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/communicator.rs:273: Connection failed: 192.168.220.2:Unix - Failed to create communicator: SSH connection failed for 192.168.220.2 after 2 attempts: Authentication error: Failed to authenticate with password
+2025-11-14T23:31:27.857944Z ERROR main ThreadId(01) pandoras_box::communicator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/communicator.rs:273: Connection failed: 192.168.220.214:Unix - Failed to create communicator: SSH connection failed for 192.168.220.214 after 2 attempts: Authentication error: Failed to authenticate with password
+2025-11-14T23:31:27.857979Z ERROR main ThreadId(01) pandoras_box::communicator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/communicator.rs:273: Connection failed: 192.168.220.222:Windows - Failed to create communicator: Both SSH and Winexe failed for 192.168.220.222: SSH error: Authentication error: Failed to authenticate with password, Winexe error: Socket Error: Exec format error (os error 8)
+2025-11-14T23:31:27.858008Z  WARN main ThreadId(01) pandoras_box::communicator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/communicator.rs:286: Some connections failed (3/7): 192.168.220.2:Unix - Failed to create communicator: SSH connection failed for 192.168.220.2 after 2 attempts: Authentication error: Failed to authenticate with password; 192.168.220.214:Unix - Failed to create communicator: SSH connection failed for 192.168.220.214 after 2 attempts: Authentication error: Failed to authenticate with password; 192.168.220.222:Windows - Failed to create communicator: Both SSH and Winexe failed for 192.168.220.222: SSH error: Authentication error: Failed to authenticate with password, Winexe error: Socket Error: Exec format error (os error 8)
+2025-11-14T23:31:27.858473Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:220: Successfully initialized communicator with 4/7 hosts connected (attempted 7 configs)
+2025-11-14T23:31:27.858544Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:957: Communication initialized successfully for 7/7 hosts
+2025-11-14T23:31:27.858742Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:981: Initialized communication in 4s
+2025-11-14T23:31:28.415412Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1009: Successfully appended Unix hosts file on 192.168.220.42
+2025-11-14T23:31:28.415512Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1009: Successfully appended Unix hosts file on 192.168.220.44
+2025-11-14T23:31:28.415540Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1013: Appended Unix hosts file in 0s
+2025-11-14T23:31:28.955191Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1019: Successfully appended Windows hosts file on 192.168.220.111
+2025-11-14T23:31:28.955290Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1019: Successfully appended Windows hosts file on 192.168.220.254
+2025-11-14T23:31:28.955317Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1023: Appended Windows hosts file in 0s
+2025-11-14T23:31:28.955341Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:573: Starting Windows download and execution in parallel...
+2025-11-14T23:31:28.955364Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:652: Found 2 Windows clients for download
+2025-11-14T23:31:28.955453Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:601: Starting Unix download and execution in parallel...
+2025-11-14T23:31:29.009213Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:749: [192.168.220.44] Attempting download with wget
+2025-11-14T23:31:29.024459Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:749: [192.168.220.42] Attempting download with wget
+2025-11-14T23:31:31.764934Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:757: [192.168.220.42] Successfully downloaded and validated chimera with wget
+2025-11-14T23:31:32.340850Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:757: [192.168.220.44] Successfully downloaded and validated chimera with wget
+2025-11-14T23:31:32.340978Z  INFO main ThreadId(01) pandoras_box::logging: pandoras_box/src/logging.rs:12: Successfully chimera download on: 192.168.220.42 (Unix)
+2025-11-14T23:31:32.341075Z  INFO main ThreadId(01) pandoras_box::logging: pandoras_box/src/logging.rs:64: [192.168.220.42] Command stdout: --2025-11-14 15:31:29--  https://github.com/M00NLIG7/pandoras_box/releases/download/CCDC-2024-2025/chimera
+Resolving github.com (github.com)... 140.82.116.4
+Connecting to github.com (github.com)|140.82.116.4|:443... connected.
+HTTP request sent, awaiting response... 302 Found
+Location: https://release-assets.githubusercontent.com/github-production-release-asset/727438325/0d9b124b-5b8e-44d3-885b-939c4fac91d9?sp=r&sv=2018-11-09&sr=b&spr=https&se=2025-11-15T00%3A31%3A41Z&rscd=attachment%3B+filename%3Dchimera&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2025-11-14T23%3A31%3A30Z&ske=2025-11-15T00%3A31%3A41Z&sks=b&skv=2018-11-09&sig=BcPcopw6iq4e4k14QTIsdY9ZusCEaMYdJPY5G6jB8E0%3D&jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmVsZWFzZS1hc3NldHMuZ2l0aHVidXNlcmNvbnRlbnQuY29tIiwia2V5Ijoia2V5MSIsImV4cCI6MTc2MzE2MzM5MSwibmJmIjoxNzYzMTYzMDkxLCJwYXRoIjoicmVsZWFzZWFzc2V0cHJvZHVjdGlvbi5ibG9iLmNvcmUud2luZG93cy5uZXQifQ.eb3FKzNnO8_DvagjSNHsT0x7EGa2nSI_R3OcRTcbEaY&response-content-disposition=attachment%3B%20filename%3Dchimera&response-content-type=application%2Foctet-stream [following]
+--2025-11-14 15:31:31--  https://release-assets.githubusercontent.com/github-production-release-asset/727438325/0d9b124b-5b8e-44d3-885b-939c4fac91d9?sp=r&sv=2018-11-09&sr=b&spr=https&se=2025-11-15T00%3A31%3A41Z&rscd=attachment%3B+filename%3Dchimera&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2025-11-14T23%3A31%3A30Z&ske=2025-11-15T00%3A31%3A41Z&sks=b&skv=2018-11-09&sig=BcPcopw6iq4e4k14QTIsdY9ZusCEaMYdJPY5G6jB8E0%3D&jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmVsZWFzZS1hc3NldHMuZ2l0aHVidXNlcmNvbnRlbnQuY29tIiwia2V5Ijoia2V5MSIsImV4cCI6MTc2MzE2MzM5MSwibmJmIjoxNzYzMTYzMDkxLCJwYXRoIjoicmVsZWFzZWFzc2V0cHJvZHVjdGlvbi5ibG9iLmNvcmUud2luZG93cy5uZXQifQ.eb3FKzNnO8_DvagjSNHsT0x7EGa2nSI_R3OcRTcbEaY&response-content-disposition=attachment%3B%20filename%3Dchimera&response-content-type=application%2Foctet-stream
+Resolving release-assets.githubusercontent.com (release-assets.githubusercontent.com)... 185.199.108.133, 185.199.109.133, 185.199.110.133, ...
+Connecting to release-assets.githubusercontent.com (release-assets.githubusercontent.com)|185.199.108.133|:443... connected.
+HTTP request sent, awaiting response... 200 OK
+Length: 6936304 (6.6M) [application/octet-stream]
+Saving to: ‘/tmp/chimera’
+
+     0K .......... .......... .......... .......... ..........  0% 4.26M 2s
+    50K .......... .......... .......... .......... ..........  1% 19.8M 1s
+   100K .......... .......... .......... .......... ..........  2% 7.77M 1s
+   150K .......... .......... .......... .......... ..........  2% 12.9M 1s
+   200K .......... .......... .......... .......... ..........  3% 18.7M 1s
+   250K .......... .......... .......... .......... ..........  4% 5.89M 1s
+   300K .......... .......... .......... .......... ..........  5% 9.67M 1s
+   350K .......... .......... .......... .......... ..........  5% 11.1M 1s
+   400K .......... .......... .......... .......... ..........  6% 10.9M 1s
+   450K .......... .......... .......... .......... ..........  7% 11.4M 1s
+   500K .......... .......... .......... .......... ..........  8% 12.1M 1s
+   550K .......... .......... .......... .......... ..........  8% 16.2M 1s
+   600K .......... .......... .......... .......... ..........  9% 15.1M 1s
+   650K .......... .......... .......... .......... .......... 10% 12.0M 1s
+   700K .......... .......... .......... .......... .......... 11% 12.1M 1s
+   750K .......... .......... .......... .......... .......... 11% 9.68M 1s
+   800K .......... .......... .......... .......... .......... 12% 12.3M 1s
+   850K .......... .......... .......... .......... .......... 13% 12.7M 1s
+   900K .......... .......... .......... .......... .......... 14% 11.8M 1s
+   950K .......... .......... .......... .......... .......... 14% 15.4M 1s
+  1000K .......... .......... .......... .......... .......... 15% 16.4M 1s
+  1050K .......... .......... .......... .......... .......... 16% 7.62M 1s
+  1100K .......... .......... .......... .......... .......... 16% 13.7M 1s
+  1150K .......... .......... .......... .......... .......... 17% 8.98M 1s
+  1200K .......... .......... .......... .......... .......... 18% 16.0M 0s
+  1250K .......... .......... .......... .......... .......... 19% 9.51M 0s
+  1300K .......... .......... .......... .......... .......... 19% 12.0M 0s
+  1350K .......... .......... .......... .......... .......... 20% 17.1M 0s
+  1400K .......... .......... .......... .......... .......... 21% 21.2M 0s
+  1450K .......... .......... .......... .......... .......... 22% 10.4M 0s
+  1500K .......... .......... .......... .......... .......... 22% 8.10M 0s
+  1550K .......... .......... .......... .......... .......... 23% 12.1M 0s
+  1600K .......... .......... .......... .......... .......... 24% 9.61M 0s
+  1650K .......... .......... .......... .......... .......... 25% 12.8M 0s
+  1700K .......... .......... .......... .......... .......... 25% 19.1M 0s
+  1750K .......... .......... .......... .......... .......... 26% 8.92M 0s
+  1800K .......... .......... .......... .......... .......... 27% 20.9M 0s
+  1850K .......... .......... .......... .......... .......... 28% 12.0M 0s
+  1900K .......... .......... .......... .......... .......... 28% 13.2M 0s
+  1950K .......... .......... .......... .......... .......... 29% 11.0M 0s
+  2000K .......... .......... .......... .......... .......... 30% 30.9M 0s
+  2050K .......... .......... .......... .......... .......... 31% 25.7M 0s
+  2100K .......... .......... .......... .......... .......... 31% 15.8M 0s
+  2150K .......... .......... .......... .......... .......... 32% 14.2M 0s
+  2200K .......... .......... .......... .......... .......... 33% 28.7M 0s
+  2250K .......... .......... .......... .......... .......... 33% 13.5M 0s
+  2300K .......... .......... .......... .......... .......... 34% 76.9M 0s
+  2350K .......... .......... .......... .......... .......... 35% 13.4M 0s
+  2400K .......... .......... .......... .......... .......... 36% 29.3M 0s
+  2450K .......... .......... .......... .......... .......... 36% 18.7M 0s
+  2500K .......... .......... .......... .......... .......... 37% 15.8M 0s
+  2550K .......... .......... .......... .......... .......... 38% 20.4M 0s
+  2600K .......... .......... .......... .......... .......... 39% 38.8M 0s
+  2650K .......... .......... .......... .......... .......... 39% 26.1M 0s
+  2700K .......... .......... .......... .......... .......... 40% 15.4M 0s
+  2750K .......... .......... .......... .......... .......... 41% 13.6M 0s
+  2800K .......... .......... .......... .......... .......... 42% 71.0M 0s
+  2850K .......... .......... .......... .......... .......... 42% 16.7M 0s
+  2900K .......... .......... .......... .......... .......... 43% 14.3M 0s
+  2950K .......... .......... .......... .......... .......... 44% 39.6M 0s
+  3000K .......... .......... .......... .......... .......... 45%  119M 0s
+  3050K .......... .......... .......... .......... .......... 45% 10.1M 0s
+  3100K .......... .......... .......... .......... .......... 46% 18.7M 0s
+  3150K .......... .......... .......... .......... .......... 47% 28.2M 0s
+  3200K .......... .......... .......... .......... .......... 47% 17.4M 0s
+  3250K .......... .......... .......... .......... .......... 48% 18.9M 0s
+  3300K .......... .......... .......... .......... .......... 49% 16.1M 0s
+  3350K .......... .......... .......... .......... .......... 50% 28.9M 0s
+  3400K .......... .......... .......... .......... .......... 50% 13.1M 0s
+  3450K .......... .......... .......... .......... .......... 51% 52.3M 0s
+  3500K .......... .......... .......... .......... .......... 52% 17.6M 0s
+  3550K .......... .......... .......... .......... .......... 53% 17.6M 0s
+  3600K .......... .......... .......... .......... .......... 53%  110M 0s
+  3650K .......... .......... .......... .......... .......... 54% 18.4M 0s
+  3700K .......... .......... .......... .......... .......... 55%  110M 0s
+  3750K .......... .......... .......... .......... .......... 56% 19.6M 0s
+  3800K .......... .......... .......... .......... .......... 56% 48.7M 0s
+  3850K .......... .......... .......... .......... .......... 57% 22.6M 0s
+  3900K .......... .......... .......... .......... .......... 58% 23.9M 0s
+  3950K .......... .......... .......... .......... .......... 59% 25.6M 0s
+  4000K .......... .......... .......... .......... .......... 59%  121M 0s
+  4050K .......... .......... .......... .......... .......... 60% 17.9M 0s
+  4100K .......... .......... .......... .......... .......... 61% 21.8M 0s
+  4150K .......... .......... .......... .......... .......... 62% 21.4M 0s
+  4200K .......... .......... .......... .......... .......... 62%  106M 0s
+  4250K .......... .......... .......... .......... .......... 63% 70.1M 0s
+  4300K .......... .......... .......... .......... .......... 64% 20.5M 0s
+  4350K .......... .......... .......... .......... .......... 64% 23.0M 0s
+  4400K .......... .......... .......... .......... .......... 65% 23.5M 0s
+  4450K .......... .......... .......... .......... .......... 66% 57.6M 0s
+  4500K .......... .......... .......... .......... .......... 67% 22.6M 0s
+  4550K .......... .......... .......... .......... .......... 67% 49.7M 0s
+  4600K .......... .......... .......... .......... .......... 68% 27.8M 0s
+  4650K .......... .......... .......... .......... .......... 69% 22.8M 0s
+  4700K .......... .......... .......... .......... .......... 70% 32.1M 0s
+  4750K .......... .......... .......... .......... .......... 70%  127M 0s
+  4800K .......... .......... .......... .......... .......... 71% 11.2M 0s
+  4850K .......... .......... .......... .......... .......... 72% 64.8M 0s
+  4900K .......... .......... .......... .......... .......... 73% 23.2M 0s
+  4950K .......... .......... .......... .......... .......... 73% 28.9M 0s
+  5000K .......... .......... .......... .......... .......... 74% 77.8M 0s
+  5050K .......... .......... .......... .......... .......... 75% 19.2M 0s
+  5100K .......... .......... .......... .......... .......... 76% 20.3M 0s
+  5150K .......... .......... .......... .......... .......... 76%  100M 0s
+  5200K .......... .......... .......... .......... .......... 77% 14.2M 0s
+  5250K .......... .......... .......... .......... .......... 78%  126M 0s
+  5300K .......... .......... .......... .......... .......... 78%  108M 0s
+  5350K .......... .......... .......... .......... .......... 79% 12.2M 0s
+  5400K .......... .......... .......... .......... .......... 80% 63.6M 0s
+  5450K .......... .......... .......... .......... .......... 81% 20.4M 0s
+  5500K .......... .......... .......... .......... .......... 81%  115M 0s
+  5550K .......... .......... .......... .......... .......... 82%  129M 0s
+  5600K .......... .......... .......... .......... .......... 83% 14.3M 0s
+  5650K .......... .......... .......... .......... .......... 84%  104M 0s
+  5700K .......... .......... .......... .......... .......... 84% 14.0M 0s
+  5750K .......... .......... .......... .......... .......... 85% 88.4M 0s
+  5800K .......... .......... .......... .......... .......... 86% 29.8M 0s
+  5850K .......... .......... .......... .......... .......... 87%  129M 0s
+  5900K .......... .......... .......... .......... .......... 87% 18.4M 0s
+  5950K .......... .......... .......... .......... .......... 88% 66.7M 0s
+  6000K .......... .......... .......... .......... .......... 89% 16.0M 0s
+  6050K .......... .......... .......... .......... .......... 90%  125M 0s
+  6100K .......... .......... .......... .......... .......... 90% 19.8M 0s
+  6150K .......... .......... .......... .......... .......... 91% 95.1M 0s
+  6200K .......... .......... .......... .......... .......... 92% 18.0M 0s
+  6250K .......... .......... .......... .......... .......... 93%  121M 0s
+  6300K .......... .......... .......... .......... .......... 93% 19.1M 0s
+  6350K .......... .......... .......... .......... .......... 94%  116M 0s
+  6400K .......... .......... .......... .......... .......... 95% 19.0M 0s
+  6450K .......... .......... .......... .......... .......... 95%  126M 0s
+  6500K .......... .......... .......... .......... .......... 96% 17.5M 0s
+  6550K .......... .......... .......... .......... .......... 97%  125M 0s
+  6600K .......... .......... .......... .......... .......... 98% 26.9M 0s
+  6650K .......... .......... .......... .......... .......... 98% 24.4M 0s
+  6700K .......... .......... .......... .......... .......... 99% 1.98M 0s
+  6750K .......... .......... ...                             100% 95.5M=0.4s
+
+2025-11-14 15:31:31 (17.5 MB/s) - ‘/tmp/chimera’ saved [6936304/6936304]
+
+Download validated
+2025-11-14T23:31:32.341697Z  INFO main ThreadId(01) pandoras_box::logging: pandoras_box/src/logging.rs:12: Successfully chimera download on: 192.168.220.44 (Unix)
+2025-11-14T23:31:32.341937Z  INFO main ThreadId(01) pandoras_box::logging: pandoras_box/src/logging.rs:64: [192.168.220.44] Command stdout: --2025-11-14 15:31:29--  https://github.com/M00NLIG7/pandoras_box/releases/download/CCDC-2024-2025/chimera
+Resolving github.com (github.com)... 140.82.116.4
+Connecting to github.com (github.com)|140.82.116.4|:443... connected.
+HTTP request sent, awaiting response... 302 Found
+Location: https://release-assets.githubusercontent.com/github-production-release-asset/727438325/0d9b124b-5b8e-44d3-885b-939c4fac91d9?sp=r&sv=2018-11-09&sr=b&spr=https&se=2025-11-15T00%3A31%3A41Z&rscd=attachment%3B+filename%3Dchimera&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2025-11-14T23%3A31%3A30Z&ske=2025-11-15T00%3A31%3A41Z&sks=b&skv=2018-11-09&sig=BcPcopw6iq4e4k14QTIsdY9ZusCEaMYdJPY5G6jB8E0%3D&jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmVsZWFzZS1hc3NldHMuZ2l0aHVidXNlcmNvbnRlbnQuY29tIiwia2V5Ijoia2V5MSIsImV4cCI6MTc2MzE2MzM5MSwibmJmIjoxNzYzMTYzMDkxLCJwYXRoIjoicmVsZWFzZWFzc2V0cHJvZHVjdGlvbi5ibG9iLmNvcmUud2luZG93cy5uZXQifQ.eb3FKzNnO8_DvagjSNHsT0x7EGa2nSI_R3OcRTcbEaY&response-content-disposition=attachment%3B%20filename%3Dchimera&response-content-type=application%2Foctet-stream [following]
+--2025-11-14 15:31:31--  https://release-assets.githubusercontent.com/github-production-release-asset/727438325/0d9b124b-5b8e-44d3-885b-939c4fac91d9?sp=r&sv=2018-11-09&sr=b&spr=https&se=2025-11-15T00%3A31%3A41Z&rscd=attachment%3B+filename%3Dchimera&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2025-11-14T23%3A31%3A30Z&ske=2025-11-15T00%3A31%3A41Z&sks=b&skv=2018-11-09&sig=BcPcopw6iq4e4k14QTIsdY9ZusCEaMYdJPY5G6jB8E0%3D&jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmVsZWFzZS1hc3NldHMuZ2l0aHVidXNlcmNvbnRlbnQuY29tIiwia2V5Ijoia2V5MSIsImV4cCI6MTc2MzE2MzM5MSwibmJmIjoxNzYzMTYzMDkxLCJwYXRoIjoicmVsZWFzZWFzc2V0cHJvZHVjdGlvbi5ibG9iLmNvcmUud2luZG93cy5uZXQifQ.eb3FKzNnO8_DvagjSNHsT0x7EGa2nSI_R3OcRTcbEaY&response-content-disposition=attachment%3B%20filename%3Dchimera&response-content-type=application%2Foctet-stream
+Resolving release-assets.githubusercontent.com (release-assets.githubusercontent.com)... 185.199.109.133, 185.199.110.133, 185.199.111.133, ...
+Connecting to release-assets.githubusercontent.com (release-assets.githubusercontent.com)|185.199.109.133|:443... connected.
+HTTP request sent, awaiting response... 200 OK
+Length: 6936304 (6.6M) [application/octet-stream]
+Saving to: ‘/tmp/chimera’
+
+     0K .......... .......... .......... .......... ..........  0% 9.64M 1s
+    50K .......... .......... .......... .......... ..........  1% 10.0M 1s
+   100K .......... .......... .......... .......... ..........  2% 27.9M 1s
+   150K .......... .......... .......... .......... ..........  2% 20.8M 0s
+   200K .......... .......... .......... .......... ..........  3% 33.5M 0s
+   250K .......... .......... .......... .......... ..........  4% 13.3M 0s
+   300K .......... .......... .......... .......... ..........  5% 33.3M 0s
+   350K .......... .......... .......... .......... ..........  5% 10.9M 0s
+   400K .......... .......... .......... .......... ..........  6% 21.0M 0s
+   450K .......... .......... .......... .......... ..........  7% 19.7M 0s
+   500K .......... .......... .......... .......... ..........  8% 68.0M 0s
+   550K .......... .......... .......... .......... ..........  8% 14.9M 0s
+   600K .......... .......... .......... .......... ..........  9% 37.1M 0s
+   650K .......... .......... .......... .......... .......... 10% 18.0M 0s
+   700K .......... .......... .......... .......... .......... 11% 62.6M 0s
+   750K .......... .......... .......... .......... .......... 11% 17.2M 0s
+   800K .......... .......... .......... .......... .......... 12% 15.5M 0s
+   850K .......... .......... .......... .......... .......... 13% 59.6M 0s
+   900K .......... .......... .......... .......... .......... 14% 14.3M 0s
+   950K .......... .......... .......... .......... .......... 14% 48.7M 0s
+  1000K .......... .......... .......... .......... .......... 15% 64.1M 0s
+  1050K .......... .......... .......... .......... .......... 16% 14.8M 0s
+  1100K .......... .......... .......... .......... .......... 16% 32.0M 0s
+  1150K .......... .......... .......... .......... .......... 17% 16.6M 0s
+  1200K .......... .......... .......... .......... .......... 18% 12.4M 0s
+  1250K .......... .......... .......... .......... .......... 19% 11.7M 0s
+  1300K .......... .......... .......... .......... .......... 19% 32.0M 0s
+  1350K .......... .......... .......... .......... .......... 20% 52.9M 0s
+  1400K .......... .......... .......... .......... .......... 21% 22.0M 0s
+  1450K .......... .......... .......... .......... .......... 22% 20.1M 0s
+  1500K .......... .......... .......... .......... .......... 22% 63.9M 0s
+  1550K .......... .......... .......... .......... .......... 23% 16.6M 0s
+  1600K .......... .......... .......... .......... .......... 24% 21.0M 0s
+  1650K .......... .......... .......... .......... .......... 25% 11.0M 0s
+  1700K .......... .......... .......... .......... .......... 25% 14.6M 0s
+  1750K .......... .......... .......... .......... .......... 26% 26.9M 0s
+  1800K .......... .......... .......... .......... .......... 27% 23.3M 0s
+  1850K .......... .......... .......... .......... .......... 28% 26.3M 0s
+  1900K .......... .......... .......... .......... .......... 28% 22.9M 0s
+  1950K .......... .......... .......... .......... .......... 29% 27.1M 0s
+  2000K .......... .......... .......... .......... .......... 30% 30.3M 0s
+  2050K .......... .......... .......... .......... .......... 31% 23.3M 0s
+  2100K .......... .......... .......... .......... .......... 31% 58.7M 0s
+  2150K .......... .......... .......... .......... .......... 32% 20.7M 0s
+  2200K .......... .......... .......... .......... .......... 33% 18.4M 0s
+  2250K .......... .......... .......... .......... .......... 33% 56.2M 0s
+  2300K .......... .......... .......... .......... .......... 34% 18.8M 0s
+  2350K .......... .......... .......... .......... .......... 35% 19.9M 0s
+  2400K .......... .......... .......... .......... .......... 36% 29.2M 0s
+  2450K .......... .......... .......... .......... .......... 36% 22.8M 0s
+  2500K .......... .......... .......... .......... .......... 37% 34.8M 0s
+  2550K .......... .......... .......... .......... .......... 38% 64.3M 0s
+  2600K .......... .......... .......... .......... .......... 39% 18.9M 0s
+  2650K .......... .......... .......... .......... .......... 39% 24.3M 0s
+  2700K .......... .......... .......... .......... .......... 40% 36.5M 0s
+  2750K .......... .......... .......... .......... .......... 41% 47.6M 0s
+  2800K .......... .......... .......... .......... .......... 42% 13.1M 0s
+  2850K .......... .......... .......... .......... .......... 42% 16.5M 0s
+  2900K .......... .......... .......... .......... .......... 43% 21.0M 0s
+  2950K .......... .......... .......... .......... .......... 44% 23.3M 0s
+  3000K .......... .......... .......... .......... .......... 45% 27.0M 0s
+  3050K .......... .......... .......... .......... .......... 45% 19.9M 0s
+  3100K .......... .......... .......... .......... .......... 46% 63.0M 0s
+  3150K .......... .......... .......... .......... .......... 47% 15.3M 0s
+  3200K .......... .......... .......... .......... .......... 47% 27.3M 0s
+  3250K .......... .......... .......... .......... .......... 48% 20.7M 0s
+  3300K .......... .......... .......... .......... .......... 49% 35.4M 0s
+  3350K .......... .......... .......... .......... .......... 50% 19.0M 0s
+  3400K .......... .......... .......... .......... .......... 50% 18.5M 0s
+  3450K .......... .......... .......... .......... .......... 51% 51.1M 0s
+  3500K .......... .......... .......... .......... .......... 52% 10.8M 0s
+  3550K .......... .......... .......... .......... .......... 53% 19.7M 0s
+  3600K .......... .......... .......... .......... .......... 53% 28.1M 0s
+  3650K .......... .......... .......... .......... .......... 54% 20.7M 0s
+  3700K .......... .......... .......... .......... .......... 55% 88.8M 0s
+  3750K .......... .......... .......... .......... .......... 56%  118M 0s
+  3800K .......... .......... .......... .......... .......... 56% 31.3M 0s
+  3850K .......... .......... .......... .......... .......... 57% 99.0M 0s
+  3900K .......... .......... .......... .......... .......... 58% 28.4M 0s
+  3950K .......... .......... .......... .......... .......... 59% 23.3M 0s
+  4000K .......... .......... .......... .......... .......... 59% 26.9M 0s
+  4050K .......... .......... .......... .......... .......... 60% 40.2M 0s
+  4100K .......... .......... .......... .......... .......... 61% 83.8M 0s
+  4150K .......... .......... .......... .......... .......... 62%  118M 0s
+  4200K .......... .......... .......... .......... .......... 62% 18.8M 0s
+  4250K .......... .......... .......... .......... .......... 63% 55.7M 0s
+  4300K .......... .......... .......... .......... .......... 64% 32.9M 0s
+  4350K .......... .......... .......... .......... .......... 64% 16.9M 0s
+  4400K .......... .......... .......... .......... .......... 65% 40.6M 0s
+  4450K .......... .......... .......... .......... .......... 66% 34.2M 0s
+  4500K .......... .......... .......... .......... .......... 67%  110M 0s
+  4550K .......... .......... .......... .......... .......... 67% 22.2M 0s
+  4600K .......... .......... .......... .......... .......... 68% 19.4M 0s
+  4650K .......... .......... .......... .......... .......... 69% 92.5M 0s
+  4700K .......... .......... .......... .......... .......... 70% 35.6M 0s
+  4750K .......... .......... .......... .......... .......... 70%  112M 0s
+  4800K .......... .......... .......... .......... .......... 71% 22.9M 0s
+  4850K .......... .......... .......... .......... .......... 72% 66.4M 0s
+  4900K .......... .......... .......... .......... .......... 73% 23.8M 0s
+  4950K .......... .......... .......... .......... .......... 73% 73.4M 0s
+  5000K .......... .......... .......... .......... .......... 74% 79.4M 0s
+  5050K .......... .......... .......... .......... .......... 75% 14.1M 0s
+  5100K .......... .......... .......... .......... .......... 76%  111M 0s
+  5150K .......... .......... .......... .......... .......... 76% 25.0M 0s
+  5200K .......... .......... .......... .......... .......... 77% 52.9M 0s
+  5250K .......... .......... .......... .......... .......... 78% 23.6M 0s
+  5300K .......... .......... .......... .......... .......... 78% 69.5M 0s
+  5350K .......... .......... .......... .......... .......... 79%  123M 0s
+  5400K .......... .......... .......... .......... .......... 80% 11.0M 0s
+  5450K .......... .......... .......... .......... .......... 81%  108M 0s
+  5500K .......... .......... .......... .......... .......... 81% 18.8M 0s
+  5550K .......... .......... .......... .......... .......... 82%  121M 0s
+  5600K .......... .......... .......... .......... .......... 83% 24.5M 0s
+  5650K .......... .......... .......... .......... .......... 84% 34.9M 0s
+  5700K .......... .......... .......... .......... .......... 84%  102M 0s
+  5750K .......... .......... .......... .......... .......... 85% 50.0M 0s
+  5800K .......... .......... .......... .......... .......... 86% 28.3M 0s
+  5850K .......... .......... .......... .......... .......... 87%  122M 0s
+  5900K .......... .......... .......... .......... .......... 87% 24.9M 0s
+  5950K .......... .......... .......... .......... .......... 88% 51.0M 0s
+  6000K .......... .......... .......... .......... .......... 89% 23.8M 0s
+  6050K .......... .......... .......... .......... .......... 90% 36.7M 0s
+  6100K .......... .......... .......... .......... .......... 90%  106M 0s
+  6150K .......... .......... .......... .......... .......... 91%  124M 0s
+  6200K .......... .......... .......... .......... .......... 92% 26.8M 0s
+  6250K .......... .......... .......... .......... .......... 93% 45.3M 0s
+  6300K .......... .......... .......... .......... .......... 93%  110M 0s
+  6350K .......... .......... .......... .......... .......... 94%  115M 0s
+  6400K .......... .......... .......... .......... .......... 95% 27.7M 0s
+  6450K .......... .......... .......... .......... .......... 95% 61.9M 0s
+  6500K .......... .......... .......... .......... .......... 96% 76.8M 0s
+  6550K .......... .......... .......... .......... .......... 97% 24.8M 0s
+  6600K .......... .......... .......... .......... .......... 98%  110M 0s
+  6650K .......... .......... .......... .......... .......... 98%  122M 0s
+  6700K .......... .......... .......... .......... .......... 99%  100M 0s
+  6750K .......... .......... ...                             100% 12.8M=0.2s
+
+2025-11-14 15:31:31 (26.8 MB/s) - ‘/tmp/chimera’ saved [6936304/6936304]
+
+Download validated
+2025-11-14T23:31:32.772250Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:611: Successfully set execute permission on chimera for 192.168.220.42
+2025-11-14T23:31:32.772347Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:613: [192.168.220.42] chmod verification: -rwxr-xr-x 1 root root 6936304 Nov 14 15:28 /tmp/chimera
+2025-11-14T23:31:32.772377Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:611: Successfully set execute permission on chimera for 192.168.220.44
+2025-11-14T23:31:32.772399Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:613: [192.168.220.44] chmod verification: -rwxr-xr-x 1 root root 6936304 Nov 14 15:28 /tmp/chimera
+2025-11-14T23:31:32.772424Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1253: Executing all mode on Unix hosts -m 62
+2025-11-14T23:31:32.772479Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1155: Executing all mode -m 62 on 2 specific hosts: 192.168.220.42, 192.168.220.44
+2025-11-14T23:31:45.260200Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:672: Downloading chimera to 2 Windows hosts (curl/PowerShell/bitsadmin fallback chain)
+
+2025-11-14T23:33:58.470472Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:682: [192.168.220.111] Windows chimera download validated successfully
+2025-11-14T23:33:58.470622Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:682: [192.168.220.254] Windows chimera download validated successfully
+2025-11-14T23:33:58.553985Z  INFO main ThreadId(01) pandoras_box::logging: pandoras_box/src/logging.rs:12: Successfully chimera download on: 192.168.220.111 (Windows)
+2025-11-14T23:33:58.555220Z  INFO main ThreadId(01) pandoras_box::logging: pandoras_box/src/logging.rs:64: [192.168.220.111] Command stdout: curl completed
+
+administrator@CTHULU C:\Users\administrator.CTHULU>if 14906848 GTR 10000000 (echo SUCCESS: Download validated )  else (echo FAILED: File too small )
+SUCCESS: Download validated
+2025-11-14T23:33:58.555262Z  WARN main ThreadId(01) pandoras_box::logging: pandoras_box/src/logging.rs:67: [192.168.220.111] Command stderr: % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+100 14.2M  100 14.2M    0     0  9706k      0  0:00:01  0:00:01 --:--:-- 39.8M
+2025-11-14T23:33:58.555307Z  INFO main ThreadId(01) pandoras_box::logging: pandoras_box/src/logging.rs:12: Successfully chimera download on: 192.168.220.254 (Windows)
+2025-11-14T23:33:58.557591Z  INFO main ThreadId(01) pandoras_box::logging: pandoras_box/src/logging.rs:64: [192.168.220.254] Command stdout: PowerShell WebRequest completed
+
+alien\administrator@KERBEROS C:\Users\Administrator>if 14906848 GTR 10000000 (echo SUCCESS: Download validated )  else (echo FAILED: File too small )
+SUCCESS: Download validated
+2025-11-14T23:33:58.898676Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:591: Waiting 3 seconds for Windows file system sync and security scans...
+2025-11-14T23:34:01.900266Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1253: Executing all mode on Windows hosts -m 62
+2025-11-14T23:34:01.900404Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1155: Executing all mode -m 62 on 2 specific hosts: 192.168.220.111, 192.168.220.254
+2025-11-14T23:34:16.866289Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1259: Successfully executed all mode on 192.168.220.111
+2025-11-14T23:34:16.866709Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1259: Successfully executed all mode on 192.168.220.254
+2025-11-14T23:34:48.364764Z  WARN main ThreadId(01) exec{command=Command { cmd: "/tmp/chimera all -m 62", args: [] }}:process_channel_output: rustrc::ssh: rustrc/src/ssh/mod.rs:430: Failed to send EOF error=SendError
+2025-11-14T23:34:49.348845Z  WARN main ThreadId(01) exec{command=Command { cmd: "/tmp/chimera all -m 62", args: [] }}:process_channel_output: rustrc::ssh: rustrc/src/ssh/mod.rs:430: Failed to send EOF error=SendError
+2025-11-14T23:34:49.349090Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1259: Successfully executed all mode on 192.168.220.42
+2025-11-14T23:34:49.349173Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1259: Successfully executed all mode on 192.168.220.44
+2025-11-14T23:34:49.687158Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1027: Downloaded Chimera in 200s
+2025-11-14T23:34:49.696786Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1075: Waiting 15 seconds for chimera HTTP servers to start on all hosts...
+2025-11-14T23:35:04.698658Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:415: Starting file fetch for 4 hosts, uri: inventory.json
+2025-11-14T23:35:05.528566Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:433: Fetching inventory.json from http://192.168.220.111:44372/inventory.json
+2025-11-14T23:35:05.842547Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:433: Fetching inventory.json from http://192.168.220.254:44372/inventory.json
+2025-11-14T23:35:05.843376Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:433: Fetching inventory.json from http://192.168.220.42:44372/inventory.json
+2025-11-14T23:35:05.845452Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:433: Fetching inventory.json from http://192.168.220.44:44372/inventory.json
+2025-11-14T23:35:06.353302Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:334: Successfully saved inventory.json for 192.168.220.111 to chimera_inventory_192.168.220.111.json
+2025-11-14T23:35:06.355730Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:334: Successfully saved inventory.json for 192.168.220.42 to chimera_inventory_192.168.220.42.json
+2025-11-14T23:35:08.844371Z ERROR main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:347: Failed to fetch inventory.json from 192.168.220.254 on attempt 1: error sending request for url (http://192.168.220.254:44372/inventory.json)
+2025-11-14T23:35:08.844490Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:356: Retry attempt 1 for 192.168.220.254 after 1000ms delay
+2025-11-14T23:35:08.847409Z ERROR main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:347: Failed to fetch inventory.json from 192.168.220.44 on attempt 1: error sending request for url (http://192.168.220.44:44372/inventory.json)
+2025-11-14T23:35:08.847646Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:356: Retry attempt 1 for 192.168.220.44 after 1000ms delay
+2025-11-14T23:35:12.847427Z ERROR main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:347: Failed to fetch inventory.json from 192.168.220.254 on attempt 2: error sending request for url (http://192.168.220.254:44372/inventory.json)
+2025-11-14T23:35:12.848332Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:383: Logged failed fetch for 192.168.220.254 to failed_inventory_fetches.log
+2025-11-14T23:35:12.851174Z ERROR main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:347: Failed to fetch inventory.json from 192.168.220.44 on attempt 2: error sending request for url (http://192.168.220.44:44372/inventory.json)
+2025-11-14T23:35:12.851621Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:383: Logged failed fetch for 192.168.220.44 to failed_inventory_fetches.log
+2025-11-14T23:35:12.851731Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:444: Successfully fetched inventory.json from 192.168.220.111
+2025-11-14T23:35:12.852915Z ERROR main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:445: Failed to fetch inventory.json from 192.168.220.254: Command error: Failed to fetch file: error sending request for url (http://192.168.220.254:44372/inventory.json)
+2025-11-14T23:35:12.853382Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:444: Successfully fetched inventory.json from 192.168.220.42
+2025-11-14T23:35:12.853648Z ERROR main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:445: Failed to fetch inventory.json from 192.168.220.44: Command error: Failed to fetch file: error sending request for url (http://192.168.220.44:44372/inventory.json)
+2025-11-14T23:35:12.853858Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:415: Starting file fetch for 4 hosts, uri: application.log
+2025-11-14T23:35:12.854232Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:433: Fetching application.log from http://192.168.220.111:44372/application.log
+2025-11-14T23:35:12.855520Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:433: Fetching application.log from http://192.168.220.254:44372/application.log
+2025-11-14T23:35:12.856003Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:433: Fetching application.log from http://192.168.220.42:44372/application.log
+2025-11-14T23:35:12.857284Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:433: Fetching application.log from http://192.168.220.44:44372/application.log
+2025-11-14T23:35:12.908663Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:334: Successfully saved application.log for 192.168.220.111 to chimera_application_log_192.168.220.111.json
+2025-11-14T23:35:12.984862Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:334: Successfully saved application.log for 192.168.220.42 to chimera_application_log_192.168.220.42.json
+2025-11-14T23:35:15.856901Z ERROR main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:347: Failed to fetch application.log from 192.168.220.254 on attempt 1: error sending request for url (http://192.168.220.254:44372/application.log)
+2025-11-14T23:35:15.857010Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:356: Retry attempt 1 for 192.168.220.254 after 1000ms delay
+2025-11-14T23:35:15.858947Z ERROR main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:347: Failed to fetch application.log from 192.168.220.44 on attempt 1: error sending request for url (http://192.168.220.44:44372/application.log)
+2025-11-14T23:35:15.859201Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:356: Retry attempt 1 for 192.168.220.44 after 1000ms delay
+2025-11-14T23:35:19.858855Z ERROR main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:347: Failed to fetch application.log from 192.168.220.254 on attempt 2: error sending request for url (http://192.168.220.254:44372/application.log)
+2025-11-14T23:35:19.859522Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:383: Logged failed fetch for 192.168.220.254 to failed_inventory_fetches.log
+2025-11-14T23:35:19.861898Z ERROR main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:347: Failed to fetch application.log from 192.168.220.44 on attempt 2: error sending request for url (http://192.168.220.44:44372/application.log)
+2025-11-14T23:35:19.862350Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:383: Logged failed fetch for 192.168.220.44 to failed_inventory_fetches.log
+2025-11-14T23:35:19.862428Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:444: Successfully fetched application.log from 192.168.220.111
+2025-11-14T23:35:19.862536Z ERROR main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:445: Failed to fetch application.log from 192.168.220.254: Command error: Failed to fetch file: error sending request for url (http://192.168.220.254:44372/application.log)
+2025-11-14T23:35:19.862644Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:444: Successfully fetched application.log from 192.168.220.42
+2025-11-14T23:35:19.863726Z ERROR main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:445: Failed to fetch application.log from 192.168.220.44: Command error: Failed to fetch file: error sending request for url (http://192.168.220.44:44372/application.log)
+2025-11-14T23:35:19.863814Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1081: Fetched files in 15s
+2025-11-14T23:35:19.863843Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1083: Orchestrator run completed. Summary:
+Total hosts: 7
+Successfully connected: 7
+Successfully deployed: 4
+2025-11-14T23:35:19.863868Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1094: Cleaning up connections to all hosts
+2025-11-14T23:35:19.863914Z  INFO main ThreadId(01) pandoras_box::orchestrator: /home/m00nl1g7/dev/pandoras_box/pandoras_box/src/orchestrator.rs:1098: Disconnected from 4/4 hosts
+2025-11-14T23:35:19.864904Z  INFO main ThreadId(01) pandoras_box: pandoras_box/src/main.rs:121: Orchestrator completed successfully
+2025-11-14T23:35:21.522120Z  INFO main ThreadId(01) pandoras_box: pandoras_box/src/main.rs:26: Memory Usage at Exit: 13020 KB
+
