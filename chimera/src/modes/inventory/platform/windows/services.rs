@@ -17,11 +17,11 @@ pub async fn services() -> Vec<Service> {
         _ => return Vec::new(), // or handle the error as appropriate
     };
 
-    // Only collect running services or services set to auto-start
-    // This significantly reduces output on Domain Controllers (from 200+ to ~30-50 services)
-    // Similar to Linux showing only active/enabled services
+    // Only collect services that are BOTH running AND auto-start
+    // This significantly reduces output on Domain Controllers (from 200+ to ~15-25 critical services)
+    // Similar to Linux showing only active services (not all enabled services)
     let results: Vec<HashMap<String, Variant>> = wmi_con
-        .raw_query("SELECT * FROM Win32_Service WHERE State='Running' OR StartMode='Auto'")
+        .raw_query("SELECT * FROM Win32_Service WHERE State='Running' AND StartMode='Auto'")
         .unwrap();
     let mut services = Vec::new();
     for os in results {
