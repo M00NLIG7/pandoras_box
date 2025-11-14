@@ -500,28 +500,34 @@ impl Orchestrator {
     }
 
     fn generate_download_command(tool: &str, url: &str) -> String {
+        // Validate file size is > 1MB (chimera should be ~7MB for Unix, ~15MB for Windows)
+        // Use 1000000 bytes (1MB) as threshold to account for busybox and ensure cross-platform compatibility
+        let size_check = format!("[ -f {} ] && [ $(stat -c %s {} 2>/dev/null || stat -f %z {} 2>/dev/null || wc -c < {}) -gt 1000000 ]",
+            OUTPUT_PATH, OUTPUT_PATH, OUTPUT_PATH, OUTPUT_PATH);
+
         match tool {
             "wget" => {
-                // Using BusyBox compatible options with quiet mode
+                // Using BusyBox compatible options, validate download succeeded and file size is correct
                 format!(
-                    "wget -q --no-check-certificate {} -O {} && ls -l {}",
-                    url, OUTPUT_PATH, OUTPUT_PATH
+                    "wget --no-check-certificate {} -O {} 2>&1 && {} && echo 'Download validated' || (echo 'Download failed or file too small'; exit 1)",
+                    url, OUTPUT_PATH, size_check
                 )
             },
             "curl" => {
-                // Silent mode, suppress progress and errors
+                // Show progress, validate download succeeded and file size is correct
                 format!(
-                    "curl -s -k -L {} -o {} && ls -l {}",
-                    url, OUTPUT_PATH, OUTPUT_PATH
+                    "curl -k -L {} -o {} 2>&1 && {} && echo 'Download validated' || (echo 'Download failed or file too small'; exit 1)",
+                    url, OUTPUT_PATH, size_check
                 )
             },
             "perl" => {
                 let (host, path) = Self::generate_perl_url_parts(url);
                 format!(
-                    "perl -e 'use IO::Socket::SSL qw(SSL_VERIFY_NONE); $s=IO::Socket::SSL->new(PeerAddr=>\"{host}:443\", SSL_verify_mode => SSL_VERIFY_NONE) or die $!; print $s \"GET /{path} HTTP/1.0\\r\\nHost: {host}\\r\\nUser-Agent: Mozilla/5.0\\r\\n\\r\\n\"; while(<$s>){{last if /^\\r\\n$/}} while(read($s,$b,8192)){{print $b}}' > {output} 2>/dev/null && ls -l {output}",
+                    "perl -e 'use IO::Socket::SSL qw(SSL_VERIFY_NONE); $s=IO::Socket::SSL->new(PeerAddr=>\"{host}:443\", SSL_verify_mode => SSL_VERIFY_NONE) or die $!; print $s \"GET /{path} HTTP/1.0\\r\\nHost: {host}\\r\\nUser-Agent: Mozilla/5.0\\r\\n\\r\\n\"; while(<$s>){{last if /^\\r\\n$/}} while(read($s,$b,8192)){{print $b}}' > {output} 2>&1 && {check} && echo 'Download validated' || (echo 'Download failed or file too small'; exit 1)",
                     host = host,
                     path = path,
-                    output = OUTPUT_PATH
+                    output = OUTPUT_PATH,
+                    check = size_check
                 )
             },
             _ => String::new()
@@ -637,19 +643,54 @@ impl Orchestrator {
     }
 
     async fn download_chimera_win(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
+       let windows_clients = communicator.get_clients_by_os(OS::Windows);
+       info!("Found {} Windows clients for download", windows_clients.len());
+
+       if windows_clients.is_empty() {
+           warn!("No Windows clients found, skipping Windows download");
+           return Vec::new();
+       }
+
        // Create temp directory and time sync
        let mkdir_cmd = "cmd.exe /c md C:\\Temp 2>nul & w32tm /resync";
        communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
 
        // Multi-method download with fallbacks for Vista through Windows 11
        // Method 1: curl (Win10 1803+), Method 2: PowerShell (Win7+), Method 3: bitsadmin (Vista+ - slowest, last resort)
+       // Validate file size is > 10MB (chimera.exe should be ~15MB)
        let download_cmd = format!(
-           "cmd.exe /c \"(curl.exe --version >nul 2>&1 && curl.exe -s -k -L -o C:\\Temp\\chimera.exe {url}) || (powershell -Command \"$ErrorActionPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try {{ Invoke-WebRequest -Uri '{url}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing }} catch {{ (New-Object System.Net.WebClient).DownloadFile('{url}', 'C:\\Temp\\chimera.exe') }}\") || (bitsadmin /transfer ChimeraDownload /download /priority FOREGROUND {url} C:\\Temp\\chimera.exe >nul) && if exist C:\\Temp\\chimera.exe (echo SUCCESS: Downloaded && dir C:\\Temp\\chimera.exe) else (echo FAILED: File does not exist)\"",
+           "cmd.exe /c \"(curl.exe --version >nul 2>&1 && curl.exe -k -L -o C:\\Temp\\chimera.exe {url} && echo curl completed) || (powershell -Command \"$ErrorActionPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try {{ Invoke-WebRequest -Uri '{url}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing; Write-Host 'PowerShell WebRequest completed' }} catch {{ (New-Object System.Net.WebClient).DownloadFile('{url}', 'C:\\Temp\\chimera.exe'); Write-Host 'WebClient completed' }}\") || (bitsadmin /transfer ChimeraDownload /download /priority FOREGROUND {url} C:\\Temp\\chimera.exe && echo bitsadmin completed) && powershell -Command \"if ((Test-Path 'C:\\Temp\\chimera.exe') -and ((Get-Item 'C:\\Temp\\chimera.exe').Length -gt 10MB)) {{ Write-Host 'SUCCESS: Download validated'; Get-Item 'C:\\Temp\\chimera.exe' | Select-Object Length, LastWriteTime }} else {{ Write-Host 'FAILED: File missing or too small'; exit 1 }}\"\"",
            url = CHIMERA_URL_WIN
        );
 
-       info!("Downloading chimera to Windows hosts (curl/PowerShell/bitsadmin fallback chain)");
+       info!("Downloading chimera to {} Windows hosts (curl/PowerShell/bitsadmin fallback chain)", windows_clients.len());
        let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
+
+       // Log detailed download results for Windows
+       for result in &download_results {
+           match &result.result {
+               Ok(output) => {
+                   let stdout = String::from_utf8_lossy(&output.stdout);
+                   let stderr = String::from_utf8_lossy(&output.stderr);
+
+                   if !stdout.is_empty() {
+                       info!("[{}] Windows download stdout: {}", result.ip, stdout.trim());
+                   }
+                   if !stderr.is_empty() {
+                       warn!("[{}] Windows download stderr: {}", result.ip, stderr.trim());
+                   }
+
+                   if stdout.contains("SUCCESS: Download validated") {
+                       info!("[{}] Windows chimera download validated successfully", result.ip);
+                   } else {
+                       error!("[{}] Windows download validation failed - output: {}", result.ip, stdout.trim());
+                   }
+               }
+               Err(e) => {
+                   error!("[{}] Windows download command failed: {}", result.ip, e);
+               }
+           }
+       }
 
        log_host_results(download_results, &host_map, "chimera download")
     }
@@ -707,18 +748,34 @@ impl Orchestrator {
                     if let Ok(output) = Self::check_tool_exists(&client, tool).await {
                         if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
                             let cmd = Self::generate_download_command(tool, CHIMERA_URL_UNIX);
-                            log::info!("[{}] Attempting download with {}: {}", ip, tool, cmd);
+                            log::info!("[{}] Attempting download with {}", ip, tool);
 
                             match client.exec(&cmd!(cmd)).await {
                                 Ok(output) => {
-                                    return HostOperationResult {
-                                        ip: ip.clone(),
-                                        os,
-                                        result: Ok(output)
-                                    };
+                                    let stdout = String::from_utf8_lossy(&output.stdout);
+                                    let stderr = String::from_utf8_lossy(&output.stderr);
+
+                                    if !stdout.is_empty() {
+                                        log::info!("[{}] Download stdout: {}", ip, stdout.trim());
+                                    }
+                                    if !stderr.is_empty() {
+                                        log::warn!("[{}] Download stderr: {}", ip, stderr.trim());
+                                    }
+
+                                    // Check if download was validated successfully
+                                    if stdout.contains("Download validated") {
+                                        log::info!("[{}] Successfully downloaded and validated chimera with {}", ip, tool);
+                                        return HostOperationResult {
+                                            ip: ip.clone(),
+                                            os,
+                                            result: Ok(output)
+                                        };
+                                    } else {
+                                        log::error!("[{}] Download validation failed with {}", ip, tool);
+                                    }
                                 }
                                 Err(e) => {
-                                    log::error!("[{}] {} failed: {}", ip, tool, e);
+                                    log::error!("[{}] {} download failed: {}", ip, tool, e);
                                 }
                             }
                         }
@@ -1096,6 +1153,26 @@ impl Orchestrator {
         communicator.exec_by_os(&cmd!(cmd), OS::Unix).await
     }
 
+    async fn execute_mode_on_hosts(
+        communicator: &Communicator,
+        mode: &ModeConfig<'_>,
+        hosts: &[Arc<Host>],
+        chimera_path: &str,
+    ) -> Vec<HostOperationResult<CommandOutput>> {
+        let cmd = Self::build_command(chimera_path, mode);
+        let target_ips: Vec<String> = hosts.iter().map(|h| h.ip.clone()).collect();
+
+        info!(
+            "Executing {} mode {} on {} specific hosts: {}",
+            mode.name,
+            mode.args.unwrap_or(""),
+            target_ips.len(),
+            target_ips.join(", ")
+        );
+
+        communicator.exec_on_hosts(&cmd!(cmd), &target_ips).await
+    }
+
     async fn download_results_windows(&self, communicator: &Communicator, mode: &str) {
         let remote_path = format!("C:\\Temp\\chimera_{}.json", mode);
         let local_prefix = format!("./chimera_{}_", mode);
@@ -1172,17 +1249,20 @@ impl Orchestrator {
             }
         };
 
+        // Determine chimera path based on OS
+        let chimera_path = match os_filter {
+            OS::Windows => "C:\\Temp\\chimera.exe",
+            OS::Unix => "/tmp/chimera",
+            OS::Unknown => {
+                warn!("Skipping execution for Unknown OS type");
+                return;
+            }
+        };
+
         for mode in CHIMERA_MODES.iter() {
             info!("Executing {} mode on {:?} hosts {}", mode.name, os_filter, mode.args.unwrap_or(""));
 
-            let results = match os_filter {
-                OS::Windows => Self::execute_mode_windows(communicator, mode).await,
-                OS::Unix => Self::execute_mode_unix(communicator, mode).await,
-                OS::Unknown => {
-                    warn!("Skipping execution for Unknown OS type");
-                    continue;
-                }
-            };
+            let results = Self::execute_mode_on_hosts(communicator, mode, hosts, chimera_path).await;
 
             for result in &results {
                 match &result.result {

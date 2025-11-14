@@ -389,6 +389,80 @@ impl Communicator {
         .await
     }
 
+    pub async fn exec_on_hosts(
+        &self,
+        cmd: &Command,
+        target_ips: &[String],
+    ) -> Vec<HostOperationResult<CommandOutput>> {
+        join_all(
+            self.clients
+                .iter()
+                .filter(|(_, ip, _)| target_ips.contains(&ip.to_string()))
+                .map(|(os, ip, client)| async move {
+                    // Try command execution with retries for transient failures
+                    let mut result = None;
+                    let mut last_error = None;
+
+                    for attempt in 0..2 {
+                        if attempt > 0 {
+                            debug!("Retrying command execution on {} (attempt {}/2)", ip, attempt + 1);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+
+                        match client.exec(cmd).await {
+                            Ok(output) => {
+                                if attempt > 0 {
+                                    info!("Command execution on {} succeeded on retry", ip);
+                                }
+                                result = Some(Ok(output));
+                                break;
+                            }
+                            Err(e) => {
+                                // Check if this is a permission error on Unix
+                                if matches!(*os, OS::Unix)
+                                    && !e.to_string().contains("timed out")
+                                    && (e.to_string().contains("Permission denied")
+                                        || e.to_string().contains("not permitted")
+                                        || attempt == 0) {
+
+                                    debug!("Attempting command with sudo on {}", ip);
+                                    // Wrap command in sh -c with proper quoting to preserve escaping
+                                    let original_cmd = cmd.to_string();
+                                    let sudo_cmd = format!("sudo sh -c '{}'", original_cmd.replace('\'', "'\\''"));
+                                    let cmd = &cmd!(sudo_cmd);
+
+                                    match client.exec(cmd).await {
+                                        Ok(output) => {
+                                            result = Some(Ok(output));
+                                            break;
+                                        }
+                                        Err(sudo_err) => {
+                                            last_error = Some(sudo_err);
+                                        }
+                                    }
+                                } else {
+                                    last_error = Some(e);
+                                }
+                            }
+                        }
+                    }
+
+                    HostOperationResult {
+                        ip: ip.to_string(),
+                        os: *os,
+                        result: result.unwrap_or_else(|| {
+                            Err(last_error.unwrap_or_else(|| {
+                                Error::CommunicatorError(
+                                    format!("Command execution failed on {} with no error details", ip)
+                                )
+                            }))
+                        }),
+                    }
+                }),
+        )
+        .await
+    }
+
     pub async fn mass_file_download_by_os(
         &self,
         destination_path: String,
