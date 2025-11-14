@@ -666,24 +666,16 @@ impl Orchestrator {
        info!("Downloading chimera to {} Windows hosts (curl/PowerShell/bitsadmin fallback chain)", windows_clients.len());
        let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
 
-       // Log detailed download results for Windows
+       // Log download validation results for Windows
        for result in &download_results {
            match &result.result {
                Ok(output) => {
                    let stdout = String::from_utf8_lossy(&output.stdout);
-                   let stderr = String::from_utf8_lossy(&output.stderr);
-
-                   if !stdout.is_empty() {
-                       info!("[{}] Windows download stdout: {}", result.ip, stdout.trim());
-                   }
-                   if !stderr.is_empty() {
-                       warn!("[{}] Windows download stderr: {}", result.ip, stderr.trim());
-                   }
 
                    if stdout.contains("SUCCESS: Download validated") {
                        info!("[{}] Windows chimera download validated successfully", result.ip);
                    } else {
-                       error!("[{}] Windows download validation failed - output: {}", result.ip, stdout.trim());
+                       error!("[{}] Windows download validation failed", result.ip);
                    }
                }
                Err(e) => {
@@ -753,14 +745,6 @@ impl Orchestrator {
                             match client.exec(&cmd!(cmd)).await {
                                 Ok(output) => {
                                     let stdout = String::from_utf8_lossy(&output.stdout);
-                                    let stderr = String::from_utf8_lossy(&output.stderr);
-
-                                    if !stdout.is_empty() {
-                                        log::info!("[{}] Download stdout: {}", ip, stdout.trim());
-                                    }
-                                    if !stderr.is_empty() {
-                                        log::warn!("[{}] Download stderr: {}", ip, stderr.trim());
-                                    }
 
                                     // Check if download was validated successfully
                                     if stdout.contains("Download validated") {
