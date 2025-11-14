@@ -17,11 +17,44 @@ pub async fn services() -> Vec<Service> {
         _ => return Vec::new(), // or handle the error as appropriate
     };
 
-    // Only collect services that are BOTH running AND auto-start
-    // This significantly reduces output on Domain Controllers (from 200+ to ~15-25 critical services)
-    // Similar to Linux showing only active services (not all enabled services)
-    let results: Vec<HashMap<String, Variant>> = match wmi_con
-        .raw_query("SELECT * FROM Win32_Service WHERE State='Running' AND StartMode='Auto'") {
+    // Only collect critical/commonly vulnerable services
+    // Focuses on services relevant for security auditing and attack vectors
+    let critical_services = vec![
+        "NTDS",                 // Active Directory Domain Services
+        "DNS",                  // DNS Server
+        "KDC",                  // Kerberos Key Distribution Center
+        "Netlogon",             // Net Logon
+        "W32Time",              // Windows Time (critical for Kerberos)
+        "LanmanServer",         // Server (SMB/CIFS) - commonly exploited
+        "LanmanWorkstation",    // Workstation (SMB client)
+        "RpcSs",                // RPC Endpoint Mapper - attack vector
+        "RpcLocator",           // RPC Locator
+        "Dhcp",                 // DHCP Server
+        "DHCPServer",           // DHCP Server (alt name)
+        "Spooler",              // Print Spooler - CVE-2021-1675 PrintNightmare
+        "RemoteRegistry",       // Remote Registry - often exploited
+        "WinRM",                // Windows Remote Management
+        "TermService",          // Remote Desktop Services
+        "MSSQLSERVER",          // SQL Server
+        "SQLAgent$*",           // SQL Server Agent
+        "W3SVC",                // IIS Web Server
+        "IISADMIN",             // IIS Admin Service
+        "FTPSvc",               // FTP Server
+        "Telnet",               // Telnet (should be disabled!)
+        "SNMP",                 // SNMP Service - weak auth
+        "WMPNetworkSvc",        // Windows Media Player Network Sharing
+        "EventLog",             // Event Log (for monitoring)
+        "ADWS",                 // Active Directory Web Services
+    ];
+
+    let service_filter = critical_services.iter()
+        .map(|s| format!("Name='{}'", s))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    let query = format!("SELECT * FROM Win32_Service WHERE {}", service_filter);
+
+    let results: Vec<HashMap<String, Variant>> = match wmi_con.raw_query(&query) {
         Ok(results) => results,
         Err(_) => return Vec::new(),
     };
