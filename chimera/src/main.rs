@@ -17,6 +17,8 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 use utils::get_default_output_dir;
+use sysinfo::SystemExt;
+use sysinfo::System;
 
 pub async fn run_baseline() -> ExecutionResult {
     let current_exe = std::env::current_exe().expect("Failed to get current executable path");
@@ -143,8 +145,13 @@ async fn run_inventory_mode(output_dir: &Path) -> ExecutionResult {
     info!("Starting inventory mode execution");
 
     let result = mode.execute(None).await;
+    
+    let s = System::new();
+    let file_name = s.host_name().unwrap_or_else(|| "<unknown>".to_owned());
+    let format = String::from(".json");
+    let filename_complete = format!("{}{}", file_name, format);
 
-    let output_path = output_dir.join("inventory.json");
+    let output_path = output_dir.join(filename_complete);
     match File::create(&output_path) {
         Ok(mut file) => {
             if let Err(e) = writeln!(file, "{}", result.message) {
