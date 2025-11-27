@@ -16,6 +16,7 @@ use log::{error, info};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 use utils::get_default_output_dir;
 use sysinfo::SystemExt;
 use sysinfo::System;
@@ -140,18 +141,21 @@ async fn run_serve_internal(port: u16) -> ExecutionResult {
     ServeMode::serve_internal(port).await
 }
 
-async fn run_inventory_mode(output_dir: &Path) -> ExecutionResult {
+async fn run_inventory_mode(output_dir: &Path, use_hostname_for_output: bool) -> ExecutionResult {
     let mode = InventoryMode::new();
     info!("Starting inventory mode execution");
 
     let result = mode.execute(None).await;
-    
-    let s = System::new();
-    let file_name = s.host_name().unwrap_or_else(|| "<unknown>".to_owned());
-    let format = String::from(".json");
-    let filename_complete = format!("{}{}", file_name, format);
 
-    let output_path = output_dir.join(filename_complete);
+    let filename = if use_hostname_for_output {
+        let s = System::new();
+        let host_name = s.host_name().unwrap_or_else(|| "<unknown>".to_owned());
+        format!("{}.json", host_name)
+    } else {
+        String::from("inventory.json")
+    };
+
+    let output_path = output_dir.join(filename);
     match File::create(&output_path) {
         Ok(mut file) => {
             if let Err(e) = writeln!(file, "{}", result.message) {
@@ -207,7 +211,7 @@ async fn run_all_modes(output_dir: &Path, magic_value: u32) {
 
     let results = [
         run_credentials_mode(magic_value).await,
-        run_inventory_mode(output_dir).await,
+        run_inventory_mode(output_dir, false).await,
         run_update_mode().await,
         run_serve_mode(44372).await,
         run_baseline().await,
@@ -234,7 +238,7 @@ async fn main() {
         return;
     }
 
-    let output_dir = get_default_output_dir();
+    let mut output_dir = get_default_output_dir();
 
     fs::create_dir_all(&output_dir).expect("Failed to create output directory");
 
@@ -246,7 +250,15 @@ async fn main() {
                     .value_parser(value_parser!(u32)),
             ),
         )
-        .subcommand(Command::new("inventory").about("Perform system inventory"))
+        .subcommand(
+            Command::new("inventory")
+                .about("Perform system inventory")
+                .arg(
+                    arg!(-o --output <VALUE> "Output and file name path for inventory")
+                        .value_parser(value_parser!(String)),
+                ),
+            
+        )
         .subcommand(
             Command::new("credentials")
                 .about("Manage system credentials")
@@ -286,13 +298,21 @@ async fn main() {
                 .expect("Required argument");
             run_all_modes(&output_dir, magic_value).await;
         }
-        Some(("inventory", _)) => {
-            let result = run_inventory_mode(&output_dir).await;
+        Some(("inventory", sub_matches)) => {
+            let output_path = sub_matches;
+            // Check whether the user gave a custom path
+            let use_hostname_for_output = output_path.get_one::<String>("output").is_some();
+
+            if let Some(custom_path) = output_path.get_one::<String>("output") {
+                output_dir = PathBuf::from(custom_path);
+            }
+
+            let result = run_inventory_mode(&output_dir, use_hostname_for_output).await;
             if !result.success {
                 error!("Inventory mode failed: {}", result.message);
                 std::process::exit(1);
+                }   
             }
-        }
         Some(("credentials", sub_matches)) => {
             let magic_value = sub_matches
                 .get_one::<u32>("magic")
