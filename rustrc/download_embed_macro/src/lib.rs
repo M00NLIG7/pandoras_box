@@ -3,6 +3,7 @@ use flate2::Compression;
 use proc_macro::TokenStream;
 use quote::quote;
 use std::env;
+use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -22,33 +23,44 @@ pub fn download_and_embed(input: TokenStream) -> TokenStream {
         .map(PathBuf::from)
         .unwrap_or_else(|| env::temp_dir());
     let dest_path = out_dir.join(&file_name);
+    let cache_path = global_cache_dir().join(&file_name);
 
     // Only perform the download and compression when not in Rust Analyzer
     #[cfg(not(proc_macro_def_site))]
     {
-        // Create a custom client with rustls and accept invalid certs for build env
-        let client = reqwest::blocking::Client::builder()
-            .use_rustls_tls()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .expect("Failed to create HTTP client");
+        if !cache_path.is_file() {
+            fs::create_dir_all(
+                cache_path
+                    .parent()
+                    .expect("cache path should always have a parent"),
+            )
+            .expect("Failed to create download cache directory");
 
-        // Download and compress the file
-        let response = client.get(&url).send().expect("Failed to download file");
+            // Create a custom client with rustls and accept invalid certs for build env
+            let client = reqwest::blocking::Client::builder()
+                .use_rustls_tls()
+                .danger_accept_invalid_certs(true)
+                .build()
+                .expect("Failed to create HTTP client");
 
-        let content = response.bytes().expect("Failed to read response body");
+            let response = client.get(&url).send().expect("Failed to download file");
+            let content = response.bytes().expect("Failed to read response body");
 
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(&content)
-            .expect("Failed to compress data");
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder
+                .write_all(&content)
+                .expect("Failed to compress data");
 
-        let compressed_data = encoder.finish().expect("Failed to finish compression");
+            let compressed_data = encoder.finish().expect("Failed to finish compression");
 
-        // Write the compressed data to a file in the selected directory
-        let mut file = File::create(&dest_path).expect("Failed to create file");
-        file.write_all(&compressed_data)
-            .expect("Failed to write data");
+            let mut file = File::create(&cache_path).expect("Failed to create cache file");
+            file.write_all(&compressed_data)
+                .expect("Failed to write cache data");
+        }
+
+        if cache_path != dest_path {
+            fs::copy(&cache_path, &dest_path).expect("Failed to copy cached payload to OUT_DIR");
+        }
     }
 
     // Generate the output TokenStream using include_bytes!
@@ -61,4 +73,8 @@ pub fn download_and_embed(input: TokenStream) -> TokenStream {
     };
 
     output.into()
+}
+
+fn global_cache_dir() -> PathBuf {
+    env::temp_dir().join("download-embed-macro")
 }
