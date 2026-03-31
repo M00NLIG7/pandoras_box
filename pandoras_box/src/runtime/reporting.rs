@@ -1,4 +1,6 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
 
@@ -30,13 +32,47 @@ pub struct AssetInventoryHost {
     pub error: Option<String>,
 }
 
+#[derive(Debug)]
+struct InventoryReport {
+    bundle: AssetInventoryBundle,
+    topology: NetworkTopology,
+}
+
+#[derive(Debug, Clone)]
+struct InventoryRecord {
+    host: AssetInventoryHost,
+    observed_peer_ips: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NetworkTopology {
+    hosts: Vec<TopologyHost>,
+    edges: Vec<TopologyEdge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TopologyHost {
+    ip: String,
+    label: String,
+    platform: String,
+    os: Option<String>,
+    open_ports: Vec<u16>,
+    services: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TopologyEdge {
+    from_ip: String,
+    to_ip: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct InventoryArtifact {
     hostname: String,
-    ip: String,
     os: String,
     ports: Vec<InventoryPort>,
+    connections: Vec<InventoryConnection>,
     services: Vec<InventoryService>,
     users: Vec<InventoryUser>,
     shares: Vec<InventoryShare>,
@@ -47,6 +83,12 @@ struct InventoryArtifact {
 #[serde(default)]
 struct InventoryPort {
     port: u16,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct InventoryConnection {
+    remote_address: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -77,36 +119,48 @@ pub async fn write_asset_inventory_bundle(
     reports: &[HostExecutionReport],
     discovered_hosts: usize,
 ) -> io::Result<()> {
-    let bundle = build_asset_inventory_bundle(store, reports, discovered_hosts).await;
-    let json = serde_json::to_string_pretty(&bundle)
+    let report = build_inventory_report(store, reports, discovered_hosts).await;
+    let json = serde_json::to_string_pretty(&report.bundle)
         .expect("asset inventory bundle should serialize to JSON");
 
     store.write_asset_inventory_json(&json).await?;
     store
-        .write_asset_inventory_markdown(&render_asset_inventory_markdown(&bundle))
+        .write_asset_inventory_markdown(&render_asset_inventory_markdown(&report.bundle))
         .await?;
     store
-        .write_asset_inventory_csv(&render_asset_inventory_csv(&bundle))
+        .write_asset_inventory_csv(&render_asset_inventory_csv(&report.bundle))
+        .await?;
+    store
+        .write_asset_inventory_pdf(&render_asset_inventory_pdf(&report.bundle))
+        .await?;
+    store
+        .write_network_topology_markdown(&render_network_topology_markdown(
+            &report.bundle.mission_id,
+            &report.topology,
+        ))
+        .await?;
+    store
+        .write_network_topology_mermaid(&render_network_topology_mermaid(&report.topology))
         .await?;
 
     Ok(())
 }
 
-async fn build_asset_inventory_bundle(
+async fn build_inventory_report(
     store: &ArtifactStore,
     reports: &[HostExecutionReport],
     discovered_hosts: usize,
-) -> AssetInventoryBundle {
-    let mut hosts = Vec::with_capacity(reports.len());
+) -> InventoryReport {
     let mut ordered_reports = reports.to_vec();
     ordered_reports.sort_by_key(|report| report.plan.target.ip.to_string());
 
-    for report in ordered_reports {
-        let inventory = read_inventory_artifact(store, &report).await;
-        hosts.push(host_from_report(report, inventory));
+    let mut records = Vec::with_capacity(ordered_reports.len());
+    for report in &ordered_reports {
+        let inventory = read_inventory_artifact(store, report).await;
+        records.push(record_from_report(report, inventory));
     }
 
-    AssetInventoryBundle {
+    let bundle = AssetInventoryBundle {
         mission_id: store
             .mission_dir()
             .file_name()
@@ -122,7 +176,12 @@ async fn build_asset_inventory_bundle(
             .iter()
             .filter(|report| report.final_state.as_str() == "failed")
             .count(),
-        hosts,
+        hosts: records.iter().map(|record| record.host.clone()).collect(),
+    };
+
+    InventoryReport {
+        topology: build_network_topology(&records),
+        bundle,
     }
 }
 
@@ -139,73 +198,124 @@ async fn read_inventory_artifact(
     serde_json::from_str(&raw).map_err(|err| format!("failed to parse {}: {err}", path.display()))
 }
 
-fn host_from_report(
-    report: HostExecutionReport,
+fn record_from_report(
+    report: &HostExecutionReport,
     inventory: Result<InventoryArtifact, String>,
-) -> AssetInventoryHost {
+) -> InventoryRecord {
     let fallback_ports = report.plan.target.open_ports.clone();
     let base_error = report.error.clone();
 
     match inventory {
-        Ok(inventory) => AssetInventoryHost {
-            ip: report.plan.target.ip.to_string(),
-            final_state: report.final_state.as_str().to_string(),
-            platform: report.plan.target.platform.as_str().to_string(),
-            transport_chain: report
-                .plan
-                .transport_chain
-                .iter()
-                .map(|kind| kind.as_str().to_string())
+        Ok(inventory) => InventoryRecord {
+            observed_peer_ips: inventory
+                .connections
+                .into_iter()
+                .filter_map(|connection| parse_remote_ip(&connection.remote_address))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect(),
-            hostname: non_empty(inventory.hostname),
-            os: non_empty(inventory.os),
-            open_ports: if inventory.ports.is_empty() {
-                fallback_ports
-            } else {
-                inventory.ports.into_iter().map(|port| port.port).collect()
+            host: AssetInventoryHost {
+                ip: report.plan.target.ip.to_string(),
+                final_state: report.final_state.as_str().to_string(),
+                platform: report.plan.target.platform.as_str().to_string(),
+                transport_chain: report
+                    .plan
+                    .transport_chain
+                    .iter()
+                    .map(|kind| kind.as_str().to_string())
+                    .collect(),
+                hostname: non_empty(inventory.hostname),
+                os: non_empty(inventory.os),
+                open_ports: if inventory.ports.is_empty() {
+                    fallback_ports
+                } else {
+                    inventory.ports.into_iter().map(|port| port.port).collect()
+                },
+                admin_users: inventory
+                    .users
+                    .into_iter()
+                    .filter(|user| user.is_admin)
+                    .filter_map(|user| non_empty(user.name))
+                    .collect(),
+                services: inventory
+                    .services
+                    .into_iter()
+                    .filter_map(|service| non_empty(service.name))
+                    .collect(),
+                shares: inventory
+                    .shares
+                    .into_iter()
+                    .filter_map(|share| non_empty(share.network_path))
+                    .collect(),
+                container_count: inventory.containers.len(),
+                error: base_error,
             },
-            admin_users: inventory
-                .users
-                .into_iter()
-                .filter(|user| user.is_admin)
-                .filter_map(|user| non_empty(user.name))
-                .collect(),
-            services: inventory
-                .services
-                .into_iter()
-                .filter_map(|service| non_empty(service.name))
-                .collect(),
-            shares: inventory
-                .shares
-                .into_iter()
-                .filter_map(|share| non_empty(share.network_path))
-                .collect(),
-            container_count: inventory.containers.len(),
-            error: base_error,
         },
-        Err(inventory_error) => AssetInventoryHost {
-            ip: report.plan.target.ip.to_string(),
-            final_state: report.final_state.as_str().to_string(),
-            platform: report.plan.target.platform.as_str().to_string(),
-            transport_chain: report
-                .plan
-                .transport_chain
-                .iter()
-                .map(|kind| kind.as_str().to_string())
-                .collect(),
-            hostname: None,
-            os: None,
-            open_ports: fallback_ports,
-            admin_users: Vec::new(),
-            services: Vec::new(),
-            shares: Vec::new(),
-            container_count: 0,
-            error: Some(match base_error {
-                Some(error) if report.final_state.as_str() == "failed" => error,
-                Some(error) => format!("{error}; {inventory_error}"),
-                None => inventory_error,
-            }),
+        Err(inventory_error) => InventoryRecord {
+            observed_peer_ips: Vec::new(),
+            host: AssetInventoryHost {
+                ip: report.plan.target.ip.to_string(),
+                final_state: report.final_state.as_str().to_string(),
+                platform: report.plan.target.platform.as_str().to_string(),
+                transport_chain: report
+                    .plan
+                    .transport_chain
+                    .iter()
+                    .map(|kind| kind.as_str().to_string())
+                    .collect(),
+                hostname: None,
+                os: None,
+                open_ports: fallback_ports,
+                admin_users: Vec::new(),
+                services: Vec::new(),
+                shares: Vec::new(),
+                container_count: 0,
+                error: Some(match base_error {
+                    Some(error) if report.final_state.as_str() == "failed" => error,
+                    Some(error) => format!("{error}; {inventory_error}"),
+                    None => inventory_error,
+                }),
+            },
         },
+    }
+}
+
+fn build_network_topology(records: &[InventoryRecord]) -> NetworkTopology {
+    let host_index = records
+        .iter()
+        .map(|record| (record.host.ip.clone(), &record.host))
+        .collect::<BTreeMap<_, _>>();
+
+    let hosts = records
+        .iter()
+        .map(|record| TopologyHost {
+            ip: record.host.ip.clone(),
+            label: display_host_name(&record.host).to_string(),
+            platform: record.host.platform.clone(),
+            os: record.host.os.clone(),
+            open_ports: record.host.open_ports.clone(),
+            services: record.host.services.clone(),
+        })
+        .collect();
+
+    let mut edge_set = BTreeSet::new();
+    for record in records {
+        for peer_ip in &record.observed_peer_ips {
+            if peer_ip == &record.host.ip {
+                continue;
+            }
+            if host_index.contains_key(peer_ip) {
+                edge_set.insert(TopologyEdge {
+                    from_ip: record.host.ip.clone(),
+                    to_ip: peer_ip.clone(),
+                });
+            }
+        }
+    }
+
+    NetworkTopology {
+        hosts,
+        edges: edge_set.into_iter().collect(),
     }
 }
 
@@ -246,16 +356,20 @@ fn render_asset_inventory_csv(bundle: &AssetInventoryBundle) -> String {
         String::from("ip,state,platform,hostname,os,ports,admin_users,services,shares,error\n");
 
     for host in &bundle.hosts {
+        let ports = join_ports(&host.open_ports);
+        let admin_users = join_or_dash(&host.admin_users);
+        let services = join_or_dash(&host.services);
+        let shares = join_or_dash(&host.shares);
         let row = [
             host.ip.as_str(),
             host.final_state.as_str(),
             host.platform.as_str(),
             optional_display(host.hostname.as_deref()),
             optional_display(host.os.as_deref()),
-            &join_ports(&host.open_ports),
-            &join_or_dash(&host.admin_users),
-            &join_or_dash(&host.services),
-            &join_or_dash(&host.shares),
+            ports.as_str(),
+            admin_users.as_str(),
+            services.as_str(),
+            shares.as_str(),
             host.error.as_deref().unwrap_or(""),
         ];
         csv.push_str(
@@ -268,6 +382,141 @@ fn render_asset_inventory_csv(bundle: &AssetInventoryBundle) -> String {
     }
 
     csv
+}
+
+fn render_asset_inventory_pdf(bundle: &AssetInventoryBundle) -> Vec<u8> {
+    render_minimal_pdf(&asset_inventory_pdf_lines(bundle))
+}
+
+fn asset_inventory_pdf_lines(bundle: &AssetInventoryBundle) -> Vec<String> {
+    let mut lines = vec![
+        "Pandora's Box Asset Inventory".to_string(),
+        format!("Mission: {}", bundle.mission_id),
+        format!(
+            "Discovered: {}  Complete: {}  Failed: {}",
+            bundle.discovered_hosts, bundle.completed_hosts, bundle.failed_hosts
+        ),
+        String::new(),
+    ];
+
+    for host in &bundle.hosts {
+        lines.push(format!("Host {} ({})", display_host_name(host), host.ip));
+        lines.push(format!(
+            "State: {}  Platform: {}  OS: {}",
+            host.final_state,
+            host.platform,
+            optional_display(host.os.as_deref())
+        ));
+        lines.push(format!("Ports: {}", join_ports(&host.open_ports)));
+        lines.push(format!("Admin users: {}", join_or_dash(&host.admin_users)));
+        lines.push(format!("Services: {}", join_or_dash(&host.services)));
+        if !host.shares.is_empty() {
+            lines.push(format!("Shares: {}", join_or_dash(&host.shares)));
+        }
+        if let Some(error) = &host.error {
+            lines.push(format!("Error: {error}"));
+        }
+        lines.push(String::new());
+    }
+
+    lines
+}
+
+fn render_network_topology_markdown(mission_id: &str, topology: &NetworkTopology) -> String {
+    let mut markdown = String::new();
+    markdown.push_str("# Network Topology\n\n");
+    markdown.push_str(&format!("Mission: `{mission_id}`\n\n"));
+
+    markdown.push_str("## Hosts\n\n");
+    for host in &topology.hosts {
+        markdown.push_str(&format!(
+            "- {} ({}) [{}] ports: {} services: {}\n",
+            display_topology_name(host),
+            host.ip,
+            host.platform,
+            join_ports(&host.open_ports),
+            join_or_dash(&host.services),
+        ));
+    }
+
+    markdown.push_str("\n## Observed Connections\n\n");
+    if topology.edges.is_empty() {
+        markdown.push_str("- No observed inter-host connections\n");
+    } else {
+        let host_lookup = topology_host_lookup(topology);
+        for edge in &topology.edges {
+            let from = host_lookup
+                .get(edge.from_ip.as_str())
+                .copied()
+                .expect("topology edge source should exist");
+            let to = host_lookup
+                .get(edge.to_ip.as_str())
+                .copied()
+                .expect("topology edge target should exist");
+            markdown.push_str(&format!(
+                "- {} -> {} ({} -> {})\n",
+                display_topology_name(from),
+                display_topology_name(to),
+                edge.from_ip,
+                edge.to_ip,
+            ));
+        }
+    }
+
+    markdown
+}
+
+fn render_network_topology_mermaid(topology: &NetworkTopology) -> String {
+    let mut mermaid = String::from("graph LR\n");
+
+    for host in &topology.hosts {
+        let label = [
+            display_topology_name(host).to_string(),
+            host.ip.clone(),
+            host.platform.clone(),
+            optional_display(host.os.as_deref()).to_string(),
+        ]
+        .join("\\n");
+        mermaid.push_str(&format!(
+            "  {}[\"{}\"]\n",
+            mermaid_node_id(&host.ip),
+            escape_mermaid_label(&label)
+        ));
+    }
+
+    if topology.edges.is_empty() {
+        mermaid.push_str("  topology_note[\"No observed inter-host connections\"]\n");
+    } else {
+        for edge in &topology.edges {
+            mermaid.push_str(&format!(
+                "  {} -. observed .-> {}\n",
+                mermaid_node_id(&edge.from_ip),
+                mermaid_node_id(&edge.to_ip)
+            ));
+        }
+    }
+
+    mermaid
+}
+
+fn topology_host_lookup(topology: &NetworkTopology) -> BTreeMap<&str, &TopologyHost> {
+    topology
+        .hosts
+        .iter()
+        .map(|host| (host.ip.as_str(), host))
+        .collect()
+}
+
+fn display_host_name(host: &AssetInventoryHost) -> &str {
+    host.hostname.as_deref().unwrap_or(&host.ip)
+}
+
+fn display_topology_name(host: &TopologyHost) -> &str {
+    if host.label.is_empty() {
+        &host.ip
+    } else {
+        &host.label
+    }
 }
 
 fn optional_display(value: Option<&str>) -> &str {
@@ -315,11 +564,172 @@ fn non_empty(value: String) -> Option<String> {
     }
 }
 
+fn parse_remote_ip(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(addr) = trimmed.parse::<IpAddr>() {
+        return Some(addr.to_string());
+    }
+
+    if let Ok(addr) = trimmed.parse::<SocketAddr>() {
+        return Some(addr.ip().to_string());
+    }
+
+    if let Some((candidate, _)) = trimmed.rsplit_once(':') {
+        let candidate = candidate.trim_matches(|ch| ch == '[' || ch == ']');
+        if let Ok(addr) = candidate.parse::<IpAddr>() {
+            return Some(addr.to_string());
+        }
+    }
+
+    None
+}
+
+fn mermaid_node_id(ip: &str) -> String {
+    let mut node_id = String::from("host_");
+    for ch in ip.chars() {
+        if ch.is_ascii_alphanumeric() {
+            node_id.push(ch);
+        } else {
+            node_id.push('_');
+        }
+    }
+    node_id
+}
+
+fn escape_mermaid_label(value: &str) -> String {
+    value.replace('"', "'")
+}
+
+fn render_minimal_pdf(lines: &[String]) -> Vec<u8> {
+    let mut page_chunks = lines.chunks(42).collect::<Vec<_>>();
+    if page_chunks.is_empty() {
+        page_chunks.push(&[]);
+    }
+
+    let pages_id = 2usize;
+    let font_id = 3usize;
+    let mut objects = Vec::new();
+    let mut page_ids = Vec::new();
+    let mut next_object_id = 4usize;
+
+    for chunk in page_chunks {
+        let page_id = next_object_id;
+        let content_id = next_object_id + 1;
+        page_ids.push(page_id);
+        next_object_id += 2;
+
+        let content = pdf_page_stream(chunk);
+        objects.push(object_bytes(
+            page_id,
+            format!(
+                "<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {content_id} 0 R >>"
+            ),
+        ));
+        objects.push(stream_object_bytes(content_id, content));
+    }
+
+    let kids = page_ids
+        .iter()
+        .map(|id| format!("{id} 0 R"))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut ordered_objects = vec![
+        object_bytes(1, "<< /Type /Catalog /Pages 2 0 R >>".to_string()),
+        object_bytes(
+            pages_id,
+            format!(
+                "<< /Type /Pages /Kids [{}] /Count {} >>",
+                kids,
+                page_ids.len()
+            ),
+        ),
+        object_bytes(
+            font_id,
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        ),
+    ];
+    ordered_objects.extend(objects);
+
+    let mut pdf = b"%PDF-1.4\n%\xC2\xC3\xC4\xC5\n".to_vec();
+    let mut offsets = vec![0usize];
+    for object in ordered_objects {
+        offsets.push(pdf.len());
+        pdf.extend(object);
+    }
+
+    let xref_offset = pdf.len();
+    pdf.extend(format!("xref\n0 {}\n", offsets.len()).as_bytes());
+    pdf.extend(b"0000000000 65535 f \n");
+    for offset in offsets.iter().skip(1) {
+        pdf.extend(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+            offsets.len(),
+            xref_offset
+        )
+        .as_bytes(),
+    );
+
+    pdf
+}
+
+fn pdf_page_stream(lines: &[String]) -> Vec<u8> {
+    let mut stream = String::from("BT\n/F1 10 Tf\n14 TL\n50 752 Td\n");
+
+    if lines.is_empty() {
+        stream.push_str("(Pandora's Box Asset Inventory) Tj\n");
+    } else {
+        for (index, line) in lines.iter().enumerate() {
+            if index > 0 {
+                stream.push_str("T*\n");
+            }
+            stream.push_str(&format!("({}) Tj\n", escape_pdf_text(line)));
+        }
+    }
+
+    stream.push_str("ET\n");
+    stream.into_bytes()
+}
+
+fn escape_pdf_text(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '\\' => ['\\', '\\'].into_iter().collect::<Vec<_>>(),
+            '(' => ['\\', '('].into_iter().collect::<Vec<_>>(),
+            ')' => ['\\', ')'].into_iter().collect::<Vec<_>>(),
+            '\n' | '\r' | '\t' => vec![' '],
+            ch if ch.is_ascii() => vec![ch],
+            _ => vec!['?'],
+        })
+        .collect()
+}
+
+fn object_bytes(id: usize, body: String) -> Vec<u8> {
+    format!("{id} 0 obj\n{body}\nendobj\n").into_bytes()
+}
+
+fn stream_object_bytes(id: usize, stream: Vec<u8>) -> Vec<u8> {
+    let mut object = format!("{id} 0 obj\n<< /Length {} >>\nstream\n", stream.len()).into_bytes();
+    object.extend(stream);
+    object.extend(b"endstream\nendobj\n");
+    object
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        render_asset_inventory_csv, render_asset_inventory_markdown, AssetInventoryBundle,
-        AssetInventoryHost,
+        asset_inventory_pdf_lines, parse_remote_ip, render_asset_inventory_csv,
+        render_asset_inventory_markdown, render_asset_inventory_pdf,
+        render_network_topology_markdown, render_network_topology_mermaid, AssetInventoryBundle,
+        AssetInventoryHost, NetworkTopology, TopologyEdge, TopologyHost,
     };
 
     #[test]
@@ -350,5 +760,57 @@ mod tests {
         ));
         assert!(render_asset_inventory_csv(&bundle)
             .contains("10.0.0.10,complete,unix,lab,Ubuntu,\"22,80\",root,sshd,-,"));
+        assert!(render_asset_inventory_pdf(&bundle).starts_with(b"%PDF-1.4"));
+        assert!(asset_inventory_pdf_lines(&bundle)
+            .iter()
+            .any(|line| line.contains("Host lab (10.0.0.10)")));
+    }
+
+    #[test]
+    fn network_topology_renderers_include_observed_edges() {
+        let topology = NetworkTopology {
+            hosts: vec![
+                TopologyHost {
+                    ip: "10.0.0.51".to_string(),
+                    label: "web-01".to_string(),
+                    platform: "unix".to_string(),
+                    os: Some("Ubuntu".to_string()),
+                    open_ports: vec![22],
+                    services: vec!["sshd".to_string()],
+                },
+                TopologyHost {
+                    ip: "10.0.0.52".to_string(),
+                    label: "db-01".to_string(),
+                    platform: "unix".to_string(),
+                    os: Some("Ubuntu".to_string()),
+                    open_ports: vec![5432],
+                    services: vec!["postgresql".to_string()],
+                },
+            ],
+            edges: vec![TopologyEdge {
+                from_ip: "10.0.0.51".to_string(),
+                to_ip: "10.0.0.52".to_string(),
+            }],
+        };
+
+        assert!(
+            render_network_topology_markdown("mission-123", &topology).contains("web-01 -> db-01")
+        );
+        assert!(render_network_topology_mermaid(&topology)
+            .contains("host_10_0_0_51 -. observed .-> host_10_0_0_52"));
+    }
+
+    #[test]
+    fn parse_remote_ip_accepts_socket_and_ip_forms() {
+        assert_eq!(
+            parse_remote_ip("10.0.0.52:5432"),
+            Some("10.0.0.52".to_string())
+        );
+        assert_eq!(
+            parse_remote_ip("[fe80::1]:443"),
+            Some("fe80::1".to_string())
+        );
+        assert_eq!(parse_remote_ip(""), None);
+        assert_eq!(parse_remote_ip("db.internal"), None);
     }
 }

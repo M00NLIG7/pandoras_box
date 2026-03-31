@@ -1154,6 +1154,26 @@ mod tests {
                 .expect("asset inventory csv should exist")
                 .contains("10.0.0.41,complete,unix,lab,Ubuntu 24.04,22,root,sshd,-,")
         );
+        assert_eq!(
+            tokio::fs::read(root.join("mission-123/asset_inventory.pdf"))
+                .await
+                .expect("asset inventory pdf should exist")
+                .as_slice()
+                .get(..8),
+            Some(&b"%PDF-1.4"[..])
+        );
+        assert!(
+            tokio::fs::read_to_string(root.join("mission-123/network_topology.md"))
+                .await
+                .expect("network topology markdown should exist")
+                .contains("10.0.0.41")
+        );
+        assert!(
+            tokio::fs::read_to_string(root.join("mission-123/network_topology.mmd"))
+                .await
+                .expect("network topology mermaid should exist")
+                .contains("host_10_0_0_41")
+        );
 
         let _ = tokio::fs::remove_dir_all(root).await;
     }
@@ -1202,6 +1222,95 @@ mod tests {
                 .await
                 .expect("asset inventory markdown should exist")
                 .contains("| 10.0.0.42 | failed | windows | - | - | 2222,445 | - | - | - | ssh connect failed: timeout waiting for banner |")
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn finalize_summary_writes_network_topology_for_connected_hosts() {
+        let root = temp_root("network-topology");
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let runner = PandorasBoxRunner::new(spec(root.clone()));
+        let ip_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 51));
+        let ip_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 52));
+        let plan_a = HostPlan::queued(
+            HostTarget {
+                ip: ip_a,
+                platform: PlatformHint::Unix,
+                open_ports: vec![22],
+            },
+            vec![TransportKind::UnixSsh],
+        );
+        let plan_b = HostPlan::queued(
+            HostTarget {
+                ip: ip_b,
+                platform: PlatformHint::Unix,
+                open_ports: vec![5432],
+            },
+            vec![TransportKind::UnixSsh],
+        );
+
+        store
+            .ensure_layout(vec![ip_a, ip_b])
+            .await
+            .expect("host layout should exist");
+        tokio::fs::write(
+            store.host_files_dir(ip_a).join("inventory.json"),
+            r#"{
+  "hostname": "web-01",
+  "ip": "10.0.0.51",
+  "os": "Ubuntu 24.04",
+  "ports": [{"port": 22, "protocol": "TCP"}],
+  "connections": [{"remoteAddress": "10.0.0.52:5432", "protocol": "TCP"}],
+  "services": [{"name": "sshd"}],
+  "users": [],
+  "shares": [],
+  "containers": []
+}"#,
+        )
+        .await
+        .expect("inventory fixture A should exist");
+        tokio::fs::write(
+            store.host_files_dir(ip_b).join("inventory.json"),
+            r#"{
+  "hostname": "db-01",
+  "ip": "10.0.0.52",
+  "os": "Ubuntu 24.04",
+  "ports": [{"port": 5432, "protocol": "TCP"}],
+  "connections": [],
+  "services": [{"name": "postgresql"}],
+  "users": [],
+  "shares": [],
+  "containers": []
+}"#,
+        )
+        .await
+        .expect("inventory fixture B should exist");
+
+        runner
+            .finalize_summary(
+                &store,
+                2,
+                vec![
+                    HostExecutionReport::success(plan_a, HostState::Complete),
+                    HostExecutionReport::success(plan_b, HostState::Complete),
+                ],
+            )
+            .await
+            .expect("summary finalization should succeed");
+
+        assert!(
+            tokio::fs::read_to_string(root.join("mission-123/network_topology.mmd"))
+                .await
+                .expect("network topology mermaid should exist")
+                .contains("host_10_0_0_51 -. observed .-> host_10_0_0_52")
+        );
+        assert!(
+            tokio::fs::read_to_string(root.join("mission-123/network_topology.md"))
+                .await
+                .expect("network topology markdown should exist")
+                .contains("web-01 -> db-01")
         );
 
         let _ = tokio::fs::remove_dir_all(root).await;
