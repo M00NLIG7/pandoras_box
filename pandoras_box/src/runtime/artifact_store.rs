@@ -73,6 +73,11 @@ impl ArtifactStore {
     }
 
     #[must_use]
+    pub fn network_topology_png_path(&self) -> PathBuf {
+        self.mission_dir().join("network_topology.png")
+    }
+
+    #[must_use]
     pub fn hosts_dir(&self) -> PathBuf {
         self.mission_dir().join("hosts")
     }
@@ -167,6 +172,11 @@ impl ArtifactStore {
         tokio::fs::write(self.network_topology_excalidraw_path(), contents).await
     }
 
+    pub async fn write_network_topology_png(&self, contents: &[u8]) -> io::Result<()> {
+        tokio::fs::create_dir_all(self.mission_dir()).await?;
+        tokio::fs::write(self.network_topology_png_path(), contents).await
+    }
+
     pub async fn write_host_plan(&self, ip: IpAddr, contents: &str) -> io::Result<()> {
         tokio::fs::create_dir_all(self.host_dir(ip)).await?;
         tokio::fs::write(self.host_plan_path(ip), contents).await
@@ -213,6 +223,10 @@ mod tests {
         assert_eq!(
             store.network_topology_excalidraw_path(),
             PathBuf::from("/tmp/pandoras-box/mission-123/network_topology.excalidraw")
+        );
+        assert_eq!(
+            store.network_topology_png_path(),
+            PathBuf::from("/tmp/pandoras-box/mission-123/network_topology.png")
         );
     }
 

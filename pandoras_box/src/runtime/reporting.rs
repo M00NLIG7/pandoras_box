@@ -1,6 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
+use std::fmt::Write as _;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -67,6 +72,42 @@ struct TopologyEdge {
     to_ip: String,
 }
 
+const PDF_PAGE_WIDTH: f32 = 612.0;
+const PDF_PAGE_HEIGHT: f32 = 792.0;
+const PDF_MARGIN: f32 = 32.0;
+const PDF_HEADER_TOP: f32 = 28.0;
+const PDF_HEADER_HEIGHT: f32 = 86.0;
+const PDF_SUMMARY_TOP: f32 = 128.0;
+const PDF_SUMMARY_HEIGHT: f32 = 58.0;
+const PDF_HOST_CARD_TOP: f32 = 210.0;
+const PDF_HOST_CARD_HEIGHT: f32 = 126.0;
+const PDF_HOST_CARD_GAP: f32 = 12.0;
+const PDF_HOSTS_PER_PAGE: usize = 4;
+
+#[derive(Debug, Clone)]
+struct ExcalidrawRenderer {
+    python: PathBuf,
+    script: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PdfFont {
+    Regular,
+    Bold,
+}
+
+#[derive(Debug, Clone)]
+struct PdfTextLine {
+    text: String,
+    color: &'static str,
+    font: PdfFont,
+}
+
+#[derive(Default)]
+struct PdfPageBuilder {
+    commands: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct InventoryArtifact {
@@ -121,6 +162,8 @@ pub async fn write_asset_inventory_bundle(
     discovered_hosts: usize,
 ) -> io::Result<()> {
     let report = build_inventory_report(store, reports, discovered_hosts).await;
+    let topology_excalidraw =
+        render_network_topology_excalidraw(&report.bundle.mission_id, &report.topology);
     let json = serde_json::to_string_pretty(&report.bundle)
         .expect("asset inventory bundle should serialize to JSON");
 
@@ -144,11 +187,11 @@ pub async fn write_asset_inventory_bundle(
         .write_network_topology_mermaid(&render_network_topology_mermaid(&report.topology))
         .await?;
     store
-        .write_network_topology_excalidraw(&render_network_topology_excalidraw(
-            &report.bundle.mission_id,
-            &report.topology,
-        ))
+        .write_network_topology_excalidraw(&topology_excalidraw)
         .await?;
+    if let Some(topology_png) = maybe_render_network_topology_png(&topology_excalidraw).await? {
+        store.write_network_topology_png(&topology_png).await?;
+    }
 
     Ok(())
 }
@@ -393,41 +436,208 @@ fn render_asset_inventory_csv(bundle: &AssetInventoryBundle) -> String {
 }
 
 fn render_asset_inventory_pdf(bundle: &AssetInventoryBundle) -> Vec<u8> {
-    render_minimal_pdf(&asset_inventory_pdf_lines(bundle))
+    let total_pages = bundle.hosts.len().div_ceil(PDF_HOSTS_PER_PAGE).max(1);
+    let page_streams = if bundle.hosts.is_empty() {
+        vec![render_asset_inventory_pdf_page(bundle, &[], 1, total_pages)]
+    } else {
+        bundle
+            .hosts
+            .chunks(PDF_HOSTS_PER_PAGE)
+            .enumerate()
+            .map(|(index, hosts)| {
+                render_asset_inventory_pdf_page(bundle, hosts, index + 1, total_pages)
+            })
+            .collect()
+    };
+
+    assemble_pdf(&page_streams)
 }
 
-fn asset_inventory_pdf_lines(bundle: &AssetInventoryBundle) -> Vec<String> {
-    let mut lines = vec![
-        "Pandora's Box Asset Inventory".to_string(),
-        format!("Mission: {}", bundle.mission_id),
-        format!(
-            "Discovered: {}  Complete: {}  Failed: {}",
-            bundle.discovered_hosts, bundle.completed_hosts, bundle.failed_hosts
-        ),
-        String::new(),
-    ];
+fn render_asset_inventory_pdf_page(
+    bundle: &AssetInventoryBundle,
+    hosts: &[AssetInventoryHost],
+    page_number: usize,
+    total_pages: usize,
+) -> Vec<u8> {
+    let mut page = PdfPageBuilder::default();
+    let content_width = PDF_PAGE_WIDTH - (PDF_MARGIN * 2.0);
 
-    for host in &bundle.hosts {
-        lines.push(format!("Host {} ({})", display_host_name(host), host.ip));
-        lines.push(format!(
-            "State: {}  Platform: {}  OS: {}",
-            host.final_state,
-            host.platform,
-            optional_display(host.os.as_deref())
-        ));
-        lines.push(format!("Ports: {}", join_ports(&host.open_ports)));
-        lines.push(format!("Admin users: {}", join_or_dash(&host.admin_users)));
-        lines.push(format!("Services: {}", join_or_dash(&host.services)));
-        if !host.shares.is_empty() {
-            lines.push(format!("Shares: {}", join_or_dash(&host.shares)));
-        }
-        if let Some(error) = &host.error {
-            lines.push(format!("Error: {error}"));
-        }
-        lines.push(String::new());
+    page.fill_rect(
+        PDF_MARGIN,
+        PDF_HEADER_TOP,
+        content_width,
+        PDF_HEADER_HEIGHT,
+        "#EAF2FF",
+    );
+    page.fill_rect(
+        PDF_MARGIN,
+        PDF_HEADER_TOP,
+        10.0,
+        PDF_HEADER_HEIGHT,
+        "#1F3A5F",
+    );
+    page.text(
+        PDF_MARGIN + 24.0,
+        PDF_HEADER_TOP + 16.0,
+        PdfFont::Bold,
+        22.0,
+        "#10233C",
+        "Pandora's Box Asset Inventory",
+    );
+    page.text(
+        PDF_MARGIN + 24.0,
+        PDF_HEADER_TOP + 45.0,
+        PdfFont::Regular,
+        11.0,
+        "#51606F",
+        &format!(
+            "Mission {}  |  Page {} of {}  |  Collected host inventory, access paths, services, and shares.",
+            bundle.mission_id, page_number, total_pages
+        ),
+    );
+
+    render_pdf_summary_cards(&mut page, bundle);
+
+    if hosts.is_empty() {
+        page.fill_rect(
+            PDF_MARGIN,
+            PDF_HOST_CARD_TOP,
+            content_width,
+            132.0,
+            "#F4F6F8",
+        );
+        page.stroke_rect(
+            PDF_MARGIN,
+            PDF_HOST_CARD_TOP,
+            content_width,
+            132.0,
+            "#AAB7C4",
+            1.0,
+        );
+        page.text(
+            PDF_MARGIN + 24.0,
+            PDF_HOST_CARD_TOP + 24.0,
+            PdfFont::Bold,
+            14.0,
+            "#10233C",
+            "No completed host inventory artifacts were available for this mission.",
+        );
+        page.text(
+            PDF_MARGIN + 24.0,
+            PDF_HOST_CARD_TOP + 52.0,
+            PdfFont::Regular,
+            10.0,
+            "#51606F",
+            "Pandora's Box still wrote JSON, Markdown, CSV, and topology side artifacts for follow-up review.",
+        );
+        return page.finish();
     }
 
-    lines
+    for (index, host) in hosts.iter().enumerate() {
+        let top = PDF_HOST_CARD_TOP + (index as f32 * (PDF_HOST_CARD_HEIGHT + PDF_HOST_CARD_GAP));
+        render_pdf_host_card(&mut page, host, top, content_width);
+    }
+
+    page.finish()
+}
+
+fn render_pdf_summary_cards(page: &mut PdfPageBuilder, bundle: &AssetInventoryBundle) {
+    let card_gap = 12.0;
+    let card_width = (PDF_PAGE_WIDTH - (PDF_MARGIN * 2.0) - (card_gap * 2.0)) / 3.0;
+    let card_specs = [
+        ("Discovered", bundle.discovered_hosts, "#F4F6F8", "#10233C"),
+        ("Complete", bundle.completed_hosts, "#E8F6F1", "#18352D"),
+        ("Failed", bundle.failed_hosts, "#FDEEE8", "#5E2B18"),
+    ];
+
+    for (index, (label, value, fill, text_color)) in card_specs.into_iter().enumerate() {
+        let x = PDF_MARGIN + (index as f32 * (card_width + card_gap));
+        page.fill_rect(x, PDF_SUMMARY_TOP, card_width, PDF_SUMMARY_HEIGHT, fill);
+        page.stroke_rect(
+            x,
+            PDF_SUMMARY_TOP,
+            card_width,
+            PDF_SUMMARY_HEIGHT,
+            "#AAB7C4",
+            1.0,
+        );
+        page.text(
+            x + 16.0,
+            PDF_SUMMARY_TOP + 12.0,
+            PdfFont::Regular,
+            10.0,
+            "#51606F",
+            label,
+        );
+        page.text(
+            x + 16.0,
+            PDF_SUMMARY_TOP + 28.0,
+            PdfFont::Bold,
+            20.0,
+            text_color,
+            &value.to_string(),
+        );
+    }
+}
+
+fn render_pdf_host_card(
+    page: &mut PdfPageBuilder,
+    host: &AssetInventoryHost,
+    top: f32,
+    width: f32,
+) {
+    let (accent, fill, text_color) = pdf_host_palette(host);
+    page.fill_rect(PDF_MARGIN, top, width, PDF_HOST_CARD_HEIGHT, fill);
+    page.stroke_rect(PDF_MARGIN, top, width, PDF_HOST_CARD_HEIGHT, "#AAB7C4", 1.0);
+    page.fill_rect(PDF_MARGIN, top, 8.0, PDF_HOST_CARD_HEIGHT, accent);
+
+    page.text(
+        PDF_MARGIN + 20.0,
+        top + 14.0,
+        PdfFont::Bold,
+        14.0,
+        text_color,
+        &format!("{}  ({})", display_host_name(host), host.ip),
+    );
+
+    let state_chip_width = 90.0;
+    let chip_x = PDF_MARGIN + width - state_chip_width - 18.0;
+    page.fill_rect(chip_x, top + 14.0, state_chip_width, 22.0, accent);
+    page.text(
+        chip_x + 12.0,
+        top + 18.0,
+        PdfFont::Bold,
+        9.0,
+        "#F7FAFC",
+        &host.final_state.to_ascii_uppercase(),
+    );
+
+    page.text(
+        PDF_MARGIN + 20.0,
+        top + 36.0,
+        PdfFont::Regular,
+        10.0,
+        "#51606F",
+        &format!(
+            "{}  |  {}  |  {}",
+            host.platform,
+            optional_display(host.os.as_deref()),
+            host.transport_chain.join(" -> ")
+        ),
+    );
+
+    let mut line_top = top + 56.0;
+    for line in host_card_lines(host) {
+        page.text(
+            PDF_MARGIN + 20.0,
+            line_top,
+            line.font,
+            9.5,
+            line.color,
+            &line.text,
+        );
+        line_top += 13.0;
+    }
 }
 
 fn render_network_topology_markdown(mission_id: &str, topology: &NetworkTopology) -> String {
@@ -628,6 +838,89 @@ fn render_network_topology_excalidraw(mission_id: &str, topology: &NetworkTopolo
     .expect("excalidraw topology should serialize")
 }
 
+async fn maybe_render_network_topology_png(excalidraw_source: &str) -> io::Result<Option<Vec<u8>>> {
+    let Some(renderer) = resolve_excalidraw_renderer() else {
+        return Ok(None);
+    };
+    let excalidraw_source = excalidraw_source.to_string();
+    let render_result = tokio::task::spawn_blocking(move || {
+        render_network_topology_png_with(&renderer, &excalidraw_source)
+    })
+    .await;
+
+    match render_result {
+        Ok(Ok(bytes)) => Ok(Some(bytes)),
+        Ok(Err(_)) | Err(_) => Ok(None),
+    }
+}
+
+fn resolve_excalidraw_renderer() -> Option<ExcalidrawRenderer> {
+    let env_python = env::var_os("PANDORAS_BOX_EXCALIDRAW_PYTHON").map(PathBuf::from);
+    let env_script = env::var_os("PANDORAS_BOX_EXCALIDRAW_RENDERER").map(PathBuf::from);
+    if let (Some(python), Some(script)) = (env_python, env_script) {
+        if python.is_file() && script.is_file() {
+            return Some(ExcalidrawRenderer { python, script });
+        }
+    }
+
+    let codex_home = env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?;
+    let references_dir = codex_home.join("skills/excalidraw-diagram/references");
+    let python = references_dir.join(".venv/bin/python");
+    let script = references_dir.join("render_excalidraw.py");
+    if python.is_file() && script.is_file() {
+        Some(ExcalidrawRenderer { python, script })
+    } else {
+        None
+    }
+}
+
+fn render_network_topology_png_with(
+    renderer: &ExcalidrawRenderer,
+    excalidraw_source: &str,
+) -> io::Result<Vec<u8>> {
+    let workdir = temp_render_dir()?;
+    let input = workdir.join("network_topology.excalidraw");
+    let output = workdir.join("network_topology.png");
+    std::fs::write(&input, excalidraw_source)?;
+
+    let output_result = Command::new(&renderer.python)
+        .arg(&renderer.script)
+        .arg(&input)
+        .arg("--output")
+        .arg(&output)
+        .arg("--scale")
+        .arg("2")
+        .arg("--width")
+        .arg("1920")
+        .output();
+
+    let render_bytes = match output_result {
+        Ok(command_output) if command_output.status.success() => std::fs::read(&output),
+        Ok(command_output) => Err(io::Error::other(format!(
+            "excalidraw renderer failed: {}",
+            String::from_utf8_lossy(&command_output.stderr).trim()
+        ))),
+        Err(err) => Err(io::Error::other(format!(
+            "failed to invoke excalidraw renderer: {err}"
+        ))),
+    };
+
+    let _ = std::fs::remove_dir_all(&workdir);
+    render_bytes
+}
+
+fn temp_render_dir() -> io::Result<PathBuf> {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| io::Error::other(format!("clock drift while preparing png render: {err}")))?
+        .as_nanos();
+    let path = env::temp_dir().join(format!("pandoras-box-topology-render-{unique}"));
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
 fn topology_host_lookup(topology: &NetworkTopology) -> BTreeMap<&str, &TopologyHost> {
     topology
         .hosts
@@ -773,6 +1066,132 @@ fn sanitize_identifier(value: &str) -> String {
         .collect()
 }
 
+fn pdf_host_palette(host: &AssetInventoryHost) -> (&'static str, &'static str, &'static str) {
+    if host.final_state.eq_ignore_ascii_case("failed") {
+        ("#A64B2A", "#FDEEE8", "#5E2B18")
+    } else if host.platform.eq_ignore_ascii_case("windows") {
+        ("#2F5D50", "#E8F6F1", "#18352D")
+    } else {
+        ("#1F3A5F", "#EAF2FF", "#10233C")
+    }
+}
+
+fn host_card_lines(host: &AssetInventoryHost) -> Vec<PdfTextLine> {
+    let mut lines = Vec::new();
+    let transports = if host.transport_chain.is_empty() {
+        "-".to_string()
+    } else {
+        host.transport_chain.join(" -> ")
+    };
+
+    lines.extend(wrap_pdf_value_line(
+        "Access",
+        &format!("{transports}; ports {}", join_ports(&host.open_ports)),
+        82,
+        "#10233C",
+    ));
+    lines.extend(wrap_pdf_value_line(
+        "Admins",
+        &join_or_dash(&host.admin_users),
+        82,
+        "#10233C",
+    ));
+    lines.extend(wrap_pdf_value_line(
+        "Services",
+        &join_or_dash(&host.services),
+        82,
+        "#10233C",
+    ));
+    lines.extend(wrap_pdf_value_line(
+        "Shares",
+        &join_or_dash(&host.shares),
+        82,
+        "#10233C",
+    ));
+
+    if host.container_count > 0 {
+        lines.push(PdfTextLine {
+            text: format!("Containers: {}", host.container_count),
+            color: "#10233C",
+            font: PdfFont::Regular,
+        });
+    }
+
+    if let Some(error) = &host.error {
+        lines.extend(wrap_pdf_value_line("Error", error, 82, "#5E2B18"));
+    }
+
+    if lines.len() > 5 {
+        lines.truncate(5);
+        if let Some(last) = lines.last_mut() {
+            if !last.text.ends_with("...") {
+                last.text.push_str("...");
+            }
+        }
+    }
+
+    lines
+}
+
+fn wrap_pdf_value_line(
+    label: &str,
+    value: &str,
+    width: usize,
+    color: &'static str,
+) -> Vec<PdfTextLine> {
+    let mut wrapped = wrap_text_block(value, width.saturating_sub(label.len() + 2));
+    if wrapped.is_empty() {
+        wrapped.push("-".to_string());
+    }
+
+    wrapped
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| PdfTextLine {
+            text: if index == 0 {
+                format!("{label}: {line}")
+            } else {
+                format!("  {line}")
+            },
+            color,
+            font: PdfFont::Regular,
+        })
+        .collect()
+}
+
+fn wrap_text_block(value: &str, width: usize) -> Vec<String> {
+    let normalized = value.replace('\n', " ");
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in trimmed.split_whitespace() {
+        let candidate_len = if current.is_empty() {
+            word.len()
+        } else {
+            current.len() + 1 + word.len()
+        };
+        if candidate_len > width && !current.is_empty() {
+            lines.push(current);
+            current = word.to_string();
+        } else if current.is_empty() {
+            current.push_str(word);
+        } else {
+            current.push(' ');
+            current.push_str(word);
+        }
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    lines
+}
+
 fn excalidraw_seed(id: &str) -> u32 {
     id.bytes().fold(2_166_136_261u32, |hash, byte| {
         hash.wrapping_mul(16_777_619) ^ u32::from(byte)
@@ -905,32 +1324,27 @@ fn excalidraw_arrow_element(
     })
 }
 
-fn render_minimal_pdf(lines: &[String]) -> Vec<u8> {
-    let mut page_chunks = lines.chunks(42).collect::<Vec<_>>();
-    if page_chunks.is_empty() {
-        page_chunks.push(&[]);
-    }
-
+fn assemble_pdf(page_streams: &[Vec<u8>]) -> Vec<u8> {
     let pages_id = 2usize;
-    let font_id = 3usize;
+    let regular_font_id = 3usize;
+    let bold_font_id = 4usize;
     let mut objects = Vec::new();
     let mut page_ids = Vec::new();
-    let mut next_object_id = 4usize;
+    let mut next_object_id = 5usize;
 
-    for chunk in page_chunks {
+    for stream in page_streams {
         let page_id = next_object_id;
         let content_id = next_object_id + 1;
         page_ids.push(page_id);
         next_object_id += 2;
 
-        let content = pdf_page_stream(chunk);
         objects.push(object_bytes(
             page_id,
             format!(
-                "<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {content_id} 0 R >>"
+                "<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 {PDF_PAGE_WIDTH:.0} {PDF_PAGE_HEIGHT:.0}] /Resources << /Font << /F1 {regular_font_id} 0 R /F2 {bold_font_id} 0 R >> >> /Contents {content_id} 0 R >>"
             ),
         ));
-        objects.push(stream_object_bytes(content_id, content));
+        objects.push(stream_object_bytes(content_id, stream.clone()));
     }
 
     let kids = page_ids
@@ -950,8 +1364,12 @@ fn render_minimal_pdf(lines: &[String]) -> Vec<u8> {
             ),
         ),
         object_bytes(
-            font_id,
+            regular_font_id,
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        ),
+        object_bytes(
+            bold_font_id,
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>".to_string(),
         ),
     ];
     ordered_objects.extend(objects);
@@ -981,22 +1399,81 @@ fn render_minimal_pdf(lines: &[String]) -> Vec<u8> {
     pdf
 }
 
-fn pdf_page_stream(lines: &[String]) -> Vec<u8> {
-    let mut stream = String::from("BT\n/F1 10 Tf\n14 TL\n50 752 Td\n");
-
-    if lines.is_empty() {
-        stream.push_str("(Pandora's Box Asset Inventory) Tj\n");
-    } else {
-        for (index, line) in lines.iter().enumerate() {
-            if index > 0 {
-                stream.push_str("T*\n");
-            }
-            stream.push_str(&format!("({}) Tj\n", escape_pdf_text(line)));
-        }
+impl PdfPageBuilder {
+    fn fill_rect(&mut self, x: f32, top: f32, width: f32, height: f32, fill: &str) {
+        let (r, g, b) = pdf_color(fill);
+        let y = pdf_rect_y(top, height);
+        let _ = writeln!(
+            self.commands,
+            "q {:.3} {:.3} {:.3} rg {:.2} {:.2} {:.2} {:.2} re f Q",
+            r, g, b, x, y, width, height
+        );
     }
 
-    stream.push_str("ET\n");
-    stream.into_bytes()
+    fn stroke_rect(
+        &mut self,
+        x: f32,
+        top: f32,
+        width: f32,
+        height: f32,
+        stroke: &str,
+        line_width: f32,
+    ) {
+        let (r, g, b) = pdf_color(stroke);
+        let y = pdf_rect_y(top, height);
+        let _ = writeln!(
+            self.commands,
+            "q {:.3} {:.3} {:.3} RG {:.2} w {:.2} {:.2} {:.2} {:.2} re S Q",
+            r, g, b, line_width, x, y, width, height
+        );
+    }
+
+    fn text(&mut self, x: f32, top: f32, font: PdfFont, size: f32, color: &str, value: &str) {
+        let (r, g, b) = pdf_color(color);
+        let y = pdf_text_y(top, size);
+        let font_name = match font {
+            PdfFont::Regular => "F1",
+            PdfFont::Bold => "F2",
+        };
+        let _ = writeln!(
+            self.commands,
+            "BT /{} {:.2} Tf {:.3} {:.3} {:.3} rg 1 0 0 1 {:.2} {:.2} Tm ({}) Tj ET",
+            font_name,
+            size,
+            r,
+            g,
+            b,
+            x,
+            y,
+            escape_pdf_text(value)
+        );
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.commands.into_bytes()
+    }
+}
+
+fn pdf_rect_y(top: f32, height: f32) -> f32 {
+    PDF_PAGE_HEIGHT - top - height
+}
+
+fn pdf_text_y(top: f32, size: f32) -> f32 {
+    PDF_PAGE_HEIGHT - top - size
+}
+
+fn pdf_color(hex: &str) -> (f32, f32, f32) {
+    let value = hex.strip_prefix('#').unwrap_or(hex);
+    if value.len() != 6 {
+        return (0.0, 0.0, 0.0);
+    }
+    let channel = |range: std::ops::Range<usize>| -> f32 {
+        u8::from_str_radix(&value[range], 16)
+            .map(|component| f32::from(component) / 255.0)
+            .unwrap_or(0.0)
+    };
+
+    (channel(0..2), channel(2..4), channel(4..6))
 }
 
 fn escape_pdf_text(value: &str) -> String {
@@ -1027,12 +1504,16 @@ fn stream_object_bytes(id: usize, stream: Vec<u8>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_inventory_pdf_lines, parse_remote_ip, render_asset_inventory_csv,
-        render_asset_inventory_markdown, render_asset_inventory_pdf,
-        render_network_topology_excalidraw, render_network_topology_markdown,
-        render_network_topology_mermaid, AssetInventoryBundle, AssetInventoryHost,
-        InventoryArtifact, NetworkTopology, TopologyEdge, TopologyHost,
+        parse_remote_ip, render_asset_inventory_csv, render_asset_inventory_markdown,
+        render_asset_inventory_pdf, render_network_topology_excalidraw,
+        render_network_topology_markdown, render_network_topology_mermaid,
+        render_network_topology_png_with, AssetInventoryBundle, AssetInventoryHost,
+        ExcalidrawRenderer, InventoryArtifact, NetworkTopology, TopologyEdge, TopologyHost,
     };
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn asset_inventory_renderers_include_host_rows() {
@@ -1062,10 +1543,12 @@ mod tests {
         ));
         assert!(render_asset_inventory_csv(&bundle)
             .contains("10.0.0.10,complete,unix,lab,Ubuntu,\"22,80\",root,sshd,-,"));
-        assert!(render_asset_inventory_pdf(&bundle).starts_with(b"%PDF-1.4"));
-        assert!(asset_inventory_pdf_lines(&bundle)
-            .iter()
-            .any(|line| line.contains("Host lab (10.0.0.10)")));
+        let pdf = render_asset_inventory_pdf(&bundle);
+        assert!(pdf.starts_with(b"%PDF-1.4"));
+        let pdf_text = String::from_utf8_lossy(&pdf);
+        assert!(pdf_text.contains("Pandora's Box Asset Inventory"));
+        assert!(pdf_text.contains("lab  \\(10.0.0.10\\)"));
+        assert!(pdf_text.contains("Discovered"));
     }
 
     #[test]
@@ -1145,5 +1628,38 @@ mod tests {
             artifact.connections[1].remote_address.as_deref(),
             Some("10.0.2.2")
         );
+    }
+
+    #[test]
+    fn topology_png_renderer_contract_accepts_external_renderer() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("pandoras-box-renderer-test-{unique}"));
+        fs::create_dir_all(&temp_root).expect("temp dir should exist");
+
+        let script_path = temp_root.join("fake-renderer.sh");
+        fs::write(&script_path, "#!/bin/sh\nprintf 'fake-png' > \"$3\"\n")
+            .expect("stub renderer should exist");
+        let mut permissions = fs::metadata(&script_path)
+            .expect("stub metadata should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("stub script should be executable");
+
+        let renderer = ExcalidrawRenderer {
+            python: PathBuf::from("/bin/sh"),
+            script: script_path.clone(),
+        };
+
+        let png = render_network_topology_png_with(
+            &renderer,
+            r##"{"type":"excalidraw","version":2,"source":"https://excalidraw.com","elements":[{"id":"box","type":"rectangle","x":0,"y":0,"width":120,"height":80,"strokeColor":"#1F3A5F","backgroundColor":"#EAF2FF","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":0,"opacity":100,"angle":0,"seed":1,"version":1,"versionNonce":2,"isDeleted":false,"groupIds":[],"boundElements":[],"link":null,"locked":false}],"appState":{"viewBackgroundColor":"#FFFFFF"}}"##,
+        )
+        .expect("png renderer should return bytes");
+
+        assert_eq!(png, b"fake-png");
+        let _ = fs::remove_dir_all(temp_root);
     }
 }
