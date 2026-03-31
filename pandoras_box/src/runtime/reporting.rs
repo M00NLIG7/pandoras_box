@@ -3,6 +3,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use super::artifact_store::ArtifactStore;
 use super::scheduler::HostExecutionReport;
@@ -141,6 +142,12 @@ pub async fn write_asset_inventory_bundle(
         .await?;
     store
         .write_network_topology_mermaid(&render_network_topology_mermaid(&report.topology))
+        .await?;
+    store
+        .write_network_topology_excalidraw(&render_network_topology_excalidraw(
+            &report.bundle.mission_id,
+            &report.topology,
+        ))
         .await?;
 
     Ok(())
@@ -499,6 +506,127 @@ fn render_network_topology_mermaid(topology: &NetworkTopology) -> String {
     mermaid
 }
 
+fn render_network_topology_excalidraw(mission_id: &str, topology: &NetworkTopology) -> String {
+    let mut elements = Vec::new();
+    elements.push(excalidraw_text_element(
+        "network_topology_title",
+        48.0,
+        30.0,
+        620.0,
+        38.0,
+        "Network Topology".to_string(),
+        30,
+        "#10233C",
+    ));
+    elements.push(excalidraw_text_element(
+        "network_topology_subtitle",
+        48.0,
+        78.0,
+        980.0,
+        38.0,
+        format!(
+            "Mission {}: observed host relationships inferred from collected inventory artifacts.",
+            mission_id
+        ),
+        15,
+        "#51606F",
+    ));
+
+    let mut host_boxes = BTreeMap::new();
+    for (index, host) in topology.hosts.iter().enumerate() {
+        let column = index % 3;
+        let row = index / 3;
+        let x = 48.0 + (column as f64 * 320.0);
+        let y = 140.0 + (row as f64 * 190.0);
+        let width = 260.0;
+        let height = 126.0;
+        let box_id = excalidraw_host_box_id(&host.ip);
+        let text_id = excalidraw_host_text_id(&host.ip);
+        let (stroke_color, fill_color, text_color) = excalidraw_host_palette(host);
+
+        host_boxes.insert(
+            host.ip.clone(),
+            ExcalidrawBox {
+                id: box_id.clone(),
+                x,
+                y,
+                width,
+                height,
+            },
+        );
+
+        elements.push(excalidraw_rectangle_element(
+            &box_id,
+            x,
+            y,
+            width,
+            height,
+            stroke_color,
+            fill_color,
+        ));
+        elements.push(excalidraw_text_element(
+            &text_id,
+            x + 16.0,
+            y + 16.0,
+            width - 32.0,
+            height - 32.0,
+            format!(
+                "{}\n{}\n{}\nports: {}\nservices: {}",
+                display_topology_name(host),
+                host.ip,
+                host.platform,
+                join_ports(&host.open_ports),
+                summarize_services(&host.services),
+            ),
+            14,
+            text_color,
+        ));
+    }
+
+    for edge in &topology.edges {
+        let Some(from_box) = host_boxes.get(&edge.from_ip) else {
+            continue;
+        };
+        let Some(to_box) = host_boxes.get(&edge.to_ip) else {
+            continue;
+        };
+        elements.push(excalidraw_arrow_element(
+            &format!(
+                "edge_{}_to_{}",
+                sanitize_identifier(&edge.from_ip),
+                sanitize_identifier(&edge.to_ip)
+            ),
+            from_box,
+            to_box,
+        ));
+    }
+
+    if topology.edges.is_empty() {
+        let note_y = 140.0 + ((topology.hosts.len().max(1) as f64 / 3.0).ceil() * 190.0);
+        elements.push(excalidraw_text_element(
+            "network_topology_note",
+            48.0,
+            note_y,
+            420.0,
+            19.0,
+            "No observed inter-host connections in this mission.".to_string(),
+            15,
+            "#51606F",
+        ));
+    }
+
+    serde_json::to_string_pretty(&json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": elements,
+        "appState": {
+            "viewBackgroundColor": "#FFFFFF"
+        }
+    }))
+    .expect("excalidraw topology should serialize")
+}
+
 fn topology_host_lookup(topology: &NetworkTopology) -> BTreeMap<&str, &TopologyHost> {
     topology
         .hosts
@@ -602,6 +730,178 @@ fn mermaid_node_id(ip: &str) -> String {
 
 fn escape_mermaid_label(value: &str) -> String {
     value.replace('"', "'")
+}
+
+#[derive(Debug, Clone)]
+struct ExcalidrawBox {
+    id: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+fn excalidraw_host_palette(host: &TopologyHost) -> (&'static str, &'static str, &'static str) {
+    if host.platform.eq_ignore_ascii_case("windows") {
+        ("#2F5D50", "#E8F6F1", "#18352D")
+    } else {
+        ("#1F3A5F", "#EAF2FF", "#10233C")
+    }
+}
+
+fn excalidraw_host_box_id(ip: &str) -> String {
+    format!("host_box_{}", sanitize_identifier(ip))
+}
+
+fn excalidraw_host_text_id(ip: &str) -> String {
+    format!("host_text_{}", sanitize_identifier(ip))
+}
+
+fn summarize_services(services: &[String]) -> String {
+    match services.len() {
+        0 => "-".to_string(),
+        1..=3 => services.join(", "),
+        _ => format!("{}, +{} more", services[..3].join(", "), services.len() - 3),
+    }
+}
+
+fn sanitize_identifier(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
+}
+
+fn excalidraw_seed(id: &str) -> u32 {
+    id.bytes().fold(2_166_136_261u32, |hash, byte| {
+        hash.wrapping_mul(16_777_619) ^ u32::from(byte)
+    })
+}
+
+fn excalidraw_text_element(
+    id: &str,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    text: String,
+    font_size: u32,
+    stroke_color: &str,
+) -> serde_json::Value {
+    let seed = excalidraw_seed(id);
+    json!({
+        "id": id,
+        "type": "text",
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "text": text.clone(),
+        "originalText": text,
+        "fontSize": font_size,
+        "fontFamily": 3,
+        "textAlign": "left",
+        "verticalAlign": "top",
+        "strokeColor": stroke_color,
+        "backgroundColor": "transparent",
+        "fillStyle": "solid",
+        "strokeWidth": 1,
+        "strokeStyle": "solid",
+        "roughness": 0,
+        "opacity": 100,
+        "angle": 0,
+        "seed": seed,
+        "version": 1,
+        "versionNonce": seed ^ 0x5A5A_5A5A,
+        "isDeleted": false,
+        "groupIds": [],
+        "boundElements": null,
+        "link": null,
+        "locked": false,
+        "lineHeight": 1.25
+    })
+}
+
+fn excalidraw_rectangle_element(
+    id: &str,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    stroke_color: &str,
+    background_color: &str,
+) -> serde_json::Value {
+    let seed = excalidraw_seed(id);
+    json!({
+        "id": id,
+        "type": "rectangle",
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "strokeColor": stroke_color,
+        "backgroundColor": background_color,
+        "fillStyle": "solid",
+        "strokeWidth": 2,
+        "strokeStyle": "solid",
+        "roughness": 0,
+        "opacity": 100,
+        "angle": 0,
+        "seed": seed,
+        "version": 1,
+        "versionNonce": seed ^ 0x1F2E_3D4C,
+        "isDeleted": false,
+        "groupIds": [],
+        "boundElements": [],
+        "link": null,
+        "locked": false,
+        "roundness": { "type": 3 }
+    })
+}
+
+fn excalidraw_arrow_element(
+    id: &str,
+    from_box: &ExcalidrawBox,
+    to_box: &ExcalidrawBox,
+) -> serde_json::Value {
+    let seed = excalidraw_seed(id);
+    let from_x = from_box.x + (from_box.width / 2.0);
+    let from_y = from_box.y + (from_box.height / 2.0);
+    let to_x = to_box.x + (to_box.width / 2.0);
+    let to_y = to_box.y + (to_box.height / 2.0);
+    let dx = to_x - from_x;
+    let dy = to_y - from_y;
+
+    json!({
+        "id": id,
+        "type": "arrow",
+        "x": from_x,
+        "y": from_y,
+        "width": dx,
+        "height": dy,
+        "strokeColor": "#425466",
+        "backgroundColor": "transparent",
+        "fillStyle": "solid",
+        "strokeWidth": 2,
+        "strokeStyle": "solid",
+        "roughness": 0,
+        "opacity": 100,
+        "angle": 0,
+        "seed": seed,
+        "version": 1,
+        "versionNonce": seed ^ 0x7C6D_5E4F,
+        "isDeleted": false,
+        "groupIds": [],
+        "boundElements": [],
+        "link": null,
+        "locked": false,
+        "points": [[0.0, 0.0], [dx, dy]],
+        "startBinding": { "elementId": from_box.id, "focus": 0, "gap": 4 },
+        "endBinding": { "elementId": to_box.id, "focus": 0, "gap": 4 },
+        "startArrowhead": null,
+        "endArrowhead": "arrow",
+        "lastCommittedPoint": [dx, dy]
+    })
 }
 
 fn render_minimal_pdf(lines: &[String]) -> Vec<u8> {
@@ -728,8 +1028,9 @@ mod tests {
     use super::{
         asset_inventory_pdf_lines, parse_remote_ip, render_asset_inventory_csv,
         render_asset_inventory_markdown, render_asset_inventory_pdf,
-        render_network_topology_markdown, render_network_topology_mermaid, AssetInventoryBundle,
-        AssetInventoryHost, NetworkTopology, TopologyEdge, TopologyHost,
+        render_network_topology_excalidraw, render_network_topology_markdown,
+        render_network_topology_mermaid, AssetInventoryBundle, AssetInventoryHost, NetworkTopology,
+        TopologyEdge, TopologyHost,
     };
 
     #[test]
@@ -798,6 +1099,10 @@ mod tests {
         );
         assert!(render_network_topology_mermaid(&topology)
             .contains("host_10_0_0_51 -. observed .-> host_10_0_0_52"));
+        let excalidraw = render_network_topology_excalidraw("mission-123", &topology);
+        assert!(excalidraw.contains("\"type\": \"excalidraw\""));
+        assert!(excalidraw.contains("host_box_10_0_0_51"));
+        assert!(excalidraw.contains("edge_10_0_0_51_to_10_0_0_52"));
     }
 
     #[test]
