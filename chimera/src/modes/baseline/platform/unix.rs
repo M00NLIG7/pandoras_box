@@ -1,11 +1,11 @@
 use crate::error::Result;
+use crate::utils::find_files;
 use log::{debug, error, info, warn};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use crate::utils::find_files;
 
 #[derive(Debug, Clone)]
 struct SysctlSetting {
@@ -90,7 +90,6 @@ async fn append_php_config_to_file(path: &str, config: &PHPConfig) -> Result<()>
     println!("{} changed", path);
     Ok(())
 }
-
 
 /*
 async fn configure_rbash(revert: bool) -> Result<()> {
@@ -267,7 +266,6 @@ async fn find_rc_files_in_dir(dir: &str) -> Result<Vec<std::path::PathBuf>> {
 
     find_rc_files_in_dir_recursive(dir.to_string()).await
 }
-
 
 /*
  * Commenting out just in case

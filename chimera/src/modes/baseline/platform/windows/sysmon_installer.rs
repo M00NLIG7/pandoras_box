@@ -1,21 +1,23 @@
-use std::{path::Path, process::Command, ptr};
 use crate::error::{Error, Result};
-use tokio::{fs::{self, File}, io::AsyncWriteExt};
 use reqwest;
-use zip::ZipArchive;
-use windows_sys::Win32::{
-    System::Services::{
-        OpenSCManagerW, OpenServiceW, QueryServiceStatus,
-        SC_MANAGER_CONNECT, SC_MANAGER_ALL_ACCESS, 
-        SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_STOP,
-        SERVICE_STATUS, SERVICE_RUNNING,
-        CloseServiceHandle,
-    },
-    Foundation::{HANDLE, FALSE},
+use std::{path::Path, process::Command, ptr};
+use tokio::{
+    fs::{self, File},
+    io::AsyncWriteExt,
 };
+use windows_sys::Win32::{
+    Foundation::{FALSE, HANDLE},
+    System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus,
+        SC_MANAGER_ALL_ACCESS, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
+        SERVICE_START, SERVICE_STATUS, SERVICE_STOP,
+    },
+};
+use zip::ZipArchive;
 
 const SYSMON_URL: &str = "https://download.sysinternals.com/files/Sysmon.zip";
-const SYSMON_CONFIG_URL: &str = "https://raw.githubusercontent.com/olafhartong/sysmon-modular/master/sysmonconfig.xml";
+const SYSMON_CONFIG_URL: &str =
+    "https://raw.githubusercontent.com/olafhartong/sysmon-modular/master/sysmonconfig.xml";
 const INSTALL_PATH: &str = r"C:\Program Files\Sysmon";
 
 async fn create_install_directory() -> Result<()> {
@@ -62,11 +64,7 @@ fn check_existing_service() -> Result<bool> {
         }
 
         let service_name = "Sysmon64\0".encode_utf16().collect::<Vec<u16>>();
-        let service = OpenServiceW(
-            sc_manager,
-            service_name.as_ptr(),
-            SERVICE_QUERY_STATUS
-        );
+        let service = OpenServiceW(sc_manager, service_name.as_ptr(), SERVICE_QUERY_STATUS);
 
         let exists = service != 0 as HANDLE;
 
@@ -81,11 +79,7 @@ fn check_existing_service() -> Result<bool> {
 
 fn verify_service_status() -> Result<bool> {
     unsafe {
-        let sc_manager = OpenSCManagerW(
-            ptr::null(),
-            ptr::null(),
-            SC_MANAGER_ALL_ACCESS
-        );
+        let sc_manager = OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_ALL_ACCESS);
 
         if sc_manager == 0 as HANDLE {
             return Ok(false);
@@ -95,7 +89,7 @@ fn verify_service_status() -> Result<bool> {
         let service = OpenServiceW(
             sc_manager,
             service_name.as_ptr(),
-            SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP
+            SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP,
         );
 
         if service == 0 as HANDLE {
@@ -124,7 +118,9 @@ async fn uninstall_existing() -> Result<()> {
     let output = Command::new(&sysmon_exe).arg("-u").output()?;
 
     if !output.status.success() {
-        return Err(Error::ModuleError("Failed to uninstall existing Sysmon".to_string()));
+        return Err(Error::ModuleError(
+            "Failed to uninstall existing Sysmon".to_string(),
+        ));
     }
 
     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -134,7 +130,7 @@ async fn uninstall_existing() -> Result<()> {
 async fn install_new_sysmon() -> Result<()> {
     let sysmon_exe = format!("{}\\Sysmon64.exe", INSTALL_PATH);
     let config_path = format!("{}\\sysmonconfig.xml", INSTALL_PATH);
-    
+
     let output = Command::new(&sysmon_exe)
         .args(&["-accepteula", "-i", &config_path])
         .output()?;
@@ -159,7 +155,7 @@ pub async fn install_sysmon() -> Result<()> {
 
     let zip_path = format!("{}\\Sysmon.zip", INSTALL_PATH);
     let config_path = format!("{}\\sysmonconfig.xml", INSTALL_PATH);
-    
+
     download_file(&client, SYSMON_URL, &zip_path).await?;
     download_file(&client, SYSMON_CONFIG_URL, &config_path).await?;
 
@@ -170,11 +166,13 @@ pub async fn install_sysmon() -> Result<()> {
     }
 
     install_new_sysmon().await?;
-    
+
     if !verify_service_status()? {
-        return Err(Error::ModuleError("Failed to start Sysmon service".to_string()));
+        return Err(Error::ModuleError(
+            "Failed to start Sysmon service".to_string(),
+        ));
     }
-    
+
     cleanup(&zip_path).await?;
 
     Ok(())

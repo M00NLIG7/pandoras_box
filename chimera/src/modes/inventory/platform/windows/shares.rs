@@ -1,10 +1,8 @@
 use crate::types::Share;
-use wmi::{Variant, WMIConnection};
 use crate::types::ShareType;
 use std::collections::HashMap;
 use wmi::COMLibrary;
-
-
+use wmi::{Variant, WMIConnection};
 
 pub fn shares() -> Vec<Share> {
     let com_lib = match COMLibrary::new() {
@@ -32,4 +30,3 @@ pub fn shares() -> Vec<Share> {
 
     shares
 }
-

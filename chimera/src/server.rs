@@ -9,14 +9,18 @@ use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
-use tokio::time::timeout;
+
+use crate::utils::APPLICATION_LOG_FILENAME;
 
 #[cfg(target_os = "windows")]
+use std::time::Duration;
+#[cfg(target_os = "windows")]
 use tokio::process::Command;
+#[cfg(target_os = "windows")]
+use tokio::time::timeout;
 
 pub struct FileServer {
     root_dir: Arc<PathBuf>,
@@ -75,21 +79,19 @@ impl FileServer {
         )
         .await
         {
-            Ok(output) => {
-                match output {
-                    Ok(output) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        !stdout.contains(&self.rule_name)
-                    }
-                    Err(e) => {
-                        warn!(
+            Ok(output) => match output {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    !stdout.contains(&self.rule_name)
+                }
+                Err(e) => {
+                    warn!(
                             "Failed to execute firewall check command: {}. Will attempt to create rule.",
                             e
                         );
-                        true
-                    }
+                    true
                 }
-            }
+            },
             Err(_) => {
                 warn!("Firewall check command timed out after 5 seconds. Will attempt to create rule.");
                 true
@@ -366,9 +368,12 @@ async fn serve_file(
                         .first_or_octet_stream()
                         .to_string();
 
-                    // Check if this is application.log and set the shutdown flag
-                    if path == "application.log" {
-                        info!("application.log has been served, triggering shutdown");
+                    // Trigger shutdown after the runtime fetches the terminal artifact.
+                    if path == APPLICATION_LOG_FILENAME {
+                        info!(
+                            "{} has been served, triggering shutdown",
+                            APPLICATION_LOG_FILENAME
+                        );
                         shutdown_flag.store(true, Ordering::SeqCst);
                     }
 

@@ -1,8 +1,8 @@
 pub mod baseline;
+pub mod collector;
 pub mod credentials;
 pub mod inventory;
 pub mod serve;
-
 
 use crate::types::ExecutionResult;
 

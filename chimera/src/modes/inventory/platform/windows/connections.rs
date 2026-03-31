@@ -1,7 +1,7 @@
-use sysinfo::{System, SystemExt, ProcessExt};
+use crate::types::{ConnectionState, NetworkConnection, OpenPort, Process};
 use netstat::*;
-use crate::types::{NetworkConnection, OpenPort, ConnectionState, Process};
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
+use sysinfo::{ProcessExt, System, SystemExt};
 use wmi::COMLibrary;
 
 impl From<TcpState> for ConnectionState {
@@ -22,7 +22,6 @@ impl From<TcpState> for ConnectionState {
         }
     }
 }
-
 
 pub async fn conn_info() -> (Vec<NetworkConnection>, Vec<OpenPort>) {
     let sys = System::new_all();
@@ -101,13 +100,7 @@ pub async fn conn_info() -> (Vec<NetworkConnection>, Vec<OpenPort>) {
             }
         }
     }
-    (
-        sockets,
-        open_ports_set
-            .into_iter()
-            .collect::<Vec<_>>() ,
-    )
-
+    (sockets, open_ports_set.into_iter().collect::<Vec<_>>())
 }
 
 fn process_info(sys: &System) -> std::vec::Vec<Process> {
@@ -124,4 +117,3 @@ fn process_info(sys: &System) -> std::vec::Vec<Process> {
     }
     return process_dump;
 }
-

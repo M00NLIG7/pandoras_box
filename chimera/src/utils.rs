@@ -1,10 +1,21 @@
-use tokio::process::{Command, Child};
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
-use std::process::Stdio;
 use std::io;
 use std::path::PathBuf;
+use std::process::Stdio;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, Command};
+
+pub const APPLICATION_LOG_FILENAME: &str = "application.log";
+pub const INVENTORY_FILENAME: &str = "inventory.json";
+pub const DEFAULT_SERVE_PORT: u16 = 44372;
+const OUTPUT_ROOT_ENV_VAR: &str = "CHIMERA_OUTPUT_ROOT";
 
 pub fn get_default_output_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os(OUTPUT_ROOT_ENV_VAR) {
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+
     #[cfg(windows)]
     {
         PathBuf::from(r"C:\Temp\output")
@@ -13,6 +24,10 @@ pub fn get_default_output_dir() -> PathBuf {
     {
         PathBuf::from("/tmp/output")
     }
+}
+
+pub fn set_output_root(path: &str) {
+    std::env::set_var(OUTPUT_ROOT_ENV_VAR, path);
 }
 
 pub struct CommandOutput {
@@ -37,8 +52,8 @@ impl CommandExecutor {
 
         // Configure stdio
         cmd.stdin(Stdio::piped())
-           .stdout(Stdio::piped())
-           .stderr(Stdio::piped());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         // Spawn the command
         let mut child = cmd.spawn()?;
@@ -73,9 +88,13 @@ impl CommandExecutor {
 
     async fn collect_output(mut child: Child) -> io::Result<CommandOutput> {
         // Take ownership of the stdout and stderr handles
-        let mut stdout = child.stdout.take()
+        let mut stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Could not capture stdout"))?;
-        let mut stderr = child.stderr.take()
+        let mut stderr = child
+            .stderr
+            .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Could not capture stderr"))?;
 
         // Create buffers for stdout and stderr
@@ -105,10 +124,10 @@ impl CommandExecutor {
 
 pub async fn find_files(target_name: String, root: String) -> Vec<String> {
     use ignore::WalkBuilder;
-    use std::sync::Arc;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use tokio::sync::mpsc;
-    
+
     // Use Arc for shared ownership of the target_name
     let target_name = Arc::new(target_name);
     let root = Arc::new(root);
@@ -176,11 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command_with_stdin() {
-        let result = CommandExecutor::execute_command(
-            "cat",
-            None,
-            Some(&["test input"]),
-        ).await;
+        let result = CommandExecutor::execute_command("cat", None, Some(&["test input"])).await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert_eq!(output.status, 0);

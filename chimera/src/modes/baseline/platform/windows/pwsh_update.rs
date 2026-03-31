@@ -14,24 +14,15 @@ use windows_sys::Win32::{
     },
 };
 
-
 fn get_powershell_registry_version() -> Result<Option<String>> {
     unsafe {
         let mut hkey: HKEY = std::ptr::null_mut();
         let subkey = "SOFTWARE\\Microsoft\\PowerShell\\3\\PowerShellEngine\0"
             .encode_utf16()
             .collect::<Vec<u16>>();
-            
-        if RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            subkey.as_ptr(),
-            0,
-            KEY_READ,
-            &mut hkey,
-        ) == 0 {
-            let value_name = "PowerShellVersion\0"
-                .encode_utf16()
-                .collect::<Vec<u16>>();
+
+        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.as_ptr(), 0, KEY_READ, &mut hkey) == 0 {
+            let value_name = "PowerShellVersion\0".encode_utf16().collect::<Vec<u16>>();
             let mut buf_len: u32 = 256;
             let mut buf_type: u32 = 0;
             let mut buffer = vec![0u8; buf_len as usize];
@@ -44,25 +35,25 @@ fn get_powershell_registry_version() -> Result<Option<String>> {
                 buffer.as_mut_ptr(),
                 &mut buf_len,
             );
-            
+
             RegCloseKey(hkey);
-            
+
             if result == 0 {
                 // Convert buffer to string, removing null terminators
                 let version = String::from_utf16_lossy(
-                    &buffer[..buf_len as usize - 2]  // Remove null terminator
+                    &buffer[..buf_len as usize - 2] // Remove null terminator
                         .chunks_exact(2)
                         .map(|chunk| u16::from_ne_bytes([chunk[0], chunk[1]]))
-                        .collect::<Vec<u16>>()
+                        .collect::<Vec<u16>>(),
                 )
                 .trim()
                 .to_string();
-                
+
                 println!("PowerShell version from registry: {}", version);
                 return Ok(Some(version));
             }
         }
-        
+
         println!("Could not read PowerShell version from registry");
         Ok(None)
     }

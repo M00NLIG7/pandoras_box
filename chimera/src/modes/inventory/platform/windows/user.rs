@@ -1,6 +1,6 @@
-use sysinfo::{User, UserExt, SystemExt};
 use crate::types::UserInfo;
 use once_cell::sync::Lazy;
+use sysinfo::{SystemExt, User, UserExt};
 
 static LOCAL_DOMAIN_ID: Lazy<Option<String>> = Lazy::new(|| {
     // Get seperate list of users and filter for local admin
@@ -66,5 +66,3 @@ impl UserInfo for sysinfo::User {
         }
     }
 }
-
-

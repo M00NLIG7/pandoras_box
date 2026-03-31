@@ -53,9 +53,9 @@ impl ModeExecutor for CredentialsMode {
                             "IPv6 is not supported".to_string(),
                         );
                     }
-                } as u64;  // Use u64 to prevent overflow
+                } as u64; // Use u64 to prevent overflow
 
-                let magic = args.0 as u64;  // Cast to u64
+                let magic = args.0 as u64; // Cast to u64
 
                 // Use checked multiplication to prevent overflow
                 let suffix = match last_octet.checked_mul(magic) {

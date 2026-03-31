@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use futures::future::join_all;
-use crate::utils::CommandExecutor;
-use crate::types::{Service, ServiceStatus, ServiceStartType};
 use crate::error::{Error, Result};
+use crate::types::{Service, ServiceStartType, ServiceStatus};
+use crate::utils::CommandExecutor;
+use futures::future::join_all;
 use std::collections::HashMap;
+use std::sync::Arc;
 use wmi::{COMLibrary, Variant, WMIConnection};
 
 pub async fn services() -> Vec<Service> {
@@ -20,34 +20,35 @@ pub async fn services() -> Vec<Service> {
     // Only collect critical/commonly vulnerable services
     // Focuses on services relevant for security auditing and attack vectors
     let critical_services = vec![
-        "NTDS",                 // Active Directory Domain Services
-        "DNS",                  // DNS Server
-        "KDC",                  // Kerberos Key Distribution Center
-        "Netlogon",             // Net Logon
-        "W32Time",              // Windows Time (critical for Kerberos)
-        "LanmanServer",         // Server (SMB/CIFS) - commonly exploited
-        "LanmanWorkstation",    // Workstation (SMB client)
-        "RpcSs",                // RPC Endpoint Mapper - attack vector
-        "RpcLocator",           // RPC Locator
-        "Dhcp",                 // DHCP Server
-        "DHCPServer",           // DHCP Server (alt name)
-        "Spooler",              // Print Spooler - CVE-2021-1675 PrintNightmare
-        "RemoteRegistry",       // Remote Registry - often exploited
-        "WinRM",                // Windows Remote Management
-        "TermService",          // Remote Desktop Services
-        "MSSQLSERVER",          // SQL Server
-        "SQLAgent$*",           // SQL Server Agent
-        "W3SVC",                // IIS Web Server
-        "IISADMIN",             // IIS Admin Service
-        "FTPSvc",               // FTP Server
-        "Telnet",               // Telnet (should be disabled!)
-        "SNMP",                 // SNMP Service - weak auth
-        "WMPNetworkSvc",        // Windows Media Player Network Sharing
-        "EventLog",             // Event Log (for monitoring)
-        "ADWS",                 // Active Directory Web Services
+        "NTDS",              // Active Directory Domain Services
+        "DNS",               // DNS Server
+        "KDC",               // Kerberos Key Distribution Center
+        "Netlogon",          // Net Logon
+        "W32Time",           // Windows Time (critical for Kerberos)
+        "LanmanServer",      // Server (SMB/CIFS) - commonly exploited
+        "LanmanWorkstation", // Workstation (SMB client)
+        "RpcSs",             // RPC Endpoint Mapper - attack vector
+        "RpcLocator",        // RPC Locator
+        "Dhcp",              // DHCP Server
+        "DHCPServer",        // DHCP Server (alt name)
+        "Spooler",           // Print Spooler - CVE-2021-1675 PrintNightmare
+        "RemoteRegistry",    // Remote Registry - often exploited
+        "WinRM",             // Windows Remote Management
+        "TermService",       // Remote Desktop Services
+        "MSSQLSERVER",       // SQL Server
+        "SQLAgent$*",        // SQL Server Agent
+        "W3SVC",             // IIS Web Server
+        "IISADMIN",          // IIS Admin Service
+        "FTPSvc",            // FTP Server
+        "Telnet",            // Telnet (should be disabled!)
+        "SNMP",              // SNMP Service - weak auth
+        "WMPNetworkSvc",     // Windows Media Player Network Sharing
+        "EventLog",          // Event Log (for monitoring)
+        "ADWS",              // Active Directory Web Services
     ];
 
-    let service_filter = critical_services.iter()
+    let service_filter = critical_services
+        .iter()
         .map(|s| format!("Name='{}'", s))
         .collect::<Vec<_>>()
         .join(" OR ");
@@ -107,4 +108,3 @@ pub async fn services() -> Vec<Service> {
 
     services
 }
-

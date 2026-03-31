@@ -1,15 +1,15 @@
-use thiserror::Error;
-use std::io;
 use log;
+use std::io;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Execution error: {0}")]
     Execution(String),
-    
+
     #[error("Password change error: {0}")]
     PasswordChange(String),
-    
+
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
 
@@ -24,7 +24,7 @@ pub enum Error {
 
     #[error("Module error: {0}")]
     ModuleError(String),
-    
+
     #[error("Unknown OS")]
     UnknownOS,
 }
@@ -45,4 +45,3 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-

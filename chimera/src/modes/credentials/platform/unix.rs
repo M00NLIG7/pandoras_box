@@ -1,8 +1,8 @@
-use std::process::{Command, Stdio};
-use std::io::Write;
-use zeroize::Zeroize;
 use crate::error::Error;
 use crate::error::Result;
+use std::io::Write;
+use std::process::{Command, Stdio};
+use zeroize::Zeroize;
 
 pub fn change_password(username: &str, new_password: &mut str) -> Result<()> {
     if username.is_empty() || new_password.is_empty() {
@@ -32,7 +32,10 @@ pub fn change_password(username: &str, new_password: &mut str) -> Result<()> {
         match child.wait() {
             Ok(status) if status.success() => {
                 new_password.zeroize();
-                log::info!("Successfully changed password for user: {} using chpasswd", username);
+                log::info!(
+                    "Successfully changed password for user: {} using chpasswd",
+                    username
+                );
                 return Ok(());
             }
             _ => {
@@ -52,7 +55,9 @@ pub fn change_password(username: &str, new_password: &mut str) -> Result<()> {
     if let Some(mut stdin) = child.stdin.take() {
         // Some systems ask for old password (current user), some don't (root changing others)
         // Send password 3 times to cover all cases: old (if asked), new, confirm
-        let _ = stdin.write_all(format!("{}\n{}\n{}\n", new_password, new_password, new_password).as_bytes());
+        let _ = stdin.write_all(
+            format!("{}\n{}\n{}\n", new_password, new_password, new_password).as_bytes(),
+        );
     }
 
     let output = child.wait_with_output()?;

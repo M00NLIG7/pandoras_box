@@ -1,13 +1,13 @@
+use crate::types::{Share, ShareType};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
-use crate::types::{Share, ShareType};
 
 pub fn read_smb_shares() -> io::Result<Vec<Share>> {
     let config_paths = [
         "/etc/samba/smb.conf",
         "/usr/local/samba/lib/smb.conf",
         "/usr/local/etc/smb.conf",
-        "/opt/samba/etc/smb.conf"
+        "/opt/samba/etc/smb.conf",
     ];
 
     // Try each possible config location
@@ -19,9 +19,9 @@ pub fn read_smb_shares() -> io::Result<Vec<Share>> {
         }
     }
 
-    let file = config_file.ok_or_else(|| 
+    let file = config_file.ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "SMB configuration file not found")
-    )?;
+    })?;
 
     let reader = BufReader::new(file);
     let mut shares = Vec::new();
@@ -31,7 +31,7 @@ pub fn read_smb_shares() -> io::Result<Vec<Share>> {
     for line in reader.lines() {
         let line = line?;
         let trimmed = line.trim();
-        
+
         // Skip comments and empty lines
         if trimmed.starts_with('#') || trimmed.starts_with(';') || trimmed.is_empty() {
             continue;
@@ -47,7 +47,7 @@ pub fn read_smb_shares() -> io::Result<Vec<Share>> {
                 });
             }
 
-            let share_name = trimmed[1..trimmed.len()-1].to_string();
+            let share_name = trimmed[1..trimmed.len() - 1].to_string();
             // Skip [global] and [printers] sections
             if share_name != "global" && share_name != "printers" {
                 current_share = Some(share_name);
@@ -60,7 +60,7 @@ pub fn read_smb_shares() -> io::Result<Vec<Share>> {
             if let Some((key, value)) = trimmed.split_once('=') {
                 let key = key.trim().to_lowercase();
                 let value = value.trim();
-                
+
                 if key == "path" {
                     current_path = Some(value.to_string());
                 }
@@ -83,7 +83,7 @@ pub fn read_nfs_shares() -> io::Result<Vec<Share>> {
     let export_paths = [
         "/etc/exports",
         "/usr/local/etc/exports",
-        "/etc/nfs.conf/exports"
+        "/etc/nfs.conf/exports",
     ];
 
     // Try each possible exports location
@@ -95,9 +95,8 @@ pub fn read_nfs_shares() -> io::Result<Vec<Share>> {
         }
     }
 
-    let file = exports_file.ok_or_else(|| 
-        io::Error::new(io::ErrorKind::NotFound, "NFS exports file not found")
-    )?;
+    let file = exports_file
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "NFS exports file not found"))?;
 
     let reader = BufReader::new(file);
     let mut shares = Vec::new();
@@ -105,7 +104,7 @@ pub fn read_nfs_shares() -> io::Result<Vec<Share>> {
     for line in reader.lines() {
         let line = line?;
         let trimmed = line.trim();
-        
+
         // Skip comments and empty lines
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -175,5 +174,3 @@ mod tests {
         }
     }
 }
-
-

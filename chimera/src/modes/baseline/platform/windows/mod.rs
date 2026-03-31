@@ -1,9 +1,8 @@
-use log::{info, error};
+use log::{error, info};
 
-mod sysmon_installer;
-mod pwsh_update;
 mod harden;
-
+mod pwsh_update;
+mod sysmon_installer;
 
 pub async fn establish_baseline() -> crate::error::Result<()> {
     match harden::harden_zerologon().await {
@@ -12,7 +11,6 @@ pub async fn establish_baseline() -> crate::error::Result<()> {
             error!("Failed to harden Zero logon: {}", e);
         }
     }
-
 
     match harden::harden_php().await {
         Ok(_) => info!("PHP hardened successfully"),

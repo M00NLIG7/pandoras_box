@@ -41,8 +41,10 @@ nix = { version = "0.29.0", features = ["process"] }
 bstr = "1.11.3"
 regex = "1.11.1"
 which = "7.0.0"
-procfs = "0.17.0"
 daemonize = "0.5.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs = "0.17.0"
 
 # Windows only dependencies
 [target.'cfg(windows)'.dependencies]
@@ -66,5 +68,4 @@ opt-level = 3  # Optimize for size.
 strip = true  # Automatically strip symbols from the binary.
 lto = true
 codegen-units = 1
-
 

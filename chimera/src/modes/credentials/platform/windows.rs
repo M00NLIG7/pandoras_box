@@ -22,7 +22,9 @@ fn is_domain_controller() -> Result<bool> {
         if result == NERR_Success && !server_info.is_null() {
             let info = &*server_info;
             // Check for both primary and backup DC flags
-            let is_dc = (info.sv101_type & (SV_TYPE_DOMAIN_CTRL | SV_TYPE_DOMAIN_BAKCTRL | SV_TYPE_DOMAIN_MASTER)) != 0;
+            let is_dc = (info.sv101_type
+                & (SV_TYPE_DOMAIN_CTRL | SV_TYPE_DOMAIN_BAKCTRL | SV_TYPE_DOMAIN_MASTER))
+                != 0;
 
             info!("Server type value: 0x{:x}", info.sv101_type);
             info!("DC check result: {}", is_dc);

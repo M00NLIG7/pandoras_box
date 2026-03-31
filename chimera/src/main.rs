@@ -6,20 +6,23 @@ mod types;
 mod utils;
 
 use crate::modes::baseline::BaselineMode;
+use crate::modes::collector::{CollectorConfig, CollectorMode};
 use crate::modes::credentials::{CredentialsMode, Magic};
 use crate::modes::inventory::InventoryMode;
 use crate::modes::serve::{ServeConfig, ServeMode};
 use crate::modes::ModeExecutor;
 use crate::types::{ExecutionMode, ExecutionResult};
+use crate::utils::{
+    get_default_output_dir, set_output_root, DEFAULT_SERVE_PORT, INVENTORY_FILENAME,
+};
 use clap::{arg, command, value_parser, Command};
 use log::{error, info};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use utils::get_default_output_dir;
-use sysinfo::SystemExt;
 use sysinfo::System;
+use sysinfo::SystemExt;
 
 pub async fn run_baseline() -> ExecutionResult {
     let current_exe = std::env::current_exe().expect("Failed to get current executable path");
@@ -152,7 +155,7 @@ async fn run_inventory_mode(output_dir: &Path, use_hostname_for_output: bool) ->
         let host_name = s.host_name().unwrap_or_else(|| "<unknown>".to_owned());
         format!("{}.json", host_name)
     } else {
-        String::from("inventory.json")
+        String::from(INVENTORY_FILENAME)
     };
 
     let output_path = output_dir.join(filename);
@@ -177,6 +180,15 @@ async fn run_inventory_mode(output_dir: &Path, use_hostname_for_output: bool) ->
     }
 
     result
+}
+
+async fn run_collector_mode(output_dir: PathBuf) -> ExecutionResult {
+    let mode = CollectorMode::new();
+    info!(
+        "Starting collector mode execution with output root {}",
+        output_dir.display()
+    );
+    mode.execute(CollectorConfig { output_dir }).await
 }
 
 async fn run_credentials_mode(magic_value: u32) -> ExecutionResult {
@@ -213,7 +225,7 @@ async fn run_all_modes(output_dir: &Path, magic_value: u32) {
         run_credentials_mode(magic_value).await,
         run_inventory_mode(output_dir, false).await,
         run_update_mode().await,
-        run_serve_mode(44372).await,
+        run_serve_mode(DEFAULT_SERVE_PORT).await,
         run_baseline().await,
     ];
 
@@ -231,18 +243,13 @@ async fn run_all_modes(output_dir: &Path, magic_value: u32) {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    if let Err(e) = logging::init_logging() {
-        eprintln!("Failed to initialize logging: {}", e);
-        return;
-    }
-
-    let mut output_dir = get_default_output_dir();
-
-    fs::create_dir_all(&output_dir).expect("Failed to create output directory");
-
-    let matches = command!()
+fn build_cli() -> Command {
+    command!()
+        .arg(
+            arg!(--"output-root" <PATH> "Directory for collector artifacts and serve output")
+                .global(true)
+                .value_parser(value_parser!(String)),
+        )
         .subcommand(
             Command::new("all").about("Run all modes sequentially").arg(
                 arg!(-m --magic <VALUE> "Magic number for credentials")
@@ -257,7 +264,6 @@ async fn main() {
                     arg!(-o --output <VALUE> "Output and file name path for inventory")
                         .value_parser(value_parser!(String)),
                 ),
-            
         )
         .subcommand(
             Command::new("credentials")
@@ -288,7 +294,36 @@ async fn main() {
                         .value_parser(value_parser!(u16)),
                 ),
         )
-        .get_matches();
+        .subcommand(
+            Command::new("collector")
+                .about("Collect Pandora runtime artifacts without starting the file server"),
+        )
+}
+
+fn logging_config_for(subcommand: Option<&str>) -> logging::LoggingConfig {
+    match subcommand {
+        Some("collector") => logging::LoggingConfig::truncate_file(),
+        Some("serve") | Some("serve-internal") => logging::LoggingConfig::stderr_only(),
+        _ => logging::LoggingConfig::append_file(),
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let matches = build_cli().get_matches();
+
+    if let Some(output_root) = matches.get_one::<String>("output-root") {
+        set_output_root(output_root);
+    }
+
+    if let Err(e) = logging::init_logging(logging_config_for(matches.subcommand_name())) {
+        eprintln!("Failed to initialize logging: {}", e);
+        return;
+    }
+
+    let mut output_dir = get_default_output_dir();
+
+    fs::create_dir_all(&output_dir).expect("Failed to create output directory");
 
     match matches.subcommand() {
         Some(("all", sub_matches)) => {
@@ -297,6 +332,13 @@ async fn main() {
                 .copied()
                 .expect("Required argument");
             run_all_modes(&output_dir, magic_value).await;
+        }
+        Some(("collector", _)) => {
+            let result = run_collector_mode(output_dir.clone()).await;
+            if !result.success {
+                error!("Collector mode failed: {}", result.message);
+                std::process::exit(1);
+            }
         }
         Some(("inventory", sub_matches)) => {
             let output_path = sub_matches;
@@ -311,8 +353,8 @@ async fn main() {
             if !result.success {
                 error!("Inventory mode failed: {}", result.message);
                 std::process::exit(1);
-                }   
             }
+        }
         Some(("credentials", sub_matches)) => {
             let magic_value = sub_matches
                 .get_one::<u32>("magic")
@@ -339,7 +381,10 @@ async fn main() {
             }
         }
         Some(("serve", sub_matches)) => {
-            let port = sub_matches.get_one::<u16>("port").copied().unwrap_or(44372);
+            let port = sub_matches
+                .get_one::<u16>("port")
+                .copied()
+                .unwrap_or(DEFAULT_SERVE_PORT);
             let result = run_serve_mode(port).await;
             if !result.success {
                 error!("Serve mode failed: {}", result.message);
@@ -347,7 +392,10 @@ async fn main() {
             }
         }
         Some(("serve-internal", sub_matches)) => {
-            let port = sub_matches.get_one::<u16>("port").copied().unwrap_or(44372);
+            let port = sub_matches
+                .get_one::<u16>("port")
+                .copied()
+                .unwrap_or(DEFAULT_SERVE_PORT);
             let result = run_serve_internal(port).await;
             if !result.success {
                 error!("Serve-internal mode failed: {}", result.message);

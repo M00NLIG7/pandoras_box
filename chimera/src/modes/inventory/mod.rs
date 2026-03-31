@@ -49,6 +49,12 @@ impl InventoryMode {
         Self { system }
     }
 
+    pub async fn collect_inventory_json(&self) -> Result<String> {
+        let host = self.fetch_inventory().await?;
+        serde_json::to_string(&host)
+            .map_err(|e| Error::Execution(format!("Failed to serialize inventory: {}", e)))
+    }
+
     async fn fetch_inventory(&self) -> Result<Host> {
         let (connections, open_ports) = conn_info().await;
 

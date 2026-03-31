@@ -3,7 +3,7 @@ use crate::server::FileServer;
 use crate::types::{ExecutionMode, ExecutionResult};
 use crate::utils::get_default_output_dir;
 use log::{error, info, warn};
-use std::process;
+use std::path::Path;
 use tokio::spawn;
 
 #[cfg(target_os = "windows")]
@@ -22,6 +22,28 @@ pub struct ServeConfig {
 }
 
 pub struct ServeMode;
+
+fn serve_internal_args(output_root: &Path, port: u16) -> Vec<String> {
+    vec![
+        "serve-internal".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--output-root".to_string(),
+        output_root.to_string_lossy().into_owned(),
+    ]
+}
+
+#[cfg(windows)]
+fn windows_command_line(current_exe: &Path, output_root: &Path, port: u16) -> String {
+    let mut parts = Vec::with_capacity(1 + 5);
+    parts.push(format!("\"{}\"", current_exe.to_string_lossy()));
+    parts.extend(
+        serve_internal_args(output_root, port)
+            .into_iter()
+            .map(|arg| format!("\"{}\"", arg.replace('"', "\\\""))),
+    );
+    parts.join(" ")
+}
 
 impl ModeExecutor for ServeMode {
     type Args = ServeConfig;
@@ -84,11 +106,7 @@ impl ModeExecutor for ServeMode {
         #[cfg(windows)]
         {
             // Prepare command line
-            let mut cmd = format!(
-                "\"{}\" serve-internal --port {}",
-                current_exe.to_string_lossy(),
-                config.port
-            );
+            let mut cmd = windows_command_line(&current_exe, &output_dir, config.port);
 
             // Convert to wide string for Windows API
             let wide_cmd: Vec<u16> = cmd.encode_utf16().chain(std::iter::once(0)).collect();
@@ -173,18 +191,24 @@ impl ModeExecutor for ServeMode {
                         }
                     };
 
-                    let arg0 = CString::new("serve-internal").expect("hardcoded string should not contain null");
-                    let arg1 = CString::new("--port").expect("hardcoded string should not contain null");
-                    let arg2 = match CString::new(config.port.to_string()) {
-                        Ok(c) => c,
+                    let arg_values = serve_internal_args(&output_dir, config.port);
+                    let arg_cstrings = match arg_values
+                        .iter()
+                        .map(|arg| CString::new(arg.as_str()))
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        Ok(values) => values,
                         Err(e) => {
-                            error!("Port number contains null bytes: {}", e);
+                            error!("Serve arguments contain null bytes: {}", e);
                             std::process::exit(1);
                         }
                     };
+                    let mut argv = Vec::with_capacity(1 + arg_cstrings.len());
+                    argv.push(&exe);
+                    argv.extend(arg_cstrings.iter());
 
                     // Replace the current process with serve-internal
-                    match execvp(&exe, &[&exe, &arg0, &arg1, &arg2]) {
+                    match execvp(&exe, &argv) {
                         Ok(_) => unreachable!(), // execvp never returns on success
                         Err(e) => {
                             error!("Failed to exec: {}", e);
@@ -280,5 +304,26 @@ impl ServeMode {
                 )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::serve_internal_args;
+    use std::path::Path;
+
+    #[test]
+    fn serve_internal_args_include_output_root() {
+        let args = serve_internal_args(Path::new("/tmp/chimera-output"), 44_372);
+        assert_eq!(
+            args,
+            vec![
+                "serve-internal".to_string(),
+                "--port".to_string(),
+                "44372".to_string(),
+                "--output-root".to_string(),
+                "/tmp/chimera-output".to_string(),
+            ]
+        );
     }
 }

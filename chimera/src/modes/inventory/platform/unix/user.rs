@@ -1,8 +1,7 @@
-use sysinfo::{User, UserExt};
 use crate::types::UserInfo;
+use sysinfo::{User, UserExt};
 
 impl UserInfo for User {
-    // If compiled for linux
     fn is_admin(&self) -> bool {
         // Check for sudoers group in groups or uid 0 (root)
         self.groups().iter().any(|group| group == "wheel") || self.id().to_string() == "0"
@@ -12,10 +11,9 @@ impl UserInfo for User {
         true
     }
 
-    // Reads from etc password and matches shell to the user
+    #[cfg(target_os = "linux")]
     fn shell(&self) -> String {
         todo!()
         // self.shell().into()
     }
 }
-

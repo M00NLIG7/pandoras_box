@@ -1,135 +1,137 @@
 //! Types and structures for CCDC automation system
-//! 
+//!
 //! This module contains the core types used for system automation
 //! across both Windows and Linux systems.
 
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use log::{error, info};
-
-
+use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
-
 
 /// Represents the different execution modes available for system
 /// automation and configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExecutionMode {
-   /// Initial remote access configuration
-   /// 
-   /// # Tasks
-   /// * Verify network connectivity
-   /// * Establish remote connections (RDP/SSH)
-   /// * Validate administrative access
-   Remote,
+    /// Initial remote access configuration
+    ///
+    /// # Tasks
+    /// * Verify network connectivity
+    /// * Establish remote connections (RDP/SSH)
+    /// * Validate administrative access
+    Remote,
 
-   /// Credential and account security management
-   /// 
-   /// # Tasks
-   /// * Change default passwords
-   /// * Create backup administrative accounts
-   /// * Disable unnecessary accounts
-   Credentials,
+    /// Credential and account security management
+    ///
+    /// # Tasks
+    /// * Change default passwords
+    /// * Create backup administrative accounts
+    /// * Disable unnecessary accounts
+    Credentials,
 
-   /// System inventory and asset discovery
-   /// 
-   /// # Tasks
-   /// * List installed software/packages
-   /// * Enumerate users and groups
-   /// * Identify running services
-   /// * Map network connections
-   Inventory,
+    /// System inventory and asset discovery
+    ///
+    /// # Tasks
+    /// * List installed software/packages
+    /// * Enumerate users and groups
+    /// * Identify running services
+    /// * Map network connections
+    Inventory,
 
-   /// System update and patch management
-   /// 
-   /// # Tasks
-   /// * Configure update sources
-   /// * Install pending updates
-   /// * Validate system patch level
-   Update,
+    /// Collect runtime artifacts for Pandora integration
+    Collector,
 
-   /// OS-specific configurations
-   /// 
-   /// # Windows Tasks
-   /// * Disable SMBv1
-   /// * Mitigate Zerologon vulnerability
-   /// * Implement Kerberoasting protections
-   /// * Harden LSA against Mimikatz
-   /// * Enable Windows Defender
-   ///
-   /// # Linux Tasks
-   /// * Install and configure rsyslog
-   /// * Set up Auditd logging
-   /// * Configure fail2ban
-   Baseline,
+    /// System update and patch management
+    ///
+    /// # Tasks
+    /// * Configure update sources
+    /// * Install pending updates
+    /// * Validate system patch level
+    Update,
 
-   /// Serve inventory and log
-   Serve,
+    /// OS-specific configurations
+    ///
+    /// # Windows Tasks
+    /// * Disable SMBv1
+    /// * Mitigate Zerologon vulnerability
+    /// * Implement Kerberoasting protections
+    /// * Harden LSA against Mimikatz
+    /// * Enable Windows Defender
+    ///
+    /// # Linux Tasks
+    /// * Install and configure rsyslog
+    /// * Set up Auditd logging
+    /// * Configure fail2ban
+    Baseline,
+
+    /// Serve inventory and log
+    Serve,
 }
 
 /// Result of an execution operation
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExecutionResult {
-   /// Whether the operation completed successfully
-   pub success: bool,
-   /// The mode that was executed
-   pub mode: ExecutionMode,
-   /// Detailed message about the operation result
-   pub message: String,
-   /// Timestamp when the operation completed
-   #[serde(with = "chrono::serde::ts_seconds")]
-   pub timestamp: DateTime<Utc>,
+    /// Whether the operation completed successfully
+    pub success: bool,
+    /// The mode that was executed
+    pub mode: ExecutionMode,
+    /// Detailed message about the operation result
+    pub message: String,
+    /// Timestamp when the operation completed
+    #[serde(with = "chrono::serde::ts_seconds")]
+    pub timestamp: DateTime<Utc>,
 }
 
 impl ExecutionResult {
-   pub fn new(mode: ExecutionMode, success: bool, message: String) -> Self {
-       let result = Self {
-           success,
-           mode: mode.clone(),
-           message: message.clone(),
-           timestamp: Utc::now(),
-       };
+    pub fn new(mode: ExecutionMode, success: bool, message: String) -> Self {
+        let result = Self {
+            success,
+            mode: mode.clone(),
+            message: message.clone(),
+            timestamp: Utc::now(),
+        };
 
-       // Log based on success/failure
-       if success {
-           info!("[{}] {}", mode.as_str(), message);
-       } else {
-           error!("[{}] {}", mode.as_str(), message);
-       }
+        // Log based on success/failure
+        if success {
+            info!("[{}] {}", mode.as_str(), message);
+        } else {
+            error!("[{}] {}", mode.as_str(), message);
+        }
 
-       result
-   }
+        result
+    }
 }
 
 impl ExecutionMode {
-   /// Gets a description of what the mode does
-   /// 
-   /// # Returns
-   /// A static string describing the mode's purpose
-   pub fn description(&self) -> &'static str {
-       match self {
-           ExecutionMode::Remote => "Establishes initial system access and remote connections",
-           ExecutionMode::Credentials => "Manages system credentials and account security",
-           ExecutionMode::Inventory => "Performs system inventory and asset discovery",
-           ExecutionMode::Update => "Handles system updates and patch management",
-           ExecutionMode::Baseline => "Implements OS-specific security configurations",
-           ExecutionMode::Serve => "Serves inventory and log",
-       }
-   }
+    /// Gets a description of what the mode does
+    ///
+    /// # Returns
+    /// A static string describing the mode's purpose
+    pub fn description(&self) -> &'static str {
+        match self {
+            ExecutionMode::Remote => "Establishes initial system access and remote connections",
+            ExecutionMode::Credentials => "Manages system credentials and account security",
+            ExecutionMode::Inventory => "Performs system inventory and asset discovery",
+            ExecutionMode::Collector => "Collects runtime artifacts for Pandora integration",
+            ExecutionMode::Update => "Handles system updates and patch management",
+            ExecutionMode::Baseline => "Implements OS-specific security configurations",
+            ExecutionMode::Serve => "Serves inventory and log",
+        }
+    }
 
-   /// Gets a short string representation of the mode
-   pub fn as_str(&self) -> &'static str {
-       match self {
-           ExecutionMode::Remote => "REMOTE",
-           ExecutionMode::Credentials => "CREDS",
-           ExecutionMode::Inventory => "INVEN",
-           ExecutionMode::Update => "UPDATE",
-           ExecutionMode::Baseline => "BASELINE",
-           ExecutionMode::Serve => "SERVE",
-       }
-   }
+    /// Gets a short string representation of the mode
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExecutionMode::Remote => "REMOTE",
+            ExecutionMode::Credentials => "CREDS",
+            ExecutionMode::Inventory => "INVEN",
+            ExecutionMode::Collector => "COLLECT",
+            ExecutionMode::Update => "UPDATE",
+            ExecutionMode::Baseline => "BASELINE",
+            ExecutionMode::Serve => "SERVE",
+        }
+    }
 }
 
 /// Represents the operational status of a system service.
@@ -489,4 +491,3 @@ pub trait UserInfo {
     #[cfg(target_os = "linux")]
     fn shell(&self) -> String;
 }
-

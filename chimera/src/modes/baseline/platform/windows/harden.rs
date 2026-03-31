@@ -125,7 +125,7 @@ Add-Content -Path "$logDir\secure_channel.log" -Value "[$timestamp] $secureChann
             Write-Error "Secure channel test failed"
             Exit 1
         }
-        "#
+        "#,
     ])
     .await?;
 
@@ -147,14 +147,7 @@ async fn verify_zerologon_settings() -> Result<bool> {
     let mut all_settings_correct = true;
 
     for setting in required_settings.iter() {
-        let output = run_cmd(&[
-            "reg",
-            "query",
-            registry_path,
-            "/v",
-            setting,
-        ])
-        .await?;
+        let output = run_cmd(&["reg", "query", registry_path, "/v", setting]).await?;
 
         if !output.contains("0x1") {
             error!("Setting {} is not properly configured", setting);
@@ -166,7 +159,7 @@ async fn verify_zerologon_settings() -> Result<bool> {
     let netlogon_status = run_cmd(&[
         "powershell",
         "-Command",
-        "Get-Service Netlogon | Select-Object -ExpandProperty Status"
+        "Get-Service Netlogon | Select-Object -ExpandProperty Status",
     ])
     .await?;
 
