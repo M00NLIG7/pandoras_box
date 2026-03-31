@@ -30,6 +30,7 @@ trait SmbExecHandle: Send {
 trait AdminShareHandle: Send {
     async fn put(&mut self, local_path: &Path, remote_relative_path: &str) -> Result<()>;
     async fn get(&mut self, remote_relative_path: &str, local_path: &Path) -> Result<()>;
+    async fn reconnect(&mut self) -> Result<()>;
     async fn disconnect(&mut self) -> Result<()>;
 }
 
@@ -62,6 +63,7 @@ impl SmbExecHandle for SmolderExecHandle {
 pub(crate) struct SmolderAdminShareHandle {
     share: Option<Share>,
     socket: SocketAddr,
+    config: SmbSessionConfig,
 }
 
 #[async_trait]
@@ -108,22 +110,47 @@ impl AdminShareHandle for SmolderAdminShareHandle {
         Ok(())
     }
 
+    async fn reconnect(&mut self) -> Result<()> {
+        if let Some(share) = self.share.take() {
+            match share.disconnect().await {
+                Ok(client) => {
+                    let _ = client.logoff().await;
+                }
+                Err(_) => {}
+            }
+        }
+
+        self.share = Some(connect_admin_share(&self.config).await?);
+        Ok(())
+    }
+
     async fn disconnect(&mut self) -> Result<()> {
         let Some(share) = self.share.take() else {
             return Ok(());
         };
-        let client = share.disconnect().await.map_err(|err| {
-            Error::CommunicatorError(format!(
-                "smb tree disconnect from {} failed: {err}",
-                self.socket
-            ))
-        })?;
-        client.logoff().await.map_err(|err| {
-            Error::CommunicatorError(format!(
+        let client = match share.disconnect().await {
+            Ok(client) => client,
+            Err(err) => {
+                let error = Error::CommunicatorError(format!(
+                    "smb tree disconnect from {} failed: {err}",
+                    self.socket
+                ));
+                if should_ignore_disconnect_error(&error) {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        };
+        if let Err(err) = client.logoff().await {
+            let error = Error::CommunicatorError(format!(
                 "smb session logoff from {} failed: {err}",
                 self.socket
-            ))
-        })?;
+            ));
+            if should_ignore_disconnect_error(&error) {
+                return Ok(());
+            }
+            return Err(error);
+        }
         Ok(())
     }
 }
@@ -154,28 +181,7 @@ impl SmbSession<SmolderExecHandle, SmolderAdminShareHandle> {
                     config.socket
                 ))
             })?;
-
-        let smb_client = SmbClientBuilder::new()
-            .server(server)
-            .port(config.socket.port())
-            .credentials(NtlmCredentials::new(
-                config.username.clone(),
-                config.password.clone(),
-            ))
-            .connect()
-            .await
-            .map_err(|err| {
-                Error::CommunicatorError(format!(
-                    "smb session connect to {} failed: {err}",
-                    config.socket
-                ))
-            })?;
-        let admin_share = smb_client.share(ADMIN_SHARE_NAME).await.map_err(|err| {
-            Error::CommunicatorError(format!(
-                "smb share connect to {} on {} failed: {err}",
-                ADMIN_SHARE_NAME, config.socket
-            ))
-        })?;
+        let admin_share = connect_admin_share(config).await?;
 
         Ok(Self {
             exec: SmolderExecHandle {
@@ -185,6 +191,7 @@ impl SmbSession<SmolderExecHandle, SmolderAdminShareHandle> {
             admin_share: SmolderAdminShareHandle {
                 share: Some(admin_share),
                 socket: config.socket,
+                config: config.clone(),
             },
             socket: config.socket,
         })
@@ -216,16 +223,22 @@ where
 
     async fn put(&mut self, transfer: &FileTransfer) -> Result<()> {
         let remote_relative = admin_share_relative_path(&transfer.remote_path)?;
-        self.admin_share
-            .put(&transfer.local_path, &remote_relative)
-            .await
+        put_with_reconnect(
+            &mut self.admin_share,
+            &transfer.local_path,
+            &remote_relative,
+        )
+        .await
     }
 
     async fn get(&mut self, transfer: &FileTransfer) -> Result<()> {
         let remote_relative = admin_share_relative_path(&transfer.remote_path)?;
-        self.admin_share
-            .get(&remote_relative, &transfer.local_path)
-            .await
+        get_with_reconnect(
+            &mut self.admin_share,
+            &remote_relative,
+            &transfer.local_path,
+        )
+        .await
     }
 
     async fn ensure_dir(&mut self, remote_dir: &str) -> Result<()> {
@@ -239,7 +252,11 @@ where
     }
 
     async fn cleanup(&mut self) -> Result<()> {
-        self.admin_share.disconnect().await
+        match self.admin_share.disconnect().await {
+            Ok(()) => Ok(()),
+            Err(err) if should_ignore_disconnect_error(&err) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -307,11 +324,125 @@ fn require_success_status(
     }
 }
 
+async fn connect_admin_share(config: &SmbSessionConfig) -> Result<Share> {
+    let smb_client = SmbClientBuilder::new()
+        .server(config.socket.ip().to_string())
+        .port(config.socket.port())
+        .credentials(NtlmCredentials::new(
+            config.username.clone(),
+            config.password.clone(),
+        ))
+        .connect()
+        .await
+        .map_err(|err| {
+            Error::CommunicatorError(format!(
+                "smb session connect to {} failed: {err}",
+                config.socket
+            ))
+        })?;
+    smb_client.share(ADMIN_SHARE_NAME).await.map_err(|err| {
+        Error::CommunicatorError(format!(
+            "smb share connect to {} on {} failed: {err}",
+            ADMIN_SHARE_NAME, config.socket
+        ))
+    })
+}
+
+async fn put_with_reconnect<A>(
+    admin_share: &mut A,
+    local_path: &Path,
+    remote_relative_path: &str,
+) -> Result<()>
+where
+    A: AdminShareHandle,
+{
+    match admin_share.put(local_path, remote_relative_path).await {
+        Ok(()) => Ok(()),
+        Err(err) if should_retry_admin_share_error(&err) => {
+            admin_share.reconnect().await?;
+            admin_share.put(local_path, remote_relative_path).await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+async fn get_with_reconnect<A>(
+    admin_share: &mut A,
+    remote_relative_path: &str,
+    local_path: &Path,
+) -> Result<()>
+where
+    A: AdminShareHandle,
+{
+    match admin_share.get(remote_relative_path, local_path).await {
+        Ok(()) => Ok(()),
+        Err(err) if should_retry_admin_share_error(&err) => {
+            admin_share.reconnect().await?;
+            admin_share.get(remote_relative_path, local_path).await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn should_retry_admin_share_error(error: &Error) -> bool {
+    let rendered = error.to_string().to_ascii_lowercase();
+    if [
+        "permission denied",
+        "access denied",
+        "access is denied",
+        "logon failure",
+        "bad network name",
+        "path invalid",
+    ]
+    .iter()
+    .any(|needle| rendered.contains(needle))
+    {
+        return false;
+    }
+
+    [
+        "already disconnected",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+        "transport connection",
+        "network name deleted",
+        "user session deleted",
+        "session deleted",
+        "invalid handle",
+    ]
+    .iter()
+    .any(|needle| rendered.contains(needle))
+}
+
+fn should_ignore_disconnect_error(error: &Error) -> bool {
+    let rendered = error.to_string().to_ascii_lowercase();
+    [
+        "already disconnected",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+        "transport connection",
+        "network name deleted",
+        "user session deleted",
+        "session deleted",
+        "invalid handle",
+        "tree disconnect",
+        "logoff failed",
+    ]
+    .iter()
+    .any(|needle| rendered.contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_share_relative_path, normalize_windows_exec_command, AdminShareHandle,
-        SmbExecHandle, SmbSession,
+        admin_share_relative_path, normalize_windows_exec_command, should_ignore_disconnect_error,
+        should_retry_admin_share_error, AdminShareHandle, SmbExecHandle, SmbSession,
     };
     use crate::runtime::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
     use crate::{Error, Result};
@@ -373,6 +504,9 @@ mod tests {
         puts: Arc<Mutex<Vec<(PathBuf, String)>>>,
         gets: Arc<Mutex<Vec<(String, PathBuf)>>>,
         disconnects: Arc<Mutex<usize>>,
+        reconnects: Arc<Mutex<usize>>,
+        put_errors: Arc<Mutex<Vec<Error>>>,
+        get_errors: Arc<Mutex<Vec<Error>>>,
     }
 
     impl FakeAdminShareHandle {
@@ -381,6 +515,9 @@ mod tests {
                 puts: Arc::new(Mutex::new(Vec::new())),
                 gets: Arc::new(Mutex::new(Vec::new())),
                 disconnects: Arc::new(Mutex::new(0)),
+                reconnects: Arc::new(Mutex::new(0)),
+                put_errors: Arc::new(Mutex::new(Vec::new())),
+                get_errors: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -388,6 +525,15 @@ mod tests {
     #[async_trait]
     impl AdminShareHandle for FakeAdminShareHandle {
         async fn put(&mut self, local_path: &Path, remote_relative_path: &str) -> Result<()> {
+            let mut put_errors = self
+                .put_errors
+                .lock()
+                .expect("put errors lock should be available");
+            if !put_errors.is_empty() {
+                let error = put_errors.remove(0);
+                return Err(error);
+            }
+            drop(put_errors);
             self.puts
                 .lock()
                 .expect("puts lock should be available")
@@ -396,10 +542,28 @@ mod tests {
         }
 
         async fn get(&mut self, remote_relative_path: &str, local_path: &Path) -> Result<()> {
+            let mut get_errors = self
+                .get_errors
+                .lock()
+                .expect("get errors lock should be available");
+            if !get_errors.is_empty() {
+                let error = get_errors.remove(0);
+                return Err(error);
+            }
+            drop(get_errors);
             self.gets
                 .lock()
                 .expect("gets lock should be available")
                 .push((remote_relative_path.to_string(), local_path.to_path_buf()));
+            Ok(())
+        }
+
+        async fn reconnect(&mut self) -> Result<()> {
+            let mut reconnects = self
+                .reconnects
+                .lock()
+                .expect("reconnects lock should be available");
+            *reconnects += 1;
             Ok(())
         }
 
@@ -554,6 +718,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn smb_session_cleanup_ignores_benign_disconnect_errors() {
+        let exec = FakeExecHandle::successful();
+        let share = FakeAdminShareHandle::new();
+        let disconnects = Arc::clone(&share.disconnects);
+        struct CleanupErrorShare(FakeAdminShareHandle);
+
+        #[async_trait]
+        impl AdminShareHandle for CleanupErrorShare {
+            async fn put(&mut self, local_path: &Path, remote_relative_path: &str) -> Result<()> {
+                self.0.put(local_path, remote_relative_path).await
+            }
+
+            async fn get(&mut self, remote_relative_path: &str, local_path: &Path) -> Result<()> {
+                self.0.get(remote_relative_path, local_path).await
+            }
+
+            async fn reconnect(&mut self) -> Result<()> {
+                self.0.reconnect().await
+            }
+
+            async fn disconnect(&mut self) -> Result<()> {
+                let mut disconnects = self
+                    .0
+                    .disconnects
+                    .lock()
+                    .expect("disconnects lock should be available");
+                *disconnects += 1;
+                Err(Error::CommunicatorError(
+                    "smb tree disconnect from 10.0.0.8:445 failed: broken pipe".to_string(),
+                ))
+            }
+        }
+
+        let mut session = SmbSession::for_test(exec, CleanupErrorShare(share), socket());
+        session
+            .cleanup()
+            .await
+            .expect("benign disconnect errors should be ignored");
+
+        assert_eq!(
+            *disconnects
+                .lock()
+                .expect("disconnects lock should be available"),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn smb_session_fails_when_ensure_dir_returns_missing_status() {
         let ensure_command = r#"cmd.exe /C if not exist "C:\Windows\Temp\pandoras_box\mission\output" md "C:\Windows\Temp\pandoras_box\mission\output""#;
         let exec = FakeExecHandle {
@@ -576,6 +788,153 @@ mod tests {
             .expect_err("missing status should fail");
 
         assert!(matches!(error, Error::CommandError(_)));
+    }
+
+    #[tokio::test]
+    async fn smb_session_retries_put_after_transient_admin_share_failure() {
+        let root = temp_path("put-retry");
+        let local_path = root.join("chimera.exe");
+        tokio::fs::create_dir_all(&root)
+            .await
+            .expect("temp root should exist");
+        tokio::fs::write(&local_path, b"binary")
+            .await
+            .expect("local file should exist");
+        let exec = FakeExecHandle::successful();
+        let share = FakeAdminShareHandle::new();
+        let puts = Arc::clone(&share.puts);
+        let reconnects = Arc::clone(&share.reconnects);
+        share
+            .put_errors
+            .lock()
+            .expect("put errors lock should be available")
+            .push(Error::CommunicatorError(
+                "smb ADMIN$ share to 10.0.0.8:445 is already disconnected".to_string(),
+            ));
+        let mut session = SmbSession::for_test(exec, share, socket());
+
+        session
+            .put(&FileTransfer {
+                local_path: local_path.clone(),
+                remote_path: r"C:\Windows\Temp\pandoras_box\mission\chimera.exe".to_string(),
+            })
+            .await
+            .expect("put should succeed after reconnect");
+
+        assert_eq!(
+            *reconnects
+                .lock()
+                .expect("reconnects lock should be available"),
+            1
+        );
+        assert_eq!(
+            puts.lock()
+                .expect("puts lock should be available")
+                .as_slice(),
+            [(
+                local_path,
+                r"Temp\pandoras_box\mission\chimera.exe".to_string()
+            )]
+        );
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn smb_session_does_not_retry_put_after_terminal_admin_share_failure() {
+        let root = temp_path("put-terminal");
+        let local_path = root.join("chimera.exe");
+        tokio::fs::create_dir_all(&root)
+            .await
+            .expect("temp root should exist");
+        tokio::fs::write(&local_path, b"binary")
+            .await
+            .expect("local file should exist");
+        let exec = FakeExecHandle::successful();
+        let share = FakeAdminShareHandle::new();
+        let reconnects = Arc::clone(&share.reconnects);
+        share
+            .put_errors
+            .lock()
+            .expect("put errors lock should be available")
+            .push(Error::FileTransferError("permission denied".to_string()));
+        let mut session = SmbSession::for_test(exec, share, socket());
+
+        let error = session
+            .put(&FileTransfer {
+                local_path,
+                remote_path: r"C:\Windows\Temp\pandoras_box\mission\chimera.exe".to_string(),
+            })
+            .await
+            .expect_err("terminal put failure should surface");
+
+        assert!(matches!(error, Error::FileTransferError(_)));
+        assert_eq!(
+            *reconnects
+                .lock()
+                .expect("reconnects lock should be available"),
+            0
+        );
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn smb_session_retries_get_after_transient_admin_share_failure() {
+        let root = temp_path("get-retry");
+        let local_path = root.join("inventory.json");
+        let exec = FakeExecHandle::successful();
+        let share = FakeAdminShareHandle::new();
+        let gets = Arc::clone(&share.gets);
+        let reconnects = Arc::clone(&share.reconnects);
+        share
+            .get_errors
+            .lock()
+            .expect("get errors lock should be available")
+            .push(Error::CommunicatorError(
+                "smb ADMIN$ share to 10.0.0.8:445 is already disconnected".to_string(),
+            ));
+        let mut session = SmbSession::for_test(exec, share, socket());
+
+        session
+            .get(&FileTransfer {
+                local_path: local_path.clone(),
+                remote_path: r"C:\Windows\Temp\pandoras_box\mission\output\inventory.json"
+                    .to_string(),
+            })
+            .await
+            .expect("get should succeed after reconnect");
+
+        assert_eq!(
+            *reconnects
+                .lock()
+                .expect("reconnects lock should be available"),
+            1
+        );
+        assert_eq!(
+            gets.lock()
+                .expect("gets lock should be available")
+                .as_slice(),
+            [(
+                r"Temp\pandoras_box\mission\output\inventory.json".to_string(),
+                local_path
+            )]
+        );
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[test]
+    fn smb_error_classifiers_split_retryable_and_benign_disconnects() {
+        assert!(should_retry_admin_share_error(&Error::CommunicatorError(
+            "smb ADMIN$ share to 10.0.0.8:445 is already disconnected".to_string(),
+        )));
+        assert!(!should_retry_admin_share_error(&Error::FileTransferError(
+            "permission denied".to_string(),
+        )));
+        assert!(should_ignore_disconnect_error(&Error::CommunicatorError(
+            "smb tree disconnect from 10.0.0.8:445 failed: broken pipe".to_string(),
+        )));
+        assert!(!should_ignore_disconnect_error(&Error::CommunicatorError(
+            "smb session logoff from 10.0.0.8:445 failed: access denied".to_string(),
+        )));
     }
 
     #[tokio::test]
