@@ -12,7 +12,7 @@ use crate::runtime::workspace::RemoteShell;
 use crate::{Error, Result};
 
 const DEFAULT_SMB_PORT: u16 = 445;
-const DEFAULT_SMB_STAGING_DIRECTORY: &str = r"Temp\pandoras_box";
+const DEFAULT_SMB_STAGING_DIRECTORY: &str = r"Temp";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PasswordSessionFactory {
@@ -251,7 +251,7 @@ mod tests {
         );
         assert_eq!(config.username, "Administrator");
         assert_eq!(config.password, "secret");
-        assert_eq!(config.staging_directory, r"Temp\pandoras_box");
+        assert_eq!(config.staging_directory, r"Temp");
     }
 
     #[test]

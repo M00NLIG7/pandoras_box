@@ -129,7 +129,7 @@ pub fn infer_platform(
         .copied()
         .any(|port| forwarded_smb_ports.contains(&port));
 
-    if has_ssh && has_forwarded_smb {
+    if has_forwarded_smb {
         return PlatformHint::Windows;
     }
 
@@ -221,7 +221,13 @@ mod tests {
     #[test]
     fn infer_platform_returns_unknown_without_signal_ports() {
         assert_eq!(
-            infer_platform(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10)), &[], None, 22, &[1445]),
+            infer_platform(
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10)),
+                &[],
+                None,
+                22,
+                &[1445]
+            ),
             PlatformHint::Unknown
         );
     }
@@ -319,6 +325,34 @@ mod tests {
                 Some(64),
                 4222,
                 &[4445],
+            ),
+            PlatformHint::Windows
+        );
+    }
+
+    #[test]
+    fn infer_platform_prefers_windows_for_smb_only_forwarded_loopback_port() {
+        assert_eq!(
+            infer_platform(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                &[1445],
+                Some(64),
+                2222,
+                &[1445],
+            ),
+            PlatformHint::Windows
+        );
+    }
+
+    #[test]
+    fn infer_platform_prefers_windows_for_smb_only_forwarded_non_loopback_port() {
+        assert_eq!(
+            infer_platform(
+                IpAddr::V4(Ipv4Addr::new(192, 168, 5, 2)),
+                &[1445],
+                Some(64),
+                2222,
+                &[1445],
             ),
             PlatformHint::Windows
         );

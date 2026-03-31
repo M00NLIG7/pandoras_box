@@ -209,7 +209,9 @@ where
     A: AdminShareHandle,
 {
     async fn exec(&mut self, request: ExecRequest) -> Result<ExecResponse> {
-        self.exec.run(request.command).await
+        self.exec
+            .run(normalize_windows_exec_command(&request.command))
+            .await
     }
 
     async fn put(&mut self, transfer: &FileTransfer) -> Result<()> {
@@ -263,6 +265,31 @@ fn quote_for_cmd(value: &str) -> String {
     value.replace('"', "\"\"")
 }
 
+fn normalize_windows_exec_command(command: &str) -> String {
+    let trimmed = command.trim_start();
+    if starts_with_windows_shell(trimmed) {
+        return command.to_string();
+    }
+
+    format!(r#"cmd.exe /C "{}""#, quote_for_cmd(command))
+}
+
+fn starts_with_windows_shell(command: &str) -> bool {
+    starts_with_ignore_ascii_case(command, "cmd.exe")
+        || starts_with_ignore_ascii_case(command, r"c:\windows\system32\cmd.exe")
+        || starts_with_ignore_ascii_case(command, "powershell.exe")
+        || starts_with_ignore_ascii_case(
+            command,
+            r"c:\windows\system32\windowspowershell\v1.0\powershell.exe",
+        )
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+}
+
 fn require_success_status(
     operation: &str,
     command: &str,
@@ -282,7 +309,10 @@ fn require_success_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_share_relative_path, AdminShareHandle, SmbExecHandle, SmbSession};
+    use super::{
+        admin_share_relative_path, normalize_windows_exec_command, AdminShareHandle,
+        SmbExecHandle, SmbSession,
+    };
     use crate::runtime::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
     use crate::{Error, Result};
     use async_trait::async_trait;
@@ -549,12 +579,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn smb_session_exec_passes_command_through() {
+    async fn smb_session_exec_wraps_raw_commands_with_cmd_shell() {
         let commands = Arc::new(Mutex::new(Vec::new()));
+        let wrapped_command = r#"cmd.exe /C "whoami""#;
         let exec = FakeExecHandle {
             commands: Arc::clone(&commands),
             responses: Arc::new(HashMap::from([(
-                "whoami".to_string(),
+                wrapped_command.to_string(),
                 ExecResponse {
                     stdout: b"nt authority\\system\r\n".to_vec(),
                     stderr: Vec::new(),
@@ -576,7 +607,21 @@ mod tests {
                 .lock()
                 .expect("commands lock should be available")
                 .as_slice(),
-            ["whoami".to_string()]
+            [wrapped_command.to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_windows_exec_command_preserves_shell_qualified_commands() {
+        assert_eq!(
+            normalize_windows_exec_command(r#"cmd.exe /C "ver & whoami""#),
+            r#"cmd.exe /C "ver & whoami""#
+        );
+        assert_eq!(
+            normalize_windows_exec_command(
+                r#"powershell.exe -NoProfile -Command "Write-Output test""#
+            ),
+            r#"powershell.exe -NoProfile -Command "Write-Output test""#
         );
     }
 }
