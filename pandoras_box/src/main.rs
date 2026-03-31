@@ -97,6 +97,7 @@ mod tests {
             PathBuf::from("release/chimera.exe")
         );
         assert_eq!(spec.password, "secret");
+        assert!(spec.allow_smb_fallback);
     }
 }
 

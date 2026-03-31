@@ -1,3 +1,5 @@
+pub mod password;
+pub mod smb;
 pub mod ssh;
 
 use std::path::PathBuf;

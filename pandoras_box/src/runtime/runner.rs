@@ -15,7 +15,7 @@ use super::reporting::write_asset_inventory_bundle;
 use super::scheduler::{HostExecutionReport, HostExecutor};
 use super::session_executor::{SessionExecutor, SessionOperation};
 use super::session_factory::SessionFactory;
-use super::transport::ssh::PasswordSshSessionFactory;
+use super::transport::password::PasswordSessionFactory;
 use super::workspace::{collector_plan, CollectorPlan};
 use crate::{Error, Result};
 
@@ -50,11 +50,12 @@ impl PandorasBoxRunner {
             connect_timeout: self.spec.retry_policy.connect_timeout,
             concurrency_limit: self.spec.concurrency_limit,
         });
-        let factory = Arc::new(PasswordSshSessionFactory::new(
+        let factory = Arc::new(PasswordSessionFactory::new(
             self.spec.unix_username.clone(),
             self.spec.windows_username.clone(),
             self.spec.password.clone(),
             self.spec.ssh_port,
+            forwarded_smb_ports(&self.spec),
             self.spec.retry_policy.connect_timeout,
         ));
 
@@ -737,7 +738,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[derive(Clone)]
     struct ExecutorBehavior {
@@ -1572,17 +1573,24 @@ mod tests {
             record
         });
 
-        let start = Instant::now();
-        let summary = runner
-            .run_with_stream_and_executor(records, executor.clone())
+        let runner_task = tokio::spawn({
+            let runner = runner;
+            let executor = executor.clone();
+            async move { runner.run_with_stream_and_executor(records, executor).await }
+        });
+
+        tokio::time::sleep(Duration::from_millis(220)).await;
+        assert_eq!(
+            executor.completions().first().copied(),
+            Some(fast.host.ip),
+            "expected the fast host to complete before slow discovery finished"
+        );
+
+        let summary = runner_task
             .await
+            .expect("streaming runner task should not panic")
             .expect("streaming runner should succeed");
 
-        assert!(
-            start.elapsed() < Duration::from_millis(340),
-            "expected execution to overlap with discovery, took {:?}",
-            start.elapsed()
-        );
         assert_eq!(summary.discovered_hosts, 2);
         assert_eq!(summary.completed_hosts, 2);
         assert_eq!(executor.completions().first().copied(), Some(fast.host.ip));

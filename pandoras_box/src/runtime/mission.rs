@@ -87,7 +87,7 @@ impl Default for MissionSpec {
             chimera_windows_path: PathBuf::from("release/chimera.exe"),
             collector_port: 44_372,
             dry_run: false,
-            allow_smb_fallback: false,
+            allow_smb_fallback: true,
         }
     }
 }

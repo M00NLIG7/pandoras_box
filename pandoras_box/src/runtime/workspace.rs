@@ -120,32 +120,12 @@ fn remote_workspace_slug(mission_id: &str) -> String {
     }
 }
 
-fn windows_profile_name(username: &str) -> String {
-    let trimmed = username
-        .rsplit(['\\', '/'])
-        .next()
-        .unwrap_or(username)
-        .split('@')
-        .next()
-        .unwrap_or(username)
-        .trim();
-
-    if trimmed.is_empty() {
-        "Administrator".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
 #[must_use]
 pub fn remote_workspace(spec: &MissionSpec, plan: &HostPlan) -> RemoteWorkspace {
     let workspace_slug = remote_workspace_slug(&spec.mission_id);
 
     if uses_windows_shell(plan) {
-        let profile_name = windows_profile_name(&spec.windows_username);
-        let remote_temp_dir = format!(
-            r"C:\Users\{profile_name}\AppData\Local\Temp\pandoras_box\{workspace_slug}"
-        );
+        let remote_temp_dir = format!(r"C:\Windows\Temp\pandoras_box\{workspace_slug}");
         let remote_binary_path = format!(r"{remote_temp_dir}\chimera.exe");
         let remote_output_root = format!(r"{remote_temp_dir}\output");
         return RemoteWorkspace {
@@ -213,8 +193,8 @@ fn uses_windows_shell(plan: &HostPlan) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        collector_plan, remote_workspace, remote_workspace_slug, windows_profile_name,
-        CollectorPlan, RemoteShell, RemoteWorkspace,
+        collector_plan, remote_workspace, remote_workspace_slug, CollectorPlan, RemoteShell,
+        RemoteWorkspace,
     };
     use crate::runtime::mission::{HostPlan, HostTarget, MissionSpec, PlatformHint, TransportKind};
     use std::net::{IpAddr, Ipv4Addr};
@@ -301,12 +281,10 @@ mod tests {
                 shell: RemoteShell::Cmd,
                 collector_source_path: PathBuf::from(r"C:\Temp\chimera-local.exe"),
                 staged_local_name: "chimera.exe".to_string(),
-                remote_temp_dir:
-                    r"C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123".to_string(),
-                remote_binary_path: r"C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123\chimera.exe".to_string(),
-                remote_output_root:
-                    r"C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123\output"
-                        .to_string(),
+                remote_temp_dir: r"C:\Windows\Temp\pandoras_box\mission-123".to_string(),
+                remote_binary_path: r"C:\Windows\Temp\pandoras_box\mission-123\chimera.exe"
+                    .to_string(),
+                remote_output_root: r"C:\Windows\Temp\pandoras_box\mission-123\output".to_string(),
                 inventory_endpoint: "inventory.json".to_string(),
                 log_endpoint: "application.log".to_string(),
                 collector_port: 44_372,
@@ -314,28 +292,21 @@ mod tests {
         );
         assert_eq!(
             workspace.collector_command(),
-            r#"cmd.exe /C "C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123\chimera.exe --output-root C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123\output collector""#
+            r#"cmd.exe /C "C:\Windows\Temp\pandoras_box\mission-123\chimera.exe --output-root C:\Windows\Temp\pandoras_box\mission-123\output collector""#
         );
         assert_eq!(
             workspace.serve_command(),
-            r#"cmd.exe /C "C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123\chimera.exe --output-root C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123\output serve --port 44372""#
+            r#"cmd.exe /C "C:\Windows\Temp\pandoras_box\mission-123\chimera.exe --output-root C:\Windows\Temp\pandoras_box\mission-123\output serve --port 44372""#
         );
         assert_eq!(
             workspace.ensure_directories_command(),
-            r#"cmd.exe /C if not exist "C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123" md "C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123" && if not exist "C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123\output" md "C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123\output""#
+            r#"cmd.exe /C if not exist "C:\Windows\Temp\pandoras_box\mission-123" md "C:\Windows\Temp\pandoras_box\mission-123" && if not exist "C:\Windows\Temp\pandoras_box\mission-123\output" md "C:\Windows\Temp\pandoras_box\mission-123\output""#
         );
         assert!(workspace.post_stage_commands().is_empty());
         assert_eq!(
             workspace.cleanup_command(),
-            r#"cmd.exe /C if exist "C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123" rmdir /S /Q "C:\Users\mitre\AppData\Local\Temp\pandoras_box\mission-123""#
+            r#"cmd.exe /C if exist "C:\Windows\Temp\pandoras_box\mission-123" rmdir /S /Q "C:\Windows\Temp\pandoras_box\mission-123""#
         );
-    }
-
-    #[test]
-    fn windows_profile_name_normalizes_domain_and_upn_forms() {
-        assert_eq!(windows_profile_name("DOMAIN\\mitre"), "mitre");
-        assert_eq!(windows_profile_name("mitre@example.local"), "mitre");
-        assert_eq!(windows_profile_name("mitre"), "mitre");
     }
 
     #[test]

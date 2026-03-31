@@ -17,6 +17,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 reqwest = { version = "0.12.7", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+smolder_tools = { package = "smolder", path = "../../smolder/smolder-tools" }
 
 [dev-dependencies]
 env_logger = "0.11.5"

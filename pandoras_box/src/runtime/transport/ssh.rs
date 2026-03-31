@@ -36,7 +36,7 @@ trait SshClientHandle: Send {
     async fn disconnect(&mut self) -> Result<()>;
 }
 
-struct RustrcSshClient {
+pub(crate) struct RustrcSshClient {
     client: Client<SSHConfig>,
 }
 
