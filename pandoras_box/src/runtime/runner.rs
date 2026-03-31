@@ -57,6 +57,7 @@ impl PandorasBoxRunner {
             self.spec.ssh_port,
             forwarded_smb_ports(&self.spec),
             self.spec.retry_policy.connect_timeout,
+            self.spec.windows_smb_exec_mode,
         ));
 
         self.run_with_stream_and_factory(

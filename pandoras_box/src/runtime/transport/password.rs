@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rustrc::ssh::HostKeyPolicy;
 
-use crate::runtime::mission::{HostPlan, PlatformHint, TransportKind};
+use crate::runtime::mission::{HostPlan, PlatformHint, TransportKind, WindowsSmbExecMode};
 use crate::runtime::session_factory::{BoxedHostSession, SessionFactory};
 use crate::runtime::transport::smb::{SmbSession, SmbSessionConfig};
 use crate::runtime::transport::ssh::{SshAuth, SshSession, SshSessionConfig};
@@ -22,6 +22,7 @@ pub struct PasswordSessionFactory {
     ssh_port: u16,
     smb_port_hints: Vec<u16>,
     inactivity_timeout: Duration,
+    windows_smb_exec_mode: WindowsSmbExecMode,
 }
 
 impl PasswordSessionFactory {
@@ -33,6 +34,7 @@ impl PasswordSessionFactory {
         ssh_port: u16,
         smb_port_hints: Vec<u16>,
         inactivity_timeout: Duration,
+        windows_smb_exec_mode: WindowsSmbExecMode,
     ) -> Self {
         Self {
             unix_username: unix_username.into(),
@@ -41,6 +43,7 @@ impl PasswordSessionFactory {
             ssh_port,
             smb_port_hints,
             inactivity_timeout,
+            windows_smb_exec_mode,
         }
     }
 
@@ -88,6 +91,7 @@ impl PasswordSessionFactory {
             username: self.windows_username.clone(),
             password: self.password.clone(),
             staging_directory: DEFAULT_SMB_STAGING_DIRECTORY.to_string(),
+            exec_mode: self.windows_smb_exec_mode,
         })
     }
 
@@ -127,7 +131,9 @@ impl SessionFactory for PasswordSessionFactory {
 #[cfg(test)]
 mod tests {
     use super::PasswordSessionFactory;
-    use crate::runtime::mission::{HostPlan, HostState, HostTarget, PlatformHint, TransportKind};
+    use crate::runtime::mission::{
+        HostPlan, HostState, HostTarget, PlatformHint, TransportKind, WindowsSmbExecMode,
+    };
     use crate::runtime::transport::ssh::SshAuth;
     use crate::runtime::workspace::RemoteShell;
     use crate::Error;
@@ -156,6 +162,7 @@ mod tests {
             22,
             Vec::new(),
             Duration::from_secs(5),
+            WindowsSmbExecMode::SmbExec,
         );
 
         let config = factory
@@ -190,6 +197,7 @@ mod tests {
             22,
             Vec::new(),
             Duration::from_secs(5),
+            WindowsSmbExecMode::SmbExec,
         );
 
         let config = factory
@@ -218,6 +226,7 @@ mod tests {
             22,
             Vec::new(),
             Duration::from_secs(5),
+            WindowsSmbExecMode::SmbExec,
         );
 
         let error = factory
@@ -239,6 +248,7 @@ mod tests {
             22,
             vec![4445],
             Duration::from_secs(5),
+            WindowsSmbExecMode::PsExec,
         );
 
         let config = factory
@@ -252,6 +262,7 @@ mod tests {
         assert_eq!(config.username, "Administrator");
         assert_eq!(config.password, "secret");
         assert_eq!(config.staging_directory, r"Temp");
+        assert_eq!(config.exec_mode, WindowsSmbExecMode::PsExec);
     }
 
     #[test]
@@ -263,6 +274,7 @@ mod tests {
             22,
             vec![4445],
             Duration::from_secs(5),
+            WindowsSmbExecMode::SmbExec,
         );
 
         let config = factory
@@ -284,6 +296,7 @@ mod tests {
             22,
             vec![4445],
             Duration::from_secs(5),
+            WindowsSmbExecMode::SmbExec,
         );
 
         let error = factory

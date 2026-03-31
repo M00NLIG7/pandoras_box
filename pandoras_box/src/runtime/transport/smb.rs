@@ -7,6 +7,7 @@ use smolder_tools::prelude::{
     SmbClientBuilder,
 };
 
+use crate::runtime::mission::WindowsSmbExecMode;
 use crate::runtime::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
 use crate::{Error, Result};
 
@@ -19,6 +20,7 @@ pub struct SmbSessionConfig {
     pub username: String,
     pub password: String,
     pub staging_directory: String,
+    pub exec_mode: WindowsSmbExecMode,
 }
 
 #[async_trait]
@@ -167,7 +169,7 @@ impl SmbSession<SmolderExecHandle, SmolderAdminShareHandle> {
         let exec_client = RemoteExecClient::builder()
             .server(server.clone())
             .port(config.socket.port())
-            .mode(ExecMode::SmbExec)
+            .mode(smolder_exec_mode(config.exec_mode))
             .credentials(NtlmCredentials::new(
                 config.username.clone(),
                 config.password.clone(),
@@ -195,6 +197,13 @@ impl SmbSession<SmolderExecHandle, SmolderAdminShareHandle> {
             },
             socket: config.socket,
         })
+    }
+}
+
+fn smolder_exec_mode(mode: WindowsSmbExecMode) -> ExecMode {
+    match mode {
+        WindowsSmbExecMode::SmbExec => ExecMode::SmbExec,
+        WindowsSmbExecMode::PsExec => ExecMode::PsExec,
     }
 }
 

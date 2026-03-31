@@ -1,5 +1,6 @@
 use pandoras_box::runtime::{
     DiscoveryConfig, MissionSpec, PandorasBoxRunner, RetryPolicy, TcpDiscovery,
+    WindowsSmbExecMode,
 };
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -22,6 +23,20 @@ fn artifact_root() -> PathBuf {
         .or_else(|_| std::env::var("PANDORAS_BOX_LIVE_ARTIFACT_ROOT"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| temp_root("live-windows-smb"))
+}
+
+fn smb_exec_mode() -> WindowsSmbExecMode {
+    match std::env::var("PANDORAS_BOX_LIVE_WINDOWS_SMB_EXEC_MODE")
+        .unwrap_or_else(|_| "smbexec".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "smbexec" => WindowsSmbExecMode::SmbExec,
+        "psexec" => WindowsSmbExecMode::PsExec,
+        other => panic!(
+            "PANDORAS_BOX_LIVE_WINDOWS_SMB_EXEC_MODE must be smbexec or psexec, got {other}"
+        ),
+    }
 }
 
 #[tokio::test]
@@ -62,6 +77,7 @@ async fn live_windows_smb_target_collects_inventory_and_cleans_up() {
             connect_timeout: Duration::from_secs(5),
             backoff: Duration::from_millis(500),
         },
+        windows_smb_exec_mode: smb_exec_mode(),
         ..MissionSpec::default()
     };
 

@@ -16,6 +16,22 @@ pub enum TransportKind {
     WindowsSmb,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WindowsSmbExecMode {
+    SmbExec,
+    PsExec,
+}
+
+impl WindowsSmbExecMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SmbExec => "smbexec",
+            Self::PsExec => "psexec",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostTarget {
     pub ip: IpAddr,
@@ -66,6 +82,7 @@ pub struct MissionSpec {
     pub collector_port: u16,
     pub dry_run: bool,
     pub allow_smb_fallback: bool,
+    pub windows_smb_exec_mode: WindowsSmbExecMode,
 }
 
 impl Default for MissionSpec {
@@ -88,6 +105,7 @@ impl Default for MissionSpec {
             collector_port: 44_372,
             dry_run: false,
             allow_smb_fallback: true,
+            windows_smb_exec_mode: WindowsSmbExecMode::SmbExec,
         }
     }
 }

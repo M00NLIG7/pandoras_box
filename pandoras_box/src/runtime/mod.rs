@@ -15,7 +15,7 @@ pub use artifact_store::ArtifactStore;
 pub use discovery::{DiscoveryConfig, DiscoveryRecord, TcpDiscovery};
 pub use mission::{
     HostPlan, HostState, HostStateTransitionError, HostTarget, MissionSpec, PlatformHint,
-    RetryPolicy, TransportKind,
+    RetryPolicy, TransportKind, WindowsSmbExecMode,
 };
 pub use planner::Planner;
 pub use policy::{ExecutionPolicy, OperationKind, PolicyViolation};
