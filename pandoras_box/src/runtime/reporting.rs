@@ -60,6 +60,7 @@ struct NetworkTopology {
 struct TopologyHost {
     ip: String,
     label: String,
+    final_state: String,
     platform: String,
     os: Option<String>,
     open_ports: Vec<u16>,
@@ -70,6 +71,43 @@ struct TopologyHost {
 struct TopologyEdge {
     from_ip: String,
     to_ip: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopologySectionKind {
+    Segment,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct TopologySection {
+    id: String,
+    title: String,
+    subtitle: String,
+    kind: TopologySectionKind,
+    hosts: Vec<TopologyHost>,
+}
+
+#[derive(Debug, Clone)]
+struct TopologySectionLayout {
+    id: String,
+    title: String,
+    subtitle: String,
+    kind: TopologySectionKind,
+    frame: ExcalidrawBox,
+    hosts: Vec<TopologyHostLayout>,
+}
+
+#[derive(Debug, Clone)]
+struct TopologyHostLayout {
+    host: TopologyHost,
+    frame: ExcalidrawBox,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExcalidrawPoint {
+    x: f64,
+    y: f64,
 }
 
 const PDF_PAGE_WIDTH: f32 = 612.0;
@@ -83,6 +121,22 @@ const PDF_HOST_CARD_TOP: f32 = 210.0;
 const PDF_HOST_CARD_HEIGHT: f32 = 126.0;
 const PDF_HOST_CARD_GAP: f32 = 12.0;
 const PDF_HOSTS_PER_PAGE: usize = 4;
+const TOPOLOGY_LEFT_MARGIN: f64 = 48.0;
+const TOPOLOGY_TOP: f64 = 168.0;
+const TOPOLOGY_SECTION_GAP: f64 = 28.0;
+const TOPOLOGY_SECTION_ROW_GAP: f64 = 36.0;
+const TOPOLOGY_SECTION_WIDTH_SINGLE: f64 = 560.0;
+const TOPOLOGY_SECTION_WIDTH_DOUBLE: f64 = 432.0;
+const TOPOLOGY_SECTION_WIDTH_TRIPLE: f64 = 336.0;
+const TOPOLOGY_MAX_SECTION_COLUMNS: usize = 3;
+const TOPOLOGY_SECTION_HEADER_HEIGHT: f64 = 58.0;
+const TOPOLOGY_SECTION_PADDING_X: f64 = 18.0;
+const TOPOLOGY_SECTION_PADDING_BOTTOM: f64 = 18.0;
+const TOPOLOGY_HOST_HEIGHT: f64 = 100.0;
+const TOPOLOGY_HOST_GAP_X: f64 = 14.0;
+const TOPOLOGY_HOST_GAP_Y: f64 = 14.0;
+const TOPOLOGY_FAILED_SECTION_GAP: f64 = 24.0;
+const TOPOLOGY_LEGEND_WIDTH: f64 = 268.0;
 
 #[derive(Debug, Clone)]
 struct ExcalidrawRenderer {
@@ -342,6 +396,7 @@ fn build_network_topology(records: &[InventoryRecord]) -> NetworkTopology {
         .map(|record| TopologyHost {
             ip: record.host.ip.clone(),
             label: display_host_name(&record.host).to_string(),
+            final_state: record.host.final_state.clone(),
             platform: record.host.platform.clone(),
             os: record.host.os.clone(),
             open_ports: record.host.open_ports.clone(),
@@ -356,10 +411,12 @@ fn build_network_topology(records: &[InventoryRecord]) -> NetworkTopology {
                 continue;
             }
             if host_index.contains_key(peer_ip) {
-                edge_set.insert(TopologyEdge {
-                    from_ip: record.host.ip.clone(),
-                    to_ip: peer_ip.clone(),
-                });
+                let (from_ip, to_ip) = if record.host.ip <= *peer_ip {
+                    (record.host.ip.clone(), peer_ip.clone())
+                } else {
+                    (peer_ip.clone(), record.host.ip.clone())
+                };
+                edge_set.insert(TopologyEdge { from_ip, to_ip });
             }
         }
     }
@@ -672,7 +729,7 @@ fn render_network_topology_markdown(mission_id: &str, topology: &NetworkTopology
                 .copied()
                 .expect("topology edge target should exist");
             markdown.push_str(&format!(
-                "- {} -> {} ({} -> {})\n",
+                "- {} <-> {} ({} <-> {})\n",
                 display_topology_name(from),
                 display_topology_name(to),
                 edge.from_ip,
@@ -707,7 +764,7 @@ fn render_network_topology_mermaid(topology: &NetworkTopology) -> String {
     } else {
         for edge in &topology.edges {
             mermaid.push_str(&format!(
-                "  {} -. observed .-> {}\n",
+                "  {} -. observed .- {}\n",
                 mermaid_node_id(&edge.from_ip),
                 mermaid_node_id(&edge.to_ip)
             ));
@@ -719,11 +776,21 @@ fn render_network_topology_mermaid(topology: &NetworkTopology) -> String {
 
 fn render_network_topology_excalidraw(mission_id: &str, topology: &NetworkTopology) -> String {
     let mut elements = Vec::new();
+    let section_layouts = layout_topology_sections(&build_topology_sections(topology));
+    let topology_right = section_layouts
+        .iter()
+        .map(|section| section.frame.x + section.frame.width)
+        .fold(
+            TOPOLOGY_LEFT_MARGIN + TOPOLOGY_SECTION_WIDTH_DOUBLE,
+            f64::max,
+        );
+    let legend_x = topology_right + 28.0;
+    let subtitle_width = (legend_x - TOPOLOGY_LEFT_MARGIN - 24.0).max(700.0);
     elements.push(excalidraw_text_element(
         "network_topology_title",
         48.0,
         30.0,
-        620.0,
+        subtitle_width.min(700.0),
         38.0,
         "Network Topology".to_string(),
         30,
@@ -733,7 +800,7 @@ fn render_network_topology_excalidraw(mission_id: &str, topology: &NetworkTopolo
         "network_topology_subtitle",
         48.0,
         78.0,
-        980.0,
+        subtitle_width,
         38.0,
         format!(
             "Mission {}: observed host relationships inferred from collected inventory artifacts.",
@@ -742,66 +809,43 @@ fn render_network_topology_excalidraw(mission_id: &str, topology: &NetworkTopolo
         15,
         "#51606F",
     ));
+    elements.extend(render_topology_legend(legend_x));
 
     let mut host_boxes = BTreeMap::new();
-    for (index, host) in topology.hosts.iter().enumerate() {
-        let column = index % 3;
-        let row = index / 3;
-        let x = 48.0 + (column as f64 * 320.0);
-        let y = 140.0 + (row as f64 * 190.0);
-        let width = 260.0;
-        let height = 126.0;
-        let box_id = excalidraw_host_box_id(&host.ip);
-        let text_id = excalidraw_host_text_id(&host.ip);
-        let (stroke_color, fill_color, text_color) = excalidraw_host_palette(host);
-
-        host_boxes.insert(
-            host.ip.clone(),
-            ExcalidrawBox {
-                id: box_id.clone(),
-                x,
-                y,
-                width,
-                height,
-            },
-        );
-
-        elements.push(excalidraw_rectangle_element(
-            &box_id,
-            x,
-            y,
-            width,
-            height,
-            stroke_color,
-            fill_color,
-        ));
-        elements.push(excalidraw_text_element(
-            &text_id,
-            x + 16.0,
-            y + 16.0,
-            width - 32.0,
-            height - 32.0,
-            format!(
-                "{}\n{}\n{}\nports: {}\nservices: {}",
-                display_topology_name(host),
-                host.ip,
-                host.platform,
-                join_ports(&host.open_ports),
-                summarize_services(&host.services),
-            ),
-            14,
-            text_color,
-        ));
+    let mut host_sections = BTreeMap::new();
+    let mut section_boxes = BTreeMap::new();
+    for section in &section_layouts {
+        section_boxes.insert(section.id.clone(), section.frame.clone());
+        elements.extend(render_topology_section(section));
+        for host in &section.hosts {
+            host_boxes.insert(host.host.ip.clone(), host.frame.clone());
+            host_sections.insert(host.host.ip.clone(), section.id.clone());
+        }
     }
 
+    let mut section_edge_counts = BTreeMap::<(String, String), usize>::new();
     for edge in &topology.edges {
+        let from_section = host_sections.get(&edge.from_ip);
+        let to_section = host_sections.get(&edge.to_ip);
+        if let (Some(from_section), Some(to_section)) = (from_section, to_section) {
+            if from_section != to_section {
+                let key = if from_section <= to_section {
+                    (from_section.clone(), to_section.clone())
+                } else {
+                    (to_section.clone(), from_section.clone())
+                };
+                *section_edge_counts.entry(key).or_insert(0) += 1;
+                continue;
+            }
+        }
+
         let Some(from_box) = host_boxes.get(&edge.from_ip) else {
             continue;
         };
         let Some(to_box) = host_boxes.get(&edge.to_ip) else {
             continue;
         };
-        elements.push(excalidraw_arrow_element(
+        elements.extend(excalidraw_connection_elements(
             &format!(
                 "edge_{}_to_{}",
                 sanitize_identifier(&edge.from_ip),
@@ -809,18 +853,40 @@ fn render_network_topology_excalidraw(mission_id: &str, topology: &NetworkTopolo
             ),
             from_box,
             to_box,
+            None,
+        ));
+    }
+
+    for ((from_section, to_section), _count) in section_edge_counts {
+        let Some(from_box) = section_boxes.get(&from_section) else {
+            continue;
+        };
+        let Some(to_box) = section_boxes.get(&to_section) else {
+            continue;
+        };
+        elements.push(excalidraw_section_connection_element(
+            &format!(
+                "section_edge_{}_to_{}",
+                sanitize_identifier(&from_section),
+                sanitize_identifier(&to_section)
+            ),
+            from_box,
+            to_box,
         ));
     }
 
     if topology.edges.is_empty() {
-        let note_y = 140.0 + ((topology.hosts.len().max(1) as f64 / 3.0).ceil() * 190.0);
+        let note_y = section_layouts
+            .iter()
+            .map(|section| section.frame.y + section.frame.height + 14.0)
+            .fold(TOPOLOGY_TOP + 64.0, f64::max);
         elements.push(excalidraw_text_element(
             "network_topology_note",
             48.0,
             note_y,
-            420.0,
-            19.0,
-            "No observed inter-host connections in this mission.".to_string(),
+            520.0,
+            38.0,
+            "No observed inter-host connections were captured during this mission.\nThe layout still preserves network zones and unreachable targets.".to_string(),
             15,
             "#51606F",
         ));
@@ -836,6 +902,961 @@ fn render_network_topology_excalidraw(mission_id: &str, topology: &NetworkTopolo
         }
     }))
     .expect("excalidraw topology should serialize")
+}
+
+fn build_topology_sections(topology: &NetworkTopology) -> Vec<TopologySection> {
+    let mut section_hosts = BTreeMap::<String, Vec<TopologyHost>>::new();
+    let mut section_titles = BTreeMap::<String, String>::new();
+    let mut host_section = BTreeMap::<String, String>::new();
+    let mut failed_hosts = Vec::new();
+
+    for host in &topology.hosts {
+        if host.final_state.eq_ignore_ascii_case("failed") {
+            failed_hosts.push(host.clone());
+            continue;
+        }
+
+        let (section_id, section_title) = topology_segment_key(&host.ip);
+        host_section.insert(host.ip.clone(), section_id.clone());
+        section_titles.insert(section_id.clone(), section_title);
+        section_hosts
+            .entry(section_id)
+            .or_default()
+            .push(host.clone());
+    }
+
+    let mut sections = Vec::new();
+    for (section_id, mut hosts) in section_hosts {
+        hosts.sort_by_key(|host| {
+            (
+                topology_role_rank(infer_topology_role(host)),
+                display_topology_name(host).to_string(),
+                host.ip.clone(),
+            )
+        });
+        let internal_links = topology
+            .edges
+            .iter()
+            .filter(|edge| {
+                host_section.get(&edge.from_ip) == Some(&section_id)
+                    && host_section.get(&edge.to_ip) == Some(&section_id)
+            })
+            .count();
+        let cross_zone_links = topology
+            .edges
+            .iter()
+            .filter(|edge| {
+                let from_match = host_section.get(&edge.from_ip) == Some(&section_id);
+                let to_match = host_section.get(&edge.to_ip) == Some(&section_id);
+                from_match ^ to_match
+            })
+            .count();
+        let title = section_titles
+            .remove(&section_id)
+            .unwrap_or_else(|| section_id.clone());
+        sections.push(TopologySection {
+            id: section_id,
+            title,
+            subtitle: topology_section_summary(hosts.len(), internal_links, cross_zone_links),
+            kind: TopologySectionKind::Segment,
+            hosts,
+        });
+    }
+
+    sections.sort_by_key(|section| section.title.clone());
+
+    if !failed_hosts.is_empty() {
+        failed_hosts.sort_by_key(|host| (display_topology_name(host).to_string(), host.ip.clone()));
+        sections.push(TopologySection {
+            id: "failed_targets".to_string(),
+            title: "Unreachable / No Inventory".to_string(),
+            subtitle: format!(
+                "{} {} failed before collection completed",
+                failed_hosts.len(),
+                pluralize_topology_word(failed_hosts.len(), "target", "targets")
+            ),
+            kind: TopologySectionKind::Failed,
+            hosts: failed_hosts,
+        });
+    }
+
+    sections
+}
+
+fn layout_topology_sections(sections: &[TopologySection]) -> Vec<TopologySectionLayout> {
+    let mut layouts = Vec::new();
+    let mut failed_section = None::<TopologySection>;
+    let reachable_sections = sections
+        .iter()
+        .filter_map(|section| {
+            if section.kind == TopologySectionKind::Failed {
+                failed_section = Some(section.clone());
+                None
+            } else {
+                Some(section.clone())
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let columns = reachable_sections
+        .len()
+        .clamp(1, TOPOLOGY_MAX_SECTION_COLUMNS);
+    let section_width = topology_section_width(columns);
+    let grid_width =
+        columns as f64 * section_width + columns.saturating_sub(1) as f64 * TOPOLOGY_SECTION_GAP;
+    let mut row_y = TOPOLOGY_TOP;
+
+    for row in reachable_sections.chunks(columns) {
+        let row_width = row.len() as f64 * section_width
+            + row.len().saturating_sub(1) as f64 * TOPOLOGY_SECTION_GAP;
+        let start_x = TOPOLOGY_LEFT_MARGIN + ((grid_width - row_width) / 2.0);
+        let mut row_layouts = Vec::new();
+        let mut row_height = 0.0_f64;
+
+        for (index, section) in row.iter().enumerate() {
+            let x = start_x + index as f64 * (section_width + TOPOLOGY_SECTION_GAP);
+            let layout = layout_topology_section(section, x, row_y, section_width);
+            row_height = row_height.max(layout.frame.height);
+            row_layouts.push(layout);
+        }
+
+        layouts.extend(row_layouts);
+        row_y += row_height + TOPOLOGY_SECTION_ROW_GAP;
+    }
+
+    if let Some(section) = failed_section {
+        let y = row_y.max(TOPOLOGY_TOP) + TOPOLOGY_FAILED_SECTION_GAP;
+        layouts.push(layout_topology_section(
+            &section,
+            TOPOLOGY_LEFT_MARGIN,
+            y,
+            grid_width,
+        ));
+    }
+
+    layouts
+}
+
+fn layout_topology_section(
+    section: &TopologySection,
+    x: f64,
+    y: f64,
+    width: f64,
+) -> TopologySectionLayout {
+    let cols = topology_section_columns(section, width);
+    let inner_width = width - (TOPOLOGY_SECTION_PADDING_X * 2.0);
+    let host_width = if cols == 1 {
+        inner_width
+    } else {
+        (inner_width - ((cols - 1) as f64 * TOPOLOGY_HOST_GAP_X)) / cols as f64
+    };
+    let host_start_y = y + TOPOLOGY_SECTION_HEADER_HEIGHT + 10.0;
+    let rows = section.hosts.len().div_ceil(cols);
+    let section_height = TOPOLOGY_SECTION_HEADER_HEIGHT
+        + 10.0
+        + (rows as f64 * TOPOLOGY_HOST_HEIGHT)
+        + ((rows.saturating_sub(1)) as f64 * TOPOLOGY_HOST_GAP_Y)
+        + TOPOLOGY_SECTION_PADDING_BOTTOM;
+
+    let hosts = section
+        .hosts
+        .iter()
+        .enumerate()
+        .map(|(index, host)| {
+            let row = index / cols;
+            let col = index % cols;
+            let host_x =
+                x + TOPOLOGY_SECTION_PADDING_X + (col as f64 * (host_width + TOPOLOGY_HOST_GAP_X));
+            let host_y = host_start_y + (row as f64 * (TOPOLOGY_HOST_HEIGHT + TOPOLOGY_HOST_GAP_Y));
+
+            TopologyHostLayout {
+                host: host.clone(),
+                frame: ExcalidrawBox {
+                    id: excalidraw_host_box_id(&host.ip),
+                    x: host_x,
+                    y: host_y,
+                    width: host_width,
+                    height: TOPOLOGY_HOST_HEIGHT,
+                },
+            }
+        })
+        .collect();
+
+    TopologySectionLayout {
+        id: section.id.clone(),
+        title: section.title.clone(),
+        subtitle: section.subtitle.clone(),
+        kind: section.kind,
+        frame: ExcalidrawBox {
+            id: format!("section_{}", sanitize_identifier(&section.id)),
+            x,
+            y,
+            width,
+            height: section_height,
+        },
+        hosts,
+    }
+}
+
+fn render_topology_legend(x: f64) -> Vec<serde_json::Value> {
+    let y = 28.0;
+    let width = TOPOLOGY_LEGEND_WIDTH;
+    let height = 146.0;
+    let mut elements = vec![excalidraw_rectangle_element_with_style(
+        "topology_legend",
+        x,
+        y,
+        width,
+        height,
+        "#AAB7C4",
+        "#F4F6F8",
+        "solid",
+    )];
+
+    elements.push(excalidraw_text_element(
+        "topology_legend_title",
+        x + 18.0,
+        y + 16.0,
+        width - 36.0,
+        22.0,
+        "Diagram Key".to_string(),
+        17,
+        "#10233C",
+    ));
+
+    let entries = [
+        (
+            "legend_unix",
+            52.0,
+            "#EAF2FF",
+            "#1F3A5F",
+            "Reachable Unix or generic host",
+        ),
+        (
+            "legend_windows",
+            78.0,
+            "#E8F6F1",
+            "#2F5D50",
+            "Reachable Windows host",
+        ),
+        (
+            "legend_failed",
+            104.0,
+            "#FDEEE8",
+            "#A64B2A",
+            "Failed or incomplete target",
+        ),
+    ];
+
+    for (id, offset, fill, stroke, label) in entries {
+        elements.push(excalidraw_rectangle_element(
+            id,
+            x + 18.0,
+            y + offset,
+            18.0,
+            14.0,
+            stroke,
+            fill,
+        ));
+        elements.push(excalidraw_text_element(
+            &format!("{id}_label"),
+            x + 46.0,
+            y + offset - 2.0,
+            width - 64.0,
+            18.0,
+            label.to_string(),
+            12,
+            "#51606F",
+        ));
+    }
+
+    elements.push(excalidraw_line_element(
+        "legend_link",
+        x + 18.0,
+        y + 130.0,
+        vec![(0.0, 0.0), (42.0, 0.0)],
+        "#425466",
+        "dashed",
+    ));
+    elements.push(excalidraw_text_element(
+        "legend_link_label",
+        x + 72.0,
+        y + 122.0,
+        width - 90.0,
+        18.0,
+        "Dashed links show observed peer traffic".to_string(),
+        12,
+        "#51606F",
+    ));
+
+    elements
+}
+
+fn render_topology_section(section: &TopologySectionLayout) -> Vec<serde_json::Value> {
+    let (stroke, fill, chip_fill, chip_text) = topology_section_palette(section.kind);
+    let mut elements = vec![excalidraw_rectangle_element_with_style(
+        &section.frame.id,
+        section.frame.x,
+        section.frame.y,
+        section.frame.width,
+        section.frame.height,
+        stroke,
+        fill,
+        "dashed",
+    )];
+
+    let chip_width = estimate_text_width(&section.title, 15).min(section.frame.width - 36.0);
+    elements.push(excalidraw_rectangle_element(
+        &format!("{}_chip", section.id),
+        section.frame.x + 18.0,
+        section.frame.y + 14.0,
+        chip_width,
+        28.0,
+        stroke,
+        chip_fill,
+    ));
+    elements.push(excalidraw_text_element(
+        &format!("{}_title", section.id),
+        section.frame.x + 30.0,
+        section.frame.y + 20.0,
+        chip_width - 20.0,
+        18.0,
+        section.title.clone(),
+        15,
+        chip_text,
+    ));
+    elements.push(excalidraw_text_element(
+        &format!("{}_subtitle", section.id),
+        section.frame.x + 20.0,
+        section.frame.y + 48.0,
+        section.frame.width - 40.0,
+        18.0,
+        section.subtitle.clone(),
+        12,
+        "#51606F",
+    ));
+
+    for host in &section.hosts {
+        elements.extend(render_topology_host_card(host));
+    }
+
+    elements
+}
+
+fn render_topology_host_card(layout: &TopologyHostLayout) -> Vec<serde_json::Value> {
+    let (stroke, fill, text_color) = excalidraw_host_palette(&layout.host);
+    let title = truncate_with_ellipsis(display_topology_name(&layout.host), 28);
+    let body = topology_host_body(&layout.host).join("\n");
+    let (badge_label, badge_fill, badge_stroke, badge_text) = topology_host_badge(&layout.host);
+    let badge_width = estimate_text_width(&badge_label, 10).clamp(64.0, 122.0);
+
+    vec![
+        excalidraw_rectangle_element(
+            &layout.frame.id,
+            layout.frame.x,
+            layout.frame.y,
+            layout.frame.width,
+            layout.frame.height,
+            stroke,
+            fill,
+        ),
+        excalidraw_rectangle_element(
+            &format!("{}_badge_bg", layout.frame.id),
+            layout.frame.x + layout.frame.width - badge_width - 14.0,
+            layout.frame.y + 12.0,
+            badge_width,
+            18.0,
+            badge_stroke,
+            badge_fill,
+        ),
+        excalidraw_text_element(
+            &format!("{}_title", layout.frame.id),
+            layout.frame.x + 14.0,
+            layout.frame.y + 12.0,
+            layout.frame.width - badge_width - 36.0,
+            18.0,
+            title,
+            15,
+            text_color,
+        ),
+        excalidraw_text_element(
+            &format!("{}_badge_text", layout.frame.id),
+            layout.frame.x + layout.frame.width - badge_width - 4.0,
+            layout.frame.y + 14.0,
+            badge_width - 20.0,
+            14.0,
+            badge_label,
+            10,
+            badge_text,
+        ),
+        excalidraw_line_element(
+            &format!("{}_divider", layout.frame.id),
+            layout.frame.x + 14.0,
+            layout.frame.y + 36.0,
+            vec![(0.0, 0.0), (layout.frame.width - 28.0, 0.0)],
+            stroke,
+            "solid",
+        ),
+        excalidraw_text_element(
+            &format!("{}_body", layout.frame.id),
+            layout.frame.x + 14.0,
+            layout.frame.y + 46.0,
+            layout.frame.width - 28.0,
+            layout.frame.height - 56.0,
+            body,
+            12,
+            text_color,
+        ),
+    ]
+}
+
+fn topology_section_columns(section: &TopologySection, width: f64) -> usize {
+    match section.kind {
+        TopologySectionKind::Failed => section.hosts.len().clamp(1, 3),
+        TopologySectionKind::Segment => {
+            if section.hosts.len() >= 6 && width >= TOPOLOGY_SECTION_WIDTH_SINGLE {
+                2
+            } else {
+                1
+            }
+        }
+    }
+}
+
+fn topology_section_width(columns: usize) -> f64 {
+    match columns {
+        1 => TOPOLOGY_SECTION_WIDTH_SINGLE,
+        2 => TOPOLOGY_SECTION_WIDTH_DOUBLE,
+        _ => TOPOLOGY_SECTION_WIDTH_TRIPLE,
+    }
+}
+
+fn topology_segment_key(ip: &str) -> (String, String) {
+    match ip.parse::<IpAddr>() {
+        Ok(IpAddr::V4(addr)) => {
+            let octets = addr.octets();
+            (
+                format!("segment_{}_{}_{}_0_24", octets[0], octets[1], octets[2]),
+                format!("Subnet {}.{}.{}.0/24", octets[0], octets[1], octets[2]),
+            )
+        }
+        Ok(IpAddr::V6(addr)) => {
+            let segments = addr.segments();
+            (
+                format!(
+                    "segment_{:x}_{:x}_{:x}_{:x}_64",
+                    segments[0], segments[1], segments[2], segments[3]
+                ),
+                format!(
+                    "IPv6 {:x}:{:x}:{:x}:{:x}::/64",
+                    segments[0], segments[1], segments[2], segments[3]
+                ),
+            )
+        }
+        Err(_) => (
+            format!("segment_{}", sanitize_identifier(ip)),
+            format!("Zone {ip}"),
+        ),
+    }
+}
+
+fn topology_section_palette(
+    kind: TopologySectionKind,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match kind {
+        TopologySectionKind::Segment => ("#AAB7C4", "#FFFFFF", "#EAF2FF", "#10233C"),
+        TopologySectionKind::Failed => ("#A64B2A", "#FFF8F6", "#FDEEE8", "#5E2B18"),
+    }
+}
+
+fn topology_section_summary(
+    host_count: usize,
+    internal_links: usize,
+    cross_zone_links: usize,
+) -> String {
+    let mut parts = vec![format!(
+        "{} {}",
+        host_count,
+        pluralize_topology_word(host_count, "host", "hosts"),
+    )];
+
+    if internal_links > 0 {
+        parts.push(format!(
+            "{} internal {}",
+            internal_links,
+            pluralize_topology_word(internal_links, "link", "links"),
+        ));
+    }
+    if cross_zone_links > 0 {
+        parts.push(format!(
+            "{} cross-zone {}",
+            cross_zone_links,
+            pluralize_topology_word(cross_zone_links, "flow", "flows"),
+        ));
+    }
+    if internal_links == 0 && cross_zone_links == 0 {
+        parts.push("no observed peer traffic".to_string());
+    }
+
+    parts.join(" • ")
+}
+
+fn topology_host_body(host: &TopologyHost) -> Vec<String> {
+    if host.final_state.eq_ignore_ascii_case("failed") {
+        return vec![
+            host.ip.clone(),
+            "collection did not complete".to_string(),
+            format!(
+                "{} • ports {}",
+                title_case_platform(&host.platform),
+                summarize_ports(&host.open_ports)
+            ),
+        ];
+    }
+
+    vec![
+        host.ip.clone(),
+        format!(
+            "{} • {}",
+            infer_topology_role(host),
+            short_topology_os(host.os.as_deref())
+        ),
+        format!(
+            "ports {} • {}",
+            summarize_ports(&host.open_ports),
+            truncate_with_ellipsis(&summarize_services(&host.services), 28)
+        ),
+    ]
+}
+
+fn topology_host_badge(host: &TopologyHost) -> (String, &'static str, &'static str, &'static str) {
+    if host.final_state.eq_ignore_ascii_case("failed") {
+        return ("FAILED".to_string(), "#FDEEE8", "#A64B2A", "#5E2B18");
+    }
+
+    if host.platform.eq_ignore_ascii_case("windows") {
+        return ("WINDOWS".to_string(), "#E8F6F1", "#2F5D50", "#18352D");
+    }
+
+    (
+        title_case_platform(&host.platform).to_ascii_uppercase(),
+        "#EAF2FF",
+        "#1F3A5F",
+        "#10233C",
+    )
+}
+
+fn infer_topology_role(host: &TopologyHost) -> &'static str {
+    let services = host
+        .services
+        .iter()
+        .map(|service| service.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    if services.iter().any(|service| {
+        service.contains("postgres")
+            || service.contains("mysql")
+            || service.contains("mssql")
+            || service.contains("sql")
+    }) {
+        "database"
+    } else if services.iter().any(|service| {
+        service.contains("nginx")
+            || service.contains("apache")
+            || service.contains("httpd")
+            || service.contains("iis")
+    }) || host
+        .open_ports
+        .iter()
+        .any(|port| matches!(port, 80 | 443 | 8080 | 8443))
+    {
+        "web/service"
+    } else if host.platform.eq_ignore_ascii_case("windows") && host.open_ports.contains(&445) {
+        "windows endpoint"
+    } else if host.open_ports.contains(&22) {
+        "ssh host"
+    } else {
+        "host"
+    }
+}
+
+fn topology_role_rank(role: &str) -> usize {
+    match role {
+        "web/service" => 0,
+        "windows endpoint" => 1,
+        "ssh host" => 2,
+        "database" => 3,
+        _ => 4,
+    }
+}
+
+fn short_topology_os(value: Option<&str>) -> String {
+    truncate_with_ellipsis(optional_display(value), 28)
+}
+
+fn title_case_platform(platform: &str) -> String {
+    if platform.is_empty() {
+        return "Unknown".to_string();
+    }
+    let mut chars = platform.chars();
+    let Some(first) = chars.next() else {
+        return "Unknown".to_string();
+    };
+    format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+}
+
+fn pluralize_topology_word(
+    count: usize,
+    singular: &'static str,
+    plural: &'static str,
+) -> &'static str {
+    if count == 1 {
+        singular
+    } else {
+        plural
+    }
+}
+
+fn estimate_text_width(value: &str, font_size: u32) -> f64 {
+    (value.chars().count() as f64 * font_size as f64 * 0.56) + 24.0
+}
+
+fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
+    let total = value.chars().count();
+    if total <= max_chars {
+        return value.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(3);
+    let mut truncated = value.chars().take(keep).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn excalidraw_connection_elements(
+    id: &str,
+    from_box: &ExcalidrawBox,
+    to_box: &ExcalidrawBox,
+    label: Option<String>,
+) -> Vec<serde_json::Value> {
+    let seed = excalidraw_seed(id);
+    let (start_side, end_side, route) = orthogonal_route_between_boxes(from_box, to_box);
+    let start = route
+        .first()
+        .copied()
+        .expect("route should always contain a start point");
+    let end = route
+        .last()
+        .copied()
+        .expect("route should always contain an end point");
+    let rel_points = route
+        .iter()
+        .map(|point| vec![point.x - start.x, point.y - start.y])
+        .collect::<Vec<_>>();
+    let mut elements = vec![json!({
+        "id": id,
+        "type": "arrow",
+        "x": start.x,
+        "y": start.y,
+        "width": end.x - start.x,
+        "height": end.y - start.y,
+        "strokeColor": "#425466",
+        "backgroundColor": "transparent",
+        "fillStyle": "solid",
+        "strokeWidth": 2,
+        "strokeStyle": "dashed",
+        "roughness": 0,
+        "opacity": 100,
+        "angle": 0,
+        "seed": seed,
+        "version": 1,
+        "versionNonce": seed ^ 0x7C6D_5E4F,
+        "isDeleted": false,
+        "groupIds": [],
+        "boundElements": [],
+        "link": null,
+        "locked": false,
+        "points": rel_points,
+        "startBinding": { "elementId": from_box.id, "focus": 0, "gap": 6 },
+        "endBinding": { "elementId": to_box.id, "focus": 0, "gap": 6 },
+        "startArrowhead": null,
+        "endArrowhead": null,
+        "lastCommittedPoint": [end.x - start.x, end.y - start.y],
+        "customData": { "semantic": "observed_link", "startSide": start_side, "endSide": end_side }
+    })];
+
+    if let Some(label) = label {
+        let label_position = connection_label_position(&route);
+        elements.push(excalidraw_text_element(
+            &format!("{id}_label"),
+            label_position.x - 84.0,
+            label_position.y - 10.0,
+            168.0,
+            16.0,
+            label,
+            11,
+            "#51606F",
+        ));
+    }
+
+    elements
+}
+
+fn excalidraw_section_connection_element(
+    id: &str,
+    from_box: &ExcalidrawBox,
+    to_box: &ExcalidrawBox,
+) -> serde_json::Value {
+    let seed = excalidraw_seed(id);
+    let (start_side, end_side, route) = section_route_between_boxes(from_box, to_box);
+    let start = route
+        .first()
+        .copied()
+        .expect("route should always contain a start point");
+    let end = route
+        .last()
+        .copied()
+        .expect("route should always contain an end point");
+    let rel_points = route
+        .iter()
+        .map(|point| vec![point.x - start.x, point.y - start.y])
+        .collect::<Vec<_>>();
+
+    json!({
+        "id": id,
+        "type": "arrow",
+        "x": start.x,
+        "y": start.y,
+        "width": end.x - start.x,
+        "height": end.y - start.y,
+        "strokeColor": "#697586",
+        "backgroundColor": "transparent",
+        "fillStyle": "solid",
+        "strokeWidth": 2,
+        "strokeStyle": "dashed",
+        "roughness": 0,
+        "opacity": 100,
+        "angle": 0,
+        "seed": seed,
+        "version": 1,
+        "versionNonce": seed ^ 0x4D7B_94AC,
+        "isDeleted": false,
+        "groupIds": [],
+        "boundElements": [],
+        "link": null,
+        "locked": false,
+        "points": rel_points,
+        "startBinding": { "elementId": from_box.id, "focus": 0, "gap": 4 },
+        "endBinding": { "elementId": to_box.id, "focus": 0, "gap": 4 },
+        "startArrowhead": null,
+        "endArrowhead": null,
+        "lastCommittedPoint": [end.x - start.x, end.y - start.y],
+        "customData": { "semantic": "observed_section_link", "startSide": start_side, "endSide": end_side }
+    })
+}
+
+fn orthogonal_route_between_boxes(
+    from_box: &ExcalidrawBox,
+    to_box: &ExcalidrawBox,
+) -> (&'static str, &'static str, Vec<ExcalidrawPoint>) {
+    let from_center = ExcalidrawPoint {
+        x: from_box.x + (from_box.width / 2.0),
+        y: from_box.y + (from_box.height / 2.0),
+    };
+    let to_center = ExcalidrawPoint {
+        x: to_box.x + (to_box.width / 2.0),
+        y: to_box.y + (to_box.height / 2.0),
+    };
+    let dx = to_center.x - from_center.x;
+    let dy = to_center.y - from_center.y;
+
+    let (start_side, end_side, route) = if dx.abs() >= dy.abs() {
+        let start_side = if dx >= 0.0 { "right" } else { "left" };
+        let end_side = if dx >= 0.0 { "left" } else { "right" };
+        let start = box_edge_midpoint(from_box, start_side);
+        let end = box_edge_midpoint(to_box, end_side);
+        let lane_x = (start.x + end.x) / 2.0;
+        (
+            start_side,
+            end_side,
+            vec![
+                start,
+                ExcalidrawPoint {
+                    x: lane_x,
+                    y: start.y,
+                },
+                ExcalidrawPoint {
+                    x: lane_x,
+                    y: end.y,
+                },
+                end,
+            ],
+        )
+    } else {
+        let start_side = if dy >= 0.0 { "bottom" } else { "top" };
+        let end_side = if dy >= 0.0 { "top" } else { "bottom" };
+        let start = box_edge_midpoint(from_box, start_side);
+        let end = box_edge_midpoint(to_box, end_side);
+        let lane_y = (start.y + end.y) / 2.0;
+        (
+            start_side,
+            end_side,
+            vec![
+                start,
+                ExcalidrawPoint {
+                    x: start.x,
+                    y: lane_y,
+                },
+                ExcalidrawPoint {
+                    x: end.x,
+                    y: lane_y,
+                },
+                end,
+            ],
+        )
+    };
+
+    (start_side, end_side, compact_route_points(route))
+}
+
+fn section_route_between_boxes(
+    from_box: &ExcalidrawBox,
+    to_box: &ExcalidrawBox,
+) -> (&'static str, &'static str, Vec<ExcalidrawPoint>) {
+    let from_center = ExcalidrawPoint {
+        x: from_box.x + (from_box.width / 2.0),
+        y: from_box.y + (from_box.height / 2.0),
+    };
+    let to_center = ExcalidrawPoint {
+        x: to_box.x + (to_box.width / 2.0),
+        y: to_box.y + (to_box.height / 2.0),
+    };
+    let dx = to_center.x - from_center.x;
+    let dy = to_center.y - from_center.y;
+
+    let (start_side, end_side, route) = if dx.abs() >= dy.abs() {
+        let start_side = if dx >= 0.0 { "right" } else { "left" };
+        let end_side = if dx >= 0.0 { "left" } else { "right" };
+        let start = section_edge_anchor(from_box, start_side);
+        let end = section_edge_anchor(to_box, end_side);
+        (start_side, end_side, vec![start, end])
+    } else {
+        let start_side = if dy >= 0.0 { "bottom" } else { "top" };
+        let end_side = if dy >= 0.0 { "top" } else { "bottom" };
+        let start = section_edge_anchor(from_box, start_side);
+        let end = section_edge_anchor(to_box, end_side);
+        (
+            start_side,
+            end_side,
+            compact_route_points(vec![
+                start,
+                ExcalidrawPoint {
+                    x: start.x,
+                    y: (start.y + end.y) / 2.0,
+                },
+                ExcalidrawPoint {
+                    x: end.x,
+                    y: (start.y + end.y) / 2.0,
+                },
+                end,
+            ]),
+        )
+    };
+
+    (start_side, end_side, route)
+}
+
+fn compact_route_points(points: Vec<ExcalidrawPoint>) -> Vec<ExcalidrawPoint> {
+    let mut compacted = Vec::new();
+
+    for point in points {
+        if compacted
+            .last()
+            .map(|last: &ExcalidrawPoint| {
+                (last.x - point.x).abs() < f64::EPSILON && (last.y - point.y).abs() < f64::EPSILON
+            })
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        if compacted.len() >= 2 {
+            let previous = compacted[compacted.len() - 1];
+            let before_previous = compacted[compacted.len() - 2];
+            let vertical = (before_previous.x - previous.x).abs() < f64::EPSILON
+                && (previous.x - point.x).abs() < f64::EPSILON;
+            let horizontal = (before_previous.y - previous.y).abs() < f64::EPSILON
+                && (previous.y - point.y).abs() < f64::EPSILON;
+            if vertical || horizontal {
+                compacted.pop();
+            }
+        }
+
+        compacted.push(point);
+    }
+
+    compacted
+}
+
+fn connection_label_position(route: &[ExcalidrawPoint]) -> ExcalidrawPoint {
+    match route.len() {
+        0 => ExcalidrawPoint { x: 0.0, y: 0.0 },
+        1 => route[0],
+        2 => ExcalidrawPoint {
+            x: (route[0].x + route[1].x) / 2.0,
+            y: (route[0].y + route[1].y) / 2.0,
+        },
+        _ => {
+            let middle = route.len() / 2;
+            ExcalidrawPoint {
+                x: (route[middle - 1].x + route[middle].x) / 2.0,
+                y: (route[middle - 1].y + route[middle].y) / 2.0 - 12.0,
+            }
+        }
+    }
+}
+
+fn box_edge_midpoint(box_frame: &ExcalidrawBox, side: &str) -> ExcalidrawPoint {
+    match side {
+        "left" => ExcalidrawPoint {
+            x: box_frame.x,
+            y: box_frame.y + (box_frame.height / 2.0),
+        },
+        "right" => ExcalidrawPoint {
+            x: box_frame.x + box_frame.width,
+            y: box_frame.y + (box_frame.height / 2.0),
+        },
+        "top" => ExcalidrawPoint {
+            x: box_frame.x + (box_frame.width / 2.0),
+            y: box_frame.y,
+        },
+        _ => ExcalidrawPoint {
+            x: box_frame.x + (box_frame.width / 2.0),
+            y: box_frame.y + box_frame.height,
+        },
+    }
+}
+
+fn section_edge_anchor(box_frame: &ExcalidrawBox, side: &str) -> ExcalidrawPoint {
+    let header_y = box_frame.y + TOPOLOGY_SECTION_HEADER_HEIGHT + 4.0;
+    match side {
+        "left" => ExcalidrawPoint {
+            x: box_frame.x,
+            y: header_y,
+        },
+        "right" => ExcalidrawPoint {
+            x: box_frame.x + box_frame.width,
+            y: header_y,
+        },
+        "top" => ExcalidrawPoint {
+            x: box_frame.x + (box_frame.width / 2.0),
+            y: box_frame.y,
+        },
+        _ => ExcalidrawPoint {
+            x: box_frame.x + (box_frame.width / 2.0),
+            y: box_frame.y + box_frame.height,
+        },
+    }
 }
 
 async fn maybe_render_network_topology_png(excalidraw_source: &str) -> io::Result<Option<Vec<u8>>> {
@@ -1036,7 +2057,9 @@ struct ExcalidrawBox {
 }
 
 fn excalidraw_host_palette(host: &TopologyHost) -> (&'static str, &'static str, &'static str) {
-    if host.platform.eq_ignore_ascii_case("windows") {
+    if host.final_state.eq_ignore_ascii_case("failed") {
+        ("#A64B2A", "#FDEEE8", "#5E2B18")
+    } else if host.platform.eq_ignore_ascii_case("windows") {
         ("#2F5D50", "#E8F6F1", "#18352D")
     } else {
         ("#1F3A5F", "#EAF2FF", "#10233C")
@@ -1047,15 +2070,27 @@ fn excalidraw_host_box_id(ip: &str) -> String {
     format!("host_box_{}", sanitize_identifier(ip))
 }
 
-fn excalidraw_host_text_id(ip: &str) -> String {
-    format!("host_text_{}", sanitize_identifier(ip))
-}
-
 fn summarize_services(services: &[String]) -> String {
     match services.len() {
         0 => "-".to_string(),
         1..=3 => services.join(", "),
         _ => format!("{}, +{} more", services[..3].join(", "), services.len() - 3),
+    }
+}
+
+fn summarize_ports(ports: &[u16]) -> String {
+    match ports.len() {
+        0 => "-".to_string(),
+        1..=4 => join_ports(ports),
+        _ => format!(
+            "{}, +{} more",
+            ports[..4]
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            ports.len() - 4
+        ),
     }
 }
 
@@ -1251,6 +2286,28 @@ fn excalidraw_rectangle_element(
     stroke_color: &str,
     background_color: &str,
 ) -> serde_json::Value {
+    excalidraw_rectangle_element_with_style(
+        id,
+        x,
+        y,
+        width,
+        height,
+        stroke_color,
+        background_color,
+        "solid",
+    )
+}
+
+fn excalidraw_rectangle_element_with_style(
+    id: &str,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    stroke_color: &str,
+    background_color: &str,
+    stroke_style: &str,
+) -> serde_json::Value {
     let seed = excalidraw_seed(id);
     json!({
         "id": id,
@@ -1263,7 +2320,7 @@ fn excalidraw_rectangle_element(
         "backgroundColor": background_color,
         "fillStyle": "solid",
         "strokeWidth": 2,
-        "strokeStyle": "solid",
+        "strokeStyle": stroke_style,
         "roughness": 0,
         "opacity": 100,
         "angle": 0,
@@ -1279,31 +2336,36 @@ fn excalidraw_rectangle_element(
     })
 }
 
-fn excalidraw_arrow_element(
+fn excalidraw_line_element(
     id: &str,
-    from_box: &ExcalidrawBox,
-    to_box: &ExcalidrawBox,
+    x: f64,
+    y: f64,
+    points: Vec<(f64, f64)>,
+    stroke_color: &str,
+    stroke_style: &str,
 ) -> serde_json::Value {
     let seed = excalidraw_seed(id);
-    let from_x = from_box.x + (from_box.width / 2.0);
-    let from_y = from_box.y + (from_box.height / 2.0);
-    let to_x = to_box.x + (to_box.width / 2.0);
-    let to_y = to_box.y + (to_box.height / 2.0);
-    let dx = to_x - from_x;
-    let dy = to_y - from_y;
+    let width = points
+        .iter()
+        .map(|(point_x, _)| *point_x)
+        .fold(0.0, f64::max);
+    let height = points
+        .iter()
+        .map(|(_, point_y)| *point_y)
+        .fold(0.0, f64::max);
 
     json!({
         "id": id,
-        "type": "arrow",
-        "x": from_x,
-        "y": from_y,
-        "width": dx,
-        "height": dy,
-        "strokeColor": "#425466",
+        "type": "line",
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "strokeColor": stroke_color,
         "backgroundColor": "transparent",
         "fillStyle": "solid",
-        "strokeWidth": 2,
-        "strokeStyle": "solid",
+        "strokeWidth": 1,
+        "strokeStyle": stroke_style,
         "roughness": 0,
         "opacity": 100,
         "angle": 0,
@@ -1312,15 +2374,10 @@ fn excalidraw_arrow_element(
         "versionNonce": seed ^ 0x7C6D_5E4F,
         "isDeleted": false,
         "groupIds": [],
-        "boundElements": [],
+        "boundElements": null,
         "link": null,
         "locked": false,
-        "points": [[0.0, 0.0], [dx, dy]],
-        "startBinding": { "elementId": from_box.id, "focus": 0, "gap": 4 },
-        "endBinding": { "elementId": to_box.id, "focus": 0, "gap": 4 },
-        "startArrowhead": null,
-        "endArrowhead": "arrow",
-        "lastCommittedPoint": [dx, dy]
+        "points": points
     })
 }
 
@@ -1558,6 +2615,7 @@ mod tests {
                 TopologyHost {
                     ip: "10.0.0.51".to_string(),
                     label: "web-01".to_string(),
+                    final_state: "complete".to_string(),
                     platform: "unix".to_string(),
                     os: Some("Ubuntu".to_string()),
                     open_ports: vec![22],
@@ -1566,6 +2624,7 @@ mod tests {
                 TopologyHost {
                     ip: "10.0.0.52".to_string(),
                     label: "db-01".to_string(),
+                    final_state: "complete".to_string(),
                     platform: "unix".to_string(),
                     os: Some("Ubuntu".to_string()),
                     open_ports: vec![5432],
@@ -1579,14 +2638,61 @@ mod tests {
         };
 
         assert!(
-            render_network_topology_markdown("mission-123", &topology).contains("web-01 -> db-01")
+            render_network_topology_markdown("mission-123", &topology).contains("web-01 <-> db-01")
         );
         assert!(render_network_topology_mermaid(&topology)
-            .contains("host_10_0_0_51 -. observed .-> host_10_0_0_52"));
+            .contains("host_10_0_0_51 -. observed .- host_10_0_0_52"));
         let excalidraw = render_network_topology_excalidraw("mission-123", &topology);
         assert!(excalidraw.contains("\"type\": \"excalidraw\""));
+        assert!(excalidraw.contains("Subnet 10.0.0.0/24"));
+        assert!(excalidraw.contains("Diagram Key"));
         assert!(excalidraw.contains("host_box_10_0_0_51"));
         assert!(excalidraw.contains("edge_10_0_0_51_to_10_0_0_52"));
+    }
+
+    #[test]
+    fn network_topology_excalidraw_groups_failed_hosts_separately() {
+        let topology = NetworkTopology {
+            hosts: vec![
+                TopologyHost {
+                    ip: "10.0.0.60".to_string(),
+                    label: "jump-01".to_string(),
+                    final_state: "complete".to_string(),
+                    platform: "unix".to_string(),
+                    os: Some("Ubuntu".to_string()),
+                    open_ports: vec![22],
+                    services: vec!["sshd".to_string()],
+                },
+                TopologyHost {
+                    ip: "10.0.1.61".to_string(),
+                    label: "db-02".to_string(),
+                    final_state: "complete".to_string(),
+                    platform: "unix".to_string(),
+                    os: Some("Ubuntu".to_string()),
+                    open_ports: vec![5432],
+                    services: vec!["postgresql".to_string()],
+                },
+                TopologyHost {
+                    ip: "10.0.9.99".to_string(),
+                    label: "lost-host".to_string(),
+                    final_state: "failed".to_string(),
+                    platform: "windows".to_string(),
+                    os: None,
+                    open_ports: vec![22, 445],
+                    services: Vec::new(),
+                },
+            ],
+            edges: vec![TopologyEdge {
+                from_ip: "10.0.0.60".to_string(),
+                to_ip: "10.0.1.61".to_string(),
+            }],
+        };
+
+        let excalidraw = render_network_topology_excalidraw("mission-456", &topology);
+        assert!(excalidraw.contains("Subnet 10.0.0.0/24"));
+        assert!(excalidraw.contains("Subnet 10.0.1.0/24"));
+        assert!(excalidraw.contains("Unreachable / No Inventory"));
+        assert!(excalidraw.contains("collection did not complete"));
     }
 
     #[test]

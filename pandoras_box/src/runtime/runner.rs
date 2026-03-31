@@ -1310,19 +1310,19 @@ mod tests {
             tokio::fs::read_to_string(root.join("mission-123/network_topology.mmd"))
                 .await
                 .expect("network topology mermaid should exist")
-                .contains("host_10_0_0_51 -. observed .-> host_10_0_0_52")
+                .contains("host_10_0_0_51 -. observed .- host_10_0_0_52")
         );
         assert!(
             tokio::fs::read_to_string(root.join("mission-123/network_topology.md"))
                 .await
                 .expect("network topology markdown should exist")
-                .contains("web-01 -> db-01")
+                .contains("web-01 <-> db-01")
         );
         assert!(
             tokio::fs::read_to_string(root.join("mission-123/network_topology.excalidraw"))
                 .await
                 .expect("network topology excalidraw should exist")
-                .contains("edge_10_0_0_51_to_10_0_0_52")
+                .contains("Subnet 10.0.0.0/24")
         );
 
         let _ = tokio::fs::remove_dir_all(root).await;
