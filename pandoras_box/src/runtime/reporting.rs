@@ -89,7 +89,7 @@ struct InventoryPort {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct InventoryConnection {
-    remote_address: String,
+    remote_address: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -217,7 +217,8 @@ fn record_from_report(
             observed_peer_ips: inventory
                 .connections
                 .into_iter()
-                .filter_map(|connection| parse_remote_ip(&connection.remote_address))
+                .filter_map(|connection| connection.remote_address)
+                .filter_map(|address| parse_remote_ip(&address))
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect(),
@@ -1029,8 +1030,8 @@ mod tests {
         asset_inventory_pdf_lines, parse_remote_ip, render_asset_inventory_csv,
         render_asset_inventory_markdown, render_asset_inventory_pdf,
         render_network_topology_excalidraw, render_network_topology_markdown,
-        render_network_topology_mermaid, AssetInventoryBundle, AssetInventoryHost, NetworkTopology,
-        TopologyEdge, TopologyHost,
+        render_network_topology_mermaid, AssetInventoryBundle, AssetInventoryHost,
+        InventoryArtifact, NetworkTopology, TopologyEdge, TopologyHost,
     };
 
     #[test]
@@ -1117,5 +1118,32 @@ mod tests {
         );
         assert_eq!(parse_remote_ip(""), None);
         assert_eq!(parse_remote_ip("db.internal"), None);
+    }
+
+    #[test]
+    fn inventory_artifact_deserializer_allows_null_remote_addresses() {
+        let artifact: InventoryArtifact = serde_json::from_str(
+            r#"{
+  "hostname": "DESKTOP-PTNJUS5",
+  "os": "Windows 11 Pro",
+  "ports": [],
+  "connections": [
+    {"remoteAddress": null, "protocol": "UDP"},
+    {"remoteAddress": "10.0.2.2", "protocol": "TCP"}
+  ],
+  "services": [],
+  "users": [],
+  "shares": [],
+  "containers": []
+}"#,
+        )
+        .expect("inventory artifact should deserialize");
+
+        assert_eq!(artifact.connections.len(), 2);
+        assert_eq!(artifact.connections[0].remote_address, None);
+        assert_eq!(
+            artifact.connections[1].remote_address.as_deref(),
+            Some("10.0.2.2")
+        );
     }
 }
