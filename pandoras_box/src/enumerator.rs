@@ -1,3 +1,4 @@
+use crate::ttl::{classify_ttl, NativeTtlProber, SharedTtlProber, TtlSignature};
 use crate::Host;
 use crate::Result;
 use crate::OS;
@@ -5,14 +6,13 @@ use futures::future::join_all;
 use log::warn;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::{Deref, DerefMut};
-use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 
 const TIMEOUT_DURATION: Duration = Duration::from_secs(1);
-const TCP_PORTS: [u16; 2] = [139, 22];
+const TCP_PORTS: [u16; 4] = [22, 135, 139, 445];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ipv4AddrExt(Ipv4Addr);
@@ -98,6 +98,11 @@ impl Subnet {
         Self { ip, mask }
     }
 
+    #[must_use]
+    pub fn hosts(&self) -> Vec<IpAddr> {
+        self.iter_hosts().map(IpAddr::from).collect()
+    }
+
     fn iter_hosts(&self) -> Box<dyn Iterator<Item = Ipv4AddrExt> + '_> {
         // Prevent overflow: when mask = 0, shift would be 32 which is undefined behavior
         // For /0, iterate entire IPv4 space (impractical, but safe)
@@ -124,7 +129,8 @@ impl TryFrom<&str> for Subnet {
         }
 
         let ip: Ipv4AddrExt = parts[0].parse()?;
-        let mask: u8 = parts[1].parse()
+        let mask: u8 = parts[1]
+            .parse()
             .map_err(|_| Self::Error::ArgumentError(format!("Invalid CIDR mask: {}", parts[1])))?;
 
         // Validate mask is in valid range for IPv4 (0-32)
@@ -141,11 +147,16 @@ impl TryFrom<&str> for Subnet {
 
 pub struct Enumerator {
     subnet: Subnet,
+    ttl_probe: SharedTtlProber,
 }
 
 impl Enumerator {
     pub fn new(subnet: Subnet) -> Self {
-        Enumerator { subnet }
+        Self::with_ttl_probe(subnet, Arc::new(NativeTtlProber::default()))
+    }
+
+    pub fn with_ttl_probe(subnet: Subnet, ttl_probe: SharedTtlProber) -> Self {
+        Enumerator { subnet, ttl_probe }
     }
 
     pub async fn sweep(&self) -> Result<Vec<Arc<Host>>> {
@@ -154,7 +165,6 @@ impl Enumerator {
             .subnet
             .iter_hosts()
             .map(|ip| tokio::spawn(async move { Self::tcp_check(ip).await }))
-
             .collect();
 
         let tcp_results: Vec<(Ipv4AddrExt, Vec<u16>)> = join_all(tcp_handles)
@@ -167,7 +177,8 @@ impl Enumerator {
         let icmp_handles: Vec<_> = tcp_results
             .into_iter()
             .map(|(ip, open_ports)| {
-                tokio::spawn(async move { Self::icmp_ping(ip, open_ports).await })
+                let ttl_probe = Arc::clone(&self.ttl_probe);
+                tokio::spawn(async move { Self::resolve_host(ip, open_ports, ttl_probe).await })
             })
             .collect();
 
@@ -202,71 +213,105 @@ impl Enumerator {
         }
     }
 
-    async fn icmp_ping(ip: Ipv4AddrExt, open_ports: Vec<u16>) -> Option<Host> {
-        let output = if cfg!(target_os = "windows") {
-            match Command::new("ping")
-                .arg("-n 1")
-                .arg(ip.to_string())
-                .output()
-            {
-                Ok(output) => output,
-                Err(e) => {
-                    warn!("Failed to run ping command for {}: {}", ip, e);
-                    return None;
-                }
-            }
-        } else {
-            match Command::new("ping")
-                .arg("-c 1")
-                .arg("-W 1")
-                .arg(ip.to_string())
-                .output()
-            {
-                Ok(output) => output,
-                Err(e) => {
-                    warn!("Failed to run ping command for {}: {}", ip, e);
-                    return None;
-                }
-            }
-        };
-
-        if output.status.success() {
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            let ttl_value = if cfg!(target_os = "windows") {
-                // On Windows, `TTL=` is uppercase
-                output_str.split("TTL=").nth(1)
-            } else {
-                // On Linux, `ttl=` is lowercase
-                output_str.split("ttl=").nth(1)
-            };
-
-            if let Some(ttl_str) = ttl_value {
-                let ttl: u8 = ttl_str
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("0")
-                    .parse()
-                    .unwrap_or(0);
-                return Some(Host {
-                    ip: ip.to_string(),
-                    os: Self::determine_os(ttl),
-                    open_ports,
-                });
-            }
+    async fn resolve_host(
+        ip: Ipv4AddrExt,
+        open_ports: Vec<u16>,
+        ttl_probe: SharedTtlProber,
+    ) -> Option<Host> {
+        let ttl = ttl_probe.probe_ttl(IpAddr::V4(*ip)).await;
+        if ttl.is_none() {
+            warn!(
+                "TTL probe unavailable for {}, falling back to port fingerprinting",
+                ip
+            );
         }
 
         Some(Host {
             ip: ip.to_string(),
-            os: OS::Unknown,
+            os: Self::infer_os(&open_ports, ttl),
             open_ports,
         })
     }
 
-    fn determine_os(ttl: u8) -> OS {
-        match ttl {
-            55..=64 => OS::Unix,
-            110..=128 => OS::Windows,
-            _ => OS::Unknown,
+    fn infer_os(open_ports: &[u16], ttl: Option<u8>) -> OS {
+        match ttl.map(classify_ttl).unwrap_or(TtlSignature::Unknown) {
+            TtlSignature::Unix => OS::Unix,
+            TtlSignature::Windows => OS::Windows,
+            TtlSignature::Unknown => {
+                let has_windows_ports = open_ports.contains(&135)
+                    || open_ports.contains(&139)
+                    || open_ports.contains(&445);
+
+                if has_windows_ports {
+                    OS::Windows
+                } else if open_ports.contains(&22) {
+                    OS::Unix
+                } else {
+                    OS::Unknown
+                }
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Enumerator, Subnet};
+    use crate::ttl::TtlProber;
+    use crate::OS;
+    use async_trait::async_trait;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+
+    struct FakeTtlProber {
+        ttl: Option<u8>,
+    }
+
+    #[async_trait]
+    impl TtlProber for FakeTtlProber {
+        async fn probe_ttl(&self, _ip: IpAddr) -> Option<u8> {
+            self.ttl
+        }
+    }
+
+    #[test]
+    fn infer_os_prefers_ttl_for_samba_hosts() {
+        assert_eq!(Enumerator::infer_os(&[22, 445], Some(64)), OS::Unix);
+    }
+
+    #[test]
+    fn infer_os_detects_windows_from_ttl_over_ssh_only() {
+        assert_eq!(Enumerator::infer_os(&[22], Some(128)), OS::Windows);
+    }
+
+    #[test]
+    fn infer_os_falls_back_to_ports_when_ttl_is_missing() {
+        assert_eq!(Enumerator::infer_os(&[135, 445], None), OS::Windows);
+        assert_eq!(Enumerator::infer_os(&[22], None), OS::Unix);
+    }
+
+    #[test]
+    fn subnet_hosts_returns_ip_list() {
+        let subnet = Subnet::new(Ipv4Addr::new(10, 0, 0, 0).into(), 30);
+        let hosts = subnet.hosts();
+
+        assert_eq!(hosts.len(), 2);
+        assert!(hosts.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(hosts.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+    }
+
+    #[tokio::test]
+    async fn resolve_host_uses_injected_ttl_probe() {
+        let host = Enumerator::resolve_host(
+            Ipv4Addr::new(10, 0, 0, 8).into(),
+            vec![22, 445],
+            Arc::new(FakeTtlProber { ttl: Some(64) }),
+        )
+        .await
+        .expect("host should resolve");
+
+        assert_eq!(host.ip, "10.0.0.8");
+        assert_eq!(host.os, OS::Unix);
+        assert_eq!(host.open_ports, vec![22, 445]);
     }
 }

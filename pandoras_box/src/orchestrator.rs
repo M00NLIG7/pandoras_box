@@ -1,36 +1,37 @@
-use tokio::io::AsyncWriteExt;
-use std::collections::HashMap;
-use std::net::IpAddr;
 use crate::communicator::{
-    unix_config, windows_config, ClientWrapper, Communicator, HostOperationResult, OSConfig
+    unix_config, windows_config, ClientWrapper, Communicator, HostOperationResult, OSConfig,
 };
 use crate::enumerator::{Enumerator, Subnet};
 use crate::types::{Host, OS};
 use crate::{Error, Result};
-use base64::Engine;
+use futures::future::join_all;
+use futures::stream;
+use futures::stream::StreamExt;
+use log::{error, info, warn};
+use reqwest;
 use rustrc::client::CommandOutput;
 use rustrc::cmd;
 use rustrc::ssh::SSHConfig;
 use rustrc::winexe::WinexeConfig;
-use reqwest;
-use futures::stream;
-use futures::stream::StreamExt;
+use std::collections::HashMap;
 use std::collections::HashSet; // Add this to imports if not already present
-use futures::future::join_all;
-use log::{error, info, warn};
+use std::net::IpAddr;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
-use crate::logging::{log_failure, log_output, log_skipped, log_success, log_host_results};
+use crate::logging::{log_failure, log_host_results, log_output, log_skipped, log_success};
 
 const MAX_RETRIES: u32 = 1; // Only 1 retry to avoid extending script runtime
 const INITIAL_DELAY_MS: u64 = 1000; // 1 second
 
 //cmd.exe /c echo Dim xhr: Set xhr = CreateObject("MSXML2.XMLHTTP.6.0"): xhr.Open "GET", "https://raw.githubusercontent.com/M00NLIG7/pandoras_box/master/pandoras_box/resources/chimera", False: xhr.Send: Set stream = CreateObject("ADODB.Stream"): stream.Open: stream.Type = 1: stream.Write xhr.responseBody: stream.SaveToFile "C:\Temp\chimera.exe", 2: stream.Close > dl.vbs && cscript //B dl.vbs
 
-static CHIMERA_URL_UNIX: &str = "https://github.com/M00NLIG7/pandoras_box/releases/download/CCDC-2024-2025/chimera";
-static CHIMERA_URL_WIN: &str = "https://github.com/M00NLIG7/pandoras_box/releases/download/CCDC-2024-2025/chimera.exe";
+static CHIMERA_URL_UNIX: &str =
+    "https://github.com/M00NLIG7/pandoras_box/releases/download/CCDC-2024-2025/chimera";
+static CHIMERA_URL_WIN: &str =
+    "https://github.com/M00NLIG7/pandoras_box/releases/download/CCDC-2024-2025/chimera.exe";
 static OUTPUT_PATH: &str = "/tmp/chimera";
 
 // Define a struct for mode configuration
@@ -63,12 +64,10 @@ const CHIMERA_MODES: [ModeConfig; 3] = [
     },
 ];
 */
-const CHIMERA_MODES: [ModeConfig; 1] = [
-    ModeConfig {
-        name: "all",
-        args: Some("-m 62"),
-    },
-];
+const CHIMERA_MODES: [ModeConfig; 1] = [ModeConfig {
+    name: "all",
+    args: Some("-m 62"),
+}];
 
 pub struct NetworkManager {
     enumerator: Enumerator,
@@ -298,18 +297,13 @@ impl NetworkManager {
     }
 
     async fn try_windows_winexe(&self, host: &Arc<Host>, password: &str) -> Result<OSConfig> {
-        WinexeConfig::password(
-            "Administrator",
-            password,
-            &host.ip,
-            Duration::from_secs(60),
-        )
-        .await
-        .map(windows_config)
-        .map_err(|e| {
-            warn!("Failed to create WinExe config for {}: {}", host.ip, e);
-            e.into()
-        })
+        WinexeConfig::password("Administrator", password, &host.ip, Duration::from_secs(60))
+            .await
+            .map(windows_config)
+            .map_err(|e| {
+                warn!("Failed to create WinExe config for {}: {}", host.ip, e);
+                e.into()
+            })
     }
 }
 
@@ -326,25 +320,34 @@ async fn fetch_with_retry(
 
     for attempt in 0..=MAX_RETRIES {
         match client.get(url).send().await {
-            Ok(response) => {
-                match response.text().await {
-                    Ok(text) => {
-                        let mut file = tokio::fs::File::create(filename).await?;
-                        file.write_all(text.as_bytes()).await?;
-                        info!("Successfully saved {} for {} to {}", uri_path, ip, filename);
-                        return Ok(());
-                    },
-                    Err(e) => {
-                        error!("Failed to read response from {} on attempt {}: {}", ip, attempt + 1, e);
-                        last_error = Some(format!("Failed to read response: {}", e));
-                        if attempt >= MAX_RETRIES {
-                            break;
-                        }
+            Ok(response) => match response.text().await {
+                Ok(text) => {
+                    let mut file = tokio::fs::File::create(filename).await?;
+                    file.write_all(text.as_bytes()).await?;
+                    info!("Successfully saved {} for {} to {}", uri_path, ip, filename);
+                    return Ok(());
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to read response from {} on attempt {}: {}",
+                        ip,
+                        attempt + 1,
+                        e
+                    );
+                    last_error = Some(format!("Failed to read response: {}", e));
+                    if attempt >= MAX_RETRIES {
+                        break;
                     }
                 }
             },
             Err(e) => {
-                error!("Failed to fetch {} from {} on attempt {}: {}", uri_path, ip, attempt + 1, e);
+                error!(
+                    "Failed to fetch {} from {} on attempt {}: {}",
+                    uri_path,
+                    ip,
+                    attempt + 1,
+                    e
+                );
                 last_error = Some(format!("Failed to fetch file: {}", e));
                 if attempt >= MAX_RETRIES {
                     break;
@@ -353,7 +356,12 @@ async fn fetch_with_retry(
         }
 
         if attempt < MAX_RETRIES {
-            info!("Retry attempt {} for {} after {}ms delay", attempt + 1, ip, delay_ms);
+            info!(
+                "Retry attempt {} for {} after {}ms delay",
+                attempt + 1,
+                ip,
+                delay_ms
+            );
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             delay_ms = std::cmp::min(delay_ms * 2, MAX_DELAY_MS); // Capped exponential backoff
         }
@@ -380,7 +388,10 @@ async fn fetch_with_retry(
             if let Err(e) = file.write_all(log_entry.as_bytes()).await {
                 warn!("Failed to write to failed_inventory_fetches.log: {}", e);
             } else {
-                info!("Logged failed fetch for {} to failed_inventory_fetches.log", ip);
+                info!(
+                    "Logged failed fetch for {} to failed_inventory_fetches.log",
+                    ip
+                );
             }
         }
         Err(e) => {
@@ -411,71 +422,71 @@ impl Orchestrator {
     /// uri_path: The path part of the URI (e.g., "inventory.json")
     /// output_prefix: Prefix for the output filename (e.g., "chimera_inventory")
 
-    async fn fetch_file(&self, hosts: &[Arc<Host>], uri_path: &str, output_prefix: &str) -> Result<()> {
-        info!("Starting file fetch for {} hosts, uri: {}", hosts.len(), uri_path);
+    async fn fetch_file(
+        &self,
+        hosts: &[Arc<Host>],
+        uri_path: &str,
+        output_prefix: &str,
+    ) -> Result<()> {
+        info!(
+            "Starting file fetch for {} hosts, uri: {}",
+            hosts.len(),
+            uri_path
+        );
 
         // Create client with short timeout to avoid long waits on failed hosts
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))  // 5 second timeout per request
-            .connect_timeout(Duration::from_secs(3))  // 3 second connection timeout
+            .timeout(Duration::from_secs(5)) // 5 second timeout per request
+            .connect_timeout(Duration::from_secs(3)) // 3 second connection timeout
             .build()
             .map_err(|e| Error::CommandError(format!("Failed to create HTTP client: {}", e)))?;
-        let futures: Vec<_> = hosts.iter().map(|host| {
-            let ip = host.ip.to_string();
-            let client = client.clone();
-            let uri_path = uri_path.to_string();
-            let output_prefix = output_prefix.to_string();
-            
-            async move {
-                let url = format!("http://{}:44372/{}", ip, uri_path);
-                let filename = format!("{}_{}.json", output_prefix, ip);
-                
-                info!("Fetching {} from {}", uri_path, url);
-                fetch_with_retry(&client, &url, &filename, &ip, &uri_path).await
-            }
-        }).collect();
+        let futures: Vec<_> = hosts
+            .iter()
+            .map(|host| {
+                let ip = host.ip.to_string();
+                let client = client.clone();
+                let uri_path = uri_path.to_string();
+                let output_prefix = output_prefix.to_string();
+
+                async move {
+                    let url = format!("http://{}:44372/{}", ip, uri_path);
+                    let filename = format!("{}_{}.json", output_prefix, ip);
+
+                    info!("Fetching {} from {}", uri_path, url);
+                    fetch_with_retry(&client, &url, &filename, &ip, &uri_path).await
+                }
+            })
+            .collect();
 
         // Join all futures and collect results
         let results = join_all(futures).await;
-        
+
         // Log results
         for (host, result) in hosts.iter().zip(results.into_iter()) {
             match result {
                 Ok(_) => info!("Successfully fetched {} from {}", uri_path, host.ip),
-                Err(e) => error!("Failed to fetch {} from {}: {}", uri_path, host.ip, e)
+                Err(e) => error!("Failed to fetch {} from {}: {}", uri_path, host.ip, e),
             }
         }
         Ok(())
     }
 
-     /// Convenience function specifically for fetching inventory
+    /// Convenience function specifically for fetching inventory
     async fn fetch_inventory(&self, hosts: &[Arc<Host>]) -> Result<()> {
-        self.fetch_file(hosts, "inventory.json", "chimera_inventory").await
+        self.fetch_file(hosts, "inventory.json", "chimera_inventory")
+            .await
     }
 
     /// Convenience function specifically for fetching application.log
     async fn fetch_application_log(&self, hosts: &[Arc<Host>]) -> Result<()> {
-        self.fetch_file(hosts, "application.log", "chimera_application_log").await
+        self.fetch_file(hosts, "application.log", "chimera_application_log")
+            .await
     }
 
-    fn generate_base64_download_command(url: &str) -> String {
-        // Create the VBScript content with better error handling
-        let vbs_script = format!(
-            "On Error Resume Next : Dim xhr : Set xhr = CreateObject(\"MSXML2.ServerXMLHTTP\") : xhr.Open \"GET\",\"{}\",False : xhr.Send : If Err.Number <> 0 Then WScript.Echo \"Error downloading: \" & Err.Description : WScript.Quit 1 : End If : Dim stream : Set stream = CreateObject(\"ADODB.Stream\") : stream.Open : stream.Type = 1 : stream.Write xhr.responseBody : stream.SaveToFile \"C:\\Temp\\chimera.exe\",2 : stream.Close : If Err.Number <> 0 Then WScript.Echo \"Error saving: \" & Err.Description : WScript.Quit 1 : End If : WScript.Echo \"Download complete\"",
-            url
-        );
-
-        // Base64 encode the VBScript
-        let encoded = base64::engine::general_purpose::STANDARD.encode(vbs_script);
-
-        // Generate the full command with verification - removed //B flag to see errors
-        format!(
-            "cmd.exe /c \"echo {} > C:\\Temp\\encoded.b64 && certutil -decode C:\\Temp\\encoded.b64 C:\\Temp\\dl.vbs && cscript //Nologo C:\\Temp\\dl.vbs && if exist C:\\Temp\\chimera.exe (echo SUCCESS: File exists && dir C:\\Temp\\chimera.exe) else (echo ERROR: File does not exist) && del C:\\Temp\\dl.vbs C:\\Temp\\encoded.b64\"",
-            encoded
-        )
-    }
-
-    async fn check_tool_exists<'a>(client: &Arc<dyn ClientWrapper>, tool: &str) -> Result<CommandOutput> {
+    async fn check_tool_exists<'a>(
+        client: &Arc<dyn ClientWrapper>,
+        tool: &str,
+    ) -> Result<CommandOutput> {
         client.exec(&cmd!(format!("command -v {}", tool))).await
     }
 
@@ -496,8 +507,18 @@ impl Orchestrator {
         };
 
         // Basic validation to prevent shell injection and ensure command stability
-        let host = host.replace('\'', "").replace('"', "").replace('`', "").replace('$', "").replace(';', "");
-        let path = path.replace('\'', "").replace('"', "").replace('`', "").replace('$', "").replace(';', "");
+        let host = host
+            .replace('\'', "")
+            .replace('"', "")
+            .replace('`', "")
+            .replace('$', "")
+            .replace(';', "");
+        let path = path
+            .replace('\'', "")
+            .replace('"', "")
+            .replace('`', "")
+            .replace('$', "")
+            .replace(';', "");
 
         (host, path)
     }
@@ -515,14 +536,14 @@ impl Orchestrator {
                     "wget --no-check-certificate {} -O {} 2>&1 && {} && echo 'Download validated' || (echo 'Download failed or file too small'; exit 1)",
                     url, OUTPUT_PATH, size_check
                 )
-            },
+            }
             "curl" => {
                 // Show progress, validate download succeeded and file size is correct
                 format!(
                     "curl -k -L {} -o {} 2>&1 && {} && echo 'Download validated' || (echo 'Download failed or file too small'; exit 1)",
                     url, OUTPUT_PATH, size_check
                 )
-            },
+            }
             "perl" => {
                 let (host, path) = Self::generate_perl_url_parts(url);
                 format!(
@@ -532,8 +553,8 @@ impl Orchestrator {
                     output = OUTPUT_PATH,
                     check = size_check
                 )
-            },
-            _ => String::new()
+            }
+            _ => String::new(),
         }
     }
 
@@ -546,7 +567,6 @@ impl Orchestrator {
         match Self::check_tool_exists(client, tool).await {
             Ok(output) => {
                 if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
-
                     let cmd = Self::generate_download_command(tool, CHIMERA_URL_UNIX);
                     let result = client.exec(&cmd!(cmd)).await;
                     Some(HostOperationResult {
@@ -558,12 +578,15 @@ impl Orchestrator {
                     None
                 }
             }
-            Err(_) => None
+            Err(_) => None,
         }
     }
 
-
-    async fn download_chimera(&self, communicator: &Communicator, host_map: HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)>{
+    async fn download_chimera(
+        &self,
+        communicator: &Communicator,
+        host_map: HashMap<String, Arc<Host>>,
+    ) -> Vec<(Arc<Host>, Result<()>)> {
         let mut final_results = Vec::new();
 
         // Run Windows and Unix downloads + execution concurrently
@@ -592,7 +615,8 @@ impl Orchestrator {
                     tokio::time::sleep(Duration::from_secs(3)).await;
 
                     // Execute immediately while SSH is still active
-                    self.execute_chimera_modes_for_os(&deployed_windows, OS::Windows).await;
+                    self.execute_chimera_modes_for_os(&deployed_windows, OS::Windows)
+                        .await;
                 }
 
                 download_results
@@ -603,17 +627,29 @@ impl Orchestrator {
                 let download_results = self.download_chimera_unix(communicator, &host_map).await;
 
                 // Immediately chmod while SSH connections are still active
-                let chmod_results = communicator.exec_by_os(&cmd!("chmod +x /tmp/chimera && ls -la /tmp/chimera"), OS::Unix).await;
+                let chmod_results = communicator
+                    .exec_by_os(
+                        &cmd!("chmod +x /tmp/chimera && ls -la /tmp/chimera"),
+                        OS::Unix,
+                    )
+                    .await;
                 for result in &chmod_results {
                     match &result.result {
                         Ok(output) => {
                             let stdout = String::from_utf8_lossy(&output.stdout);
-                            info!("Successfully set execute permission on chimera for {}", result.ip);
+                            info!(
+                                "Successfully set execute permission on chimera for {}",
+                                result.ip
+                            );
                             if !stdout.trim().is_empty() {
                                 info!("[{}] chmod verification: {}", result.ip, stdout.trim());
                             }
                             if !output.stderr.is_empty() {
-                                warn!("[{}] chmod stderr: {}", result.ip, String::from_utf8_lossy(&output.stderr).trim());
+                                warn!(
+                                    "[{}] chmod stderr: {}",
+                                    result.ip,
+                                    String::from_utf8_lossy(&output.stderr).trim()
+                                );
                             }
                         }
                         Err(e) => error!("Failed to chmod chimera on {}: {}", result.ip, e),
@@ -634,7 +670,8 @@ impl Orchestrator {
 
                 if !deployed_unix.is_empty() {
                     // Execute immediately while SSH is still active (no delay needed for Unix)
-                    self.execute_chimera_modes_for_os(&deployed_unix, OS::Unix).await;
+                    self.execute_chimera_modes_for_os(&deployed_unix, OS::Unix)
+                        .await;
                 }
 
                 download_results
@@ -647,53 +684,72 @@ impl Orchestrator {
         final_results
     }
 
-    async fn download_chimera_win(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
-       let windows_clients = communicator.get_clients_by_os(OS::Windows);
-       info!("Found {} Windows clients for download", windows_clients.len());
+    async fn download_chimera_win(
+        &self,
+        communicator: &Communicator,
+        host_map: &HashMap<String, Arc<Host>>,
+    ) -> Vec<(Arc<Host>, Result<()>)> {
+        let windows_clients = communicator.get_clients_by_os(OS::Windows);
+        info!(
+            "Found {} Windows clients for download",
+            windows_clients.len()
+        );
 
-       if windows_clients.is_empty() {
-           warn!("No Windows clients found, skipping Windows download");
-           return Vec::new();
-       }
+        if windows_clients.is_empty() {
+            warn!("No Windows clients found, skipping Windows download");
+            return Vec::new();
+        }
 
-       // Create temp directory and time sync
-       let mkdir_cmd = "cmd.exe /c md C:\\Temp 2>nul & w32tm /resync";
-       communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
+        // Create temp directory and time sync
+        let mkdir_cmd = "cmd.exe /c md C:\\Temp 2>nul & w32tm /resync";
+        communicator.exec_by_os(&cmd!(mkdir_cmd), OS::Windows).await;
 
-       // Multi-method download with fallbacks for Vista through Windows 11
-       // Method 1: curl (Win10 1803+), Method 2: PowerShell (Win7+), Method 3: bitsadmin (Vista+ - slowest, last resort)
-       // Validate file size is > 10MB (chimera.exe should be ~15MB)
-       // Note: Use single % for cmd.exe /c execution (not %% which is for .bat files)
-       let download_cmd = format!(
+        // Multi-method download with fallbacks for Vista through Windows 11
+        // Method 1: curl (Win10 1803+), Method 2: PowerShell (Win7+), Method 3: bitsadmin (Vista+ - slowest, last resort)
+        // Validate file size is > 10MB (chimera.exe should be ~15MB)
+        // Note: Use single % for cmd.exe /c execution (not %% which is for .bat files)
+        let download_cmd = format!(
            "cmd.exe /c \"((curl.exe --version >nul 2>&1 && curl.exe -k -L -o C:\\Temp\\chimera.exe {url} && echo curl completed) || (powershell -Command \"$ErrorActionPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try {{ Invoke-WebRequest -Uri '{url}' -OutFile 'C:\\Temp\\chimera.exe' -UseBasicParsing; Write-Host 'PowerShell WebRequest completed' }} catch {{ (New-Object System.Net.WebClient).DownloadFile('{url}', 'C:\\Temp\\chimera.exe'); Write-Host 'WebClient completed' }}\") || (bitsadmin /transfer ChimeraDownload /download /priority FOREGROUND {url} C:\\Temp\\chimera.exe && echo bitsadmin completed)) & if exist C:\\Temp\\chimera.exe (for %A in (C:\\Temp\\chimera.exe) do if %~zA GTR 10000000 (echo SUCCESS: Download validated) else (echo FAILED: File too small)) else (echo FAILED: File missing)\"",
            url = CHIMERA_URL_WIN
        );
 
-       info!("Downloading chimera to {} Windows hosts (curl/PowerShell/bitsadmin fallback chain)", windows_clients.len());
-       let download_results = communicator.exec_by_os(&cmd!(download_cmd), OS::Windows).await;
+        info!(
+            "Downloading chimera to {} Windows hosts (curl/PowerShell/bitsadmin fallback chain)",
+            windows_clients.len()
+        );
+        let download_results = communicator
+            .exec_by_os(&cmd!(download_cmd), OS::Windows)
+            .await;
 
-       // Log download validation results for Windows
-       for result in &download_results {
-           match &result.result {
-               Ok(output) => {
-                   let stdout = String::from_utf8_lossy(&output.stdout);
+        // Log download validation results for Windows
+        for result in &download_results {
+            match &result.result {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
 
-                   if stdout.contains("SUCCESS: Download validated") {
-                       info!("[{}] Windows chimera download validated successfully", result.ip);
-                   } else {
-                       error!("[{}] Windows download validation failed", result.ip);
-                   }
-               }
-               Err(e) => {
-                   error!("[{}] Windows download command failed: {}", result.ip, e);
-               }
-           }
-       }
+                    if stdout.contains("SUCCESS: Download validated") {
+                        info!(
+                            "[{}] Windows chimera download validated successfully",
+                            result.ip
+                        );
+                    } else {
+                        error!("[{}] Windows download validation failed", result.ip);
+                    }
+                }
+                Err(e) => {
+                    error!("[{}] Windows download command failed: {}", result.ip, e);
+                }
+            }
+        }
 
-       log_host_results(download_results, &host_map, "chimera download")
+        log_host_results(download_results, &host_map, "chimera download")
     }
 
-    async fn append_to_hosts_file(&self, communicator: &Communicator, os: OS) -> Vec<HostOperationResult<CommandOutput>> {
+    async fn append_to_hosts_file(
+        &self,
+        communicator: &Communicator,
+        os: OS,
+    ) -> Vec<HostOperationResult<CommandOutput>> {
         let hosts_file = match os {
             OS::Windows => "C:\\Windows\\System32\\drivers\\etc\\hosts",
             OS::Unix => "/etc/hosts",
@@ -712,24 +768,27 @@ impl Orchestrator {
                     hosts_file, hosts_file, hosts_file
                 );
                 final_results.extend(communicator.exec_by_os(&cmd!(command), os).await);
-            },
+            }
             OS::Windows => {
-               let command = format!(
+                let command = format!(
                    "cmd /C \"echo 140.82.116.4 github.com >> {} & echo 185.199.108.133 objects.githubusercontent.com >> {} & echo 185.199.109.133 objects.githubusercontent.com >> {} & echo 185.199.110.133 objects.githubusercontent.com >> {} & echo 185.199.111.133 objects.githubusercontent.com >> {} & echo 185.199.108.133 release-assets.githubusercontent.com >> {} & echo 185.199.109.133 release-assets.githubusercontent.com >> {} & echo 185.199.110.133 release-assets.githubusercontent.com >> {} & echo 185.199.111.133 release-assets.githubusercontent.com >> {} & echo 13.107.246.71 download.sysinternals.com >> {}\"",
                    hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file, hosts_file
                );
-               final_results.extend(communicator.exec_by_os(&cmd!(command), os).await);
-            },
+                final_results.extend(communicator.exec_by_os(&cmd!(command), os).await);
+            }
             OS::Unknown => {
                 warn!("Skipping hosts file operation for unknown OS type");
             }
-
-                }
+        }
 
         final_results
     }
 
-    async fn download_chimera_unix(&self, communicator: &Communicator, host_map: &HashMap<String, Arc<Host>>) -> Vec<(Arc<Host>, Result<()>)> {
+    async fn download_chimera_unix(
+        &self,
+        communicator: &Communicator,
+        host_map: &HashMap<String, Arc<Host>>,
+    ) -> Vec<(Arc<Host>, Result<()>)> {
         let unix_clients = communicator.get_clients_by_os(OS::Unix);
 
         // Parallelize downloads across all Unix hosts simultaneously
@@ -786,8 +845,15 @@ impl Orchestrator {
         log_host_results(final_results, &host_map, "chimera download")
     }
 
-    pub async fn run_with_hosts(&mut self, hosts: Vec<Arc<Host>>, network_password: &str) -> Result<()> {
-         info!("Starting Orchestrator run with {} pre-enumerated hosts", hosts.len());
+    pub async fn run_with_hosts(
+        &mut self,
+        hosts: Vec<Arc<Host>>,
+        network_password: &str,
+    ) -> Result<()> {
+        info!(
+            "Starting Orchestrator run with {} pre-enumerated hosts",
+            hosts.len()
+        );
 
         let start = std::time::Instant::now();
         // Step 2: Initialize communication
@@ -810,7 +876,6 @@ impl Orchestrator {
             }
         };
 
-
         let host_map: std::collections::HashMap<String, Arc<Host>> = connected_hosts
             .iter()
             .map(|h| (h.ip.clone(), Arc::clone(h)))
@@ -821,7 +886,10 @@ impl Orchestrator {
             return Err(Error::CommandError("No hosts available".into()));
         }
 
-        info!("Initialized communication in {}s", start.elapsed().as_secs());
+        info!(
+            "Initialized communication in {}s",
+            start.elapsed().as_secs()
+        );
 
         /*
 
@@ -838,7 +906,6 @@ impl Orchestrator {
             })
             .collect();
         */
-
 
         let communicator = match self.network_manager.get_communicator() {
             Some(comm) => comm,
@@ -860,10 +927,16 @@ impl Orchestrator {
         for result in &windows_hosts_results {
             match &result.result {
                 Ok(_) => info!("Successfully appended Windows hosts file on {}", result.ip),
-                Err(e) => error!("Failed to append Windows hosts file on {}: {}", result.ip, e),
+                Err(e) => error!(
+                    "Failed to append Windows hosts file on {}: {}",
+                    result.ip, e
+                ),
             }
         }
-        info!("Appended Windows hosts file in {}s", start.elapsed().as_secs());
+        info!(
+            "Appended Windows hosts file in {}s",
+            start.elapsed().as_secs()
+        );
 
         let start = std::time::Instant::now();
         let deployment_results = self.download_chimera(&communicator, host_map).await;
@@ -885,7 +958,6 @@ impl Orchestrator {
                 })
                 .collect()
         };
-
 
         if deployed_hosts.is_empty() {
             error!("No hosts successfully deployed");
@@ -920,8 +992,15 @@ impl Orchestrator {
         info!("Cleaning up connections to all hosts");
         if let Some(communicator) = self.network_manager.get_communicator() {
             let disconnect_results = communicator.disconnect_all().await;
-            let successful_disconnects = disconnect_results.iter().filter(|r| r.result.is_ok()).count();
-            info!("Disconnected from {}/{} hosts", successful_disconnects, disconnect_results.len());
+            let successful_disconnects = disconnect_results
+                .iter()
+                .filter(|r| r.result.is_ok())
+                .count();
+            info!(
+                "Disconnected from {}/{} hosts",
+                successful_disconnects,
+                disconnect_results.len()
+            );
         }
 
         Ok(())
@@ -967,7 +1046,6 @@ impl Orchestrator {
             }
         };
 
-
         let host_map: std::collections::HashMap<String, Arc<Host>> = connected_hosts
             .iter()
             .map(|h| (h.ip.clone(), Arc::clone(h)))
@@ -978,7 +1056,10 @@ impl Orchestrator {
             return Err(Error::CommandError("No hosts available".into()));
         }
 
-        info!("Initialized communication in {}s", start.elapsed().as_secs());
+        info!(
+            "Initialized communication in {}s",
+            start.elapsed().as_secs()
+        );
 
         /*
 
@@ -995,7 +1076,6 @@ impl Orchestrator {
             })
             .collect();
         */
-
 
         let communicator = match self.network_manager.get_communicator() {
             Some(comm) => comm,
@@ -1017,10 +1097,16 @@ impl Orchestrator {
         for result in &windows_hosts_results {
             match &result.result {
                 Ok(_) => info!("Successfully appended Windows hosts file on {}", result.ip),
-                Err(e) => error!("Failed to append Windows hosts file on {}: {}", result.ip, e),
+                Err(e) => error!(
+                    "Failed to append Windows hosts file on {}: {}",
+                    result.ip, e
+                ),
             }
         }
-        info!("Appended Windows hosts file in {}s", start.elapsed().as_secs());
+        info!(
+            "Appended Windows hosts file in {}s",
+            start.elapsed().as_secs()
+        );
 
         let start = std::time::Instant::now();
         let deployment_results = self.download_chimera(&communicator, host_map).await;
@@ -1029,7 +1115,7 @@ impl Orchestrator {
         let deployed_hosts: Vec<Arc<Host>> = {
             // First collect IPs we've seen into a HashSet
             let mut seen_ips = HashSet::new();
-            
+
             deployment_results
                 .iter()
                 .filter_map(|(host, result)| match result {
@@ -1094,8 +1180,15 @@ impl Orchestrator {
         info!("Cleaning up connections to all hosts");
         if let Some(communicator) = self.network_manager.get_communicator() {
             let disconnect_results = communicator.disconnect_all().await;
-            let successful_disconnects = disconnect_results.iter().filter(|r| r.result.is_ok()).count();
-            info!("Disconnected from {}/{} hosts", successful_disconnects, disconnect_results.len());
+            let successful_disconnects = disconnect_results
+                .iter()
+                .filter(|r| r.result.is_ok())
+                .count();
+            info!(
+                "Disconnected from {}/{} hosts",
+                successful_disconnects,
+                disconnect_results.len()
+            );
         }
 
         Ok(())
@@ -1234,7 +1327,10 @@ impl Orchestrator {
         let communicator = match self.network_manager.get_communicator() {
             Some(comm) => comm,
             None => {
-                error!("Communicator not initialized for OS {:?} execution", os_filter);
+                error!(
+                    "Communicator not initialized for OS {:?} execution",
+                    os_filter
+                );
                 return;
             }
         };
@@ -1250,14 +1346,23 @@ impl Orchestrator {
         };
 
         for mode in CHIMERA_MODES.iter() {
-            info!("Executing {} mode on {:?} hosts {}", mode.name, os_filter, mode.args.unwrap_or(""));
+            info!(
+                "Executing {} mode on {:?} hosts {}",
+                mode.name,
+                os_filter,
+                mode.args.unwrap_or("")
+            );
 
-            let results = Self::execute_mode_on_hosts(communicator, mode, hosts, chimera_path).await;
+            let results =
+                Self::execute_mode_on_hosts(communicator, mode, hosts, chimera_path).await;
 
             for result in &results {
                 match &result.result {
                     Ok(_) => info!("Successfully executed {} mode on {}", mode.name, result.ip),
-                    Err(e) => error!("Failed to execute {} mode on {}: {}", mode.name, result.ip, e),
+                    Err(e) => error!(
+                        "Failed to execute {} mode on {}: {}",
+                        mode.name, result.ip, e
+                    ),
                 }
             }
         }
@@ -1271,12 +1376,12 @@ impl Orchestrator {
             Some(comm) => comm,
             None => return self.handle_missing_communicator_results(hosts),
         };
-        
+
         let mut all_results = Vec::new();
-        
+
         for mode in CHIMERA_MODES.iter() {
             info!("Processing mode: {} {}", mode.name, mode.args.unwrap_or(""));
-            
+
             // Create the futures but don't spawn them
             let windows_fut = if hosts.iter().any(|h| h.os == OS::Windows) {
                 Some(Self::execute_mode_windows(communicator, mode))
@@ -1298,7 +1403,6 @@ impl Orchestrator {
                     all_results.extend(u_res);
                 }
                 (Some(w), None) => {
-                    
                     all_results.extend(w.await);
                 }
                 (None, Some(u)) => {
@@ -1321,7 +1425,7 @@ impl Orchestrator {
                     if !stderr.trim().is_empty() {
                         warn!("[{}] Command stderr:\n{}", result.ip, stderr.trim());
                     }
-                },
+                }
                 Err(e) => error!("Failed to execute Chimera on {}: {}", result.ip, e),
             }
         }
@@ -1432,24 +1536,18 @@ async fn test_main() -> Result<()> {
         }),
     ];
 
-/*
-    let hosts = vec![
-        Arc::new(Host {
-            ip: "10.100.136.132".parse().unwrap(),
-            os: OS::Windows,
-            open_ports: vec![139, 22],
-        })];
+    /*
+        let hosts = vec![
+            Arc::new(Host {
+                ip: "10.100.136.132".parse().unwrap(),
+                os: OS::Windows,
+                open_ports: vec![139, 22],
+            })];
 
-*/
+    */
     // Initialize orchestrator with pre-enumerated hosts
     let mut orchestrator = Orchestrator::with_hosts(hosts.clone());
 
     // Run orchestrator with password
     orchestrator.run_with_hosts(hosts, "Cheesed2MeetU!").await
-}
-
-#[tokio::test]
-async fn test_win_cmdb64() -> Result<()> {
-    println!("{}", Orchestrator::generate_base64_download_command(CHIMERA_URL_WIN));
-    Ok(())
 }

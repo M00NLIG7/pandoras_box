@@ -4,19 +4,20 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+async-trait = "0.1.89"
 clap = {version = "4.5.17", features = ["cargo"]}
-flate2 = "1.0.33"
 futures = "0.3.30"
-surge-ping = "0.5.2"
+libc = "0.2.177"
 thiserror = "1.0.63"
-tokio = {version = "1.40.0"}
+tokio = {version = "1.40.0", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"]}
 rustrc = { path = "../rustrc" }
 log = "0.4.22"
-env_logger = "0.11.5"
 chrono = "0.4.39"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-base64 = "0.22.1"
 reqwest = { version = "0.12.7", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+env_logger = "0.11.5"
 
 [profile.release]
 opt-level = 3  # Optimize for size.
