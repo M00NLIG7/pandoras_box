@@ -8,7 +8,7 @@ use tokio::task::JoinSet;
 
 use super::artifact_store::ArtifactStore;
 use super::discovery::{DiscoveryConfig, DiscoveryRecord, TcpDiscovery};
-use super::mission::{HostPlan, HostState, MissionSpec};
+use super::mission::{HostPlan, HostState, MissionSpec, RetryPolicy};
 use super::planner::Planner;
 use super::policy::ExecutionPolicy;
 use super::reporting::write_asset_inventory_bundle;
@@ -97,11 +97,11 @@ impl PandorasBoxRunner {
 
             let collector_job = plan_collector_job(&self.spec, &store, &plan);
             stage_support_files(&collector_job.support_files()).await?;
-            let executor = SessionExecutor::new(
+            let executor = Arc::new(SessionExecutor::new(
                 Arc::clone(&factory),
                 policy,
                 collector_job.session_operations(),
-            );
+            ));
             let semaphore = Arc::clone(&semaphore);
             let store = store.clone();
             let spec = self.spec.clone();
@@ -112,11 +112,20 @@ impl PandorasBoxRunner {
                     .acquire_owned()
                     .await
                     .expect("Pandora's Box semaphore unexpectedly closed");
-                let report = executor.run(plan).await;
                 let report =
-                    collect_host_artifacts(&spec, &store, &collector_job.collect, report).await;
+                    execute_host_plan_with_retry(&spec.retry_policy, Arc::clone(&executor), plan)
+                        .await;
                 let report =
-                    cleanup_host_workspace(policy, factory, &collector_job.cleanup, report).await;
+                    collect_host_artifacts_with_retry(&spec, &store, &collector_job.collect, report)
+                        .await;
+                let report = cleanup_host_workspace_with_retry(
+                    &spec,
+                    policy,
+                    factory,
+                    &collector_job.cleanup,
+                    report,
+                )
+                .await;
                 store
                     .write_host_status(report.plan.target.ip, &render_report_json(&report))
                     .await?;
@@ -161,12 +170,15 @@ impl PandorasBoxRunner {
             let executor = Arc::clone(&executor);
             let semaphore = Arc::clone(&semaphore);
             let store = store.clone();
+            let retry_policy = self.spec.retry_policy.clone();
             tasks.spawn(async move {
                 let _permit = semaphore
                     .acquire_owned()
                     .await
                     .expect("Pandora's Box semaphore unexpectedly closed");
-                let report = executor.run(plan).await;
+                let report =
+                    execute_host_plan_with_retry(&retry_policy, Arc::clone(&executor), plan)
+                        .await;
                 store
                     .write_host_status(report.plan.target.ip, &render_report_json(&report))
                     .await?;
@@ -471,8 +483,9 @@ async fn collect_host_artifacts(
     {
         Ok(client) => client,
         Err(err) => {
-            return HostExecutionReport::failure(
+            return HostExecutionReport::terminal_failure(
                 collecting_plan,
+                super::scheduler::FailurePhase::Collect,
                 format!("failed to build HTTP client: {err}"),
             );
         }
@@ -491,7 +504,11 @@ async fn collect_host_artifacts(
     )
     .await
     {
-        return HostExecutionReport::failure(collecting_plan, err.to_string());
+        return HostExecutionReport::retryable_failure(
+            collecting_plan,
+            super::scheduler::FailurePhase::Collect,
+            err.to_string(),
+        );
     }
 
     if let Err(err) = fetch_host_http_artifact(
@@ -506,10 +523,46 @@ async fn collect_host_artifacts(
     )
     .await
     {
-        return HostExecutionReport::failure(collecting_plan, err.to_string());
+        return HostExecutionReport::retryable_failure(
+            collecting_plan,
+            super::scheduler::FailurePhase::Collect,
+            err.to_string(),
+        );
     }
 
     HostExecutionReport::success(collecting_plan, HostState::Complete)
+}
+
+async fn collect_host_artifacts_with_retry(
+    spec: &MissionSpec,
+    store: &ArtifactStore,
+    artifact_collection: &CollectorCollectJob,
+    report: HostExecutionReport,
+) -> HostExecutionReport {
+    if report.final_state != HostState::Complete {
+        return report;
+    }
+
+    let base_attempt_count = report.attempt_count;
+    let max_attempts = spec.retry_policy.max_attempts.max(1);
+
+    for attempt in 1..=max_attempts {
+        let next_report = collect_host_artifacts(spec, store, artifact_collection, report.clone())
+            .await
+            .with_attempt_count(base_attempt_count.max(attempt));
+
+        if !matches!(
+            next_report.failure_disposition,
+            Some(super::scheduler::FailureDisposition::Retryable)
+        ) || attempt >= max_attempts
+        {
+            return next_report;
+        }
+
+        tokio::time::sleep(spec.retry_policy.backoff).await;
+    }
+
+    unreachable!("collect_host_artifacts_with_retry should always return");
 }
 
 async fn cleanup_host_workspace<F>(
@@ -545,6 +598,65 @@ where
     executor
         .run(report.plan.force_state(HostState::Queued))
         .await
+}
+
+async fn cleanup_host_workspace_with_retry<F>(
+    spec: &MissionSpec,
+    policy: ExecutionPolicy,
+    factory: Arc<F>,
+    cleanup: &CollectorCleanupJob,
+    report: HostExecutionReport,
+) -> HostExecutionReport
+where
+    F: SessionFactory + 'static,
+{
+    if report.final_state != HostState::Complete {
+        return report;
+    }
+
+    let base_attempt_count = report.attempt_count;
+    let max_attempts = spec.retry_policy.max_attempts.max(1);
+
+    for attempt in 1..=max_attempts {
+        let next_report =
+            cleanup_host_workspace(policy, Arc::clone(&factory), cleanup, report.clone())
+                .await
+                .with_attempt_count(base_attempt_count.max(attempt));
+
+        if !matches!(
+            next_report.failure_disposition,
+            Some(super::scheduler::FailureDisposition::Retryable)
+        ) || attempt >= max_attempts
+        {
+            return next_report;
+        }
+
+        tokio::time::sleep(spec.retry_policy.backoff).await;
+    }
+
+    unreachable!("cleanup_host_workspace_with_retry should always return");
+}
+
+async fn execute_host_plan_with_retry<E>(
+    retry_policy: &RetryPolicy,
+    executor: Arc<E>,
+    plan: HostPlan,
+) -> HostExecutionReport
+where
+    E: HostExecutor + Send + Sync + 'static,
+{
+    let max_attempts = retry_policy.max_attempts.max(1);
+
+    for attempt in 1..=max_attempts {
+        let report = executor.run(plan.clone()).await.with_attempt_count(attempt);
+        if !report.should_retry(max_attempts) {
+            return report;
+        }
+
+        tokio::time::sleep(retry_policy.backoff).await;
+    }
+
+    unreachable!("execute_host_plan_with_retry should always return");
 }
 
 async fn fetch_host_http_artifact(
@@ -677,18 +789,32 @@ fn render_report_json(report: &HostExecutionReport) -> String {
         .as_ref()
         .map(|error| format!("\"{}\"", escape_json(error)))
         .unwrap_or_else(|| "null".to_string());
+    let failure_phase = report
+        .failure_phase
+        .map(|phase| format!("\"{}\"", phase.as_str()))
+        .unwrap_or_else(|| "null".to_string());
+    let failure_disposition = report
+        .failure_disposition
+        .map(|disposition| format!("\"{}\"", disposition.as_str()))
+        .unwrap_or_else(|| "null".to_string());
 
     format!(
         concat!(
             "{{\n",
             "  \"ip\": \"{}\",\n",
             "  \"final_state\": \"{}\",\n",
-            "  \"error\": {}\n",
+            "  \"error\": {},\n",
+            "  \"failure_phase\": {},\n",
+            "  \"failure_disposition\": {},\n",
+            "  \"attempt_count\": {}\n",
             "}}\n"
         ),
         report.plan.target.ip,
         report.final_state.as_str(),
         error,
+        failure_phase,
+        failure_disposition,
+        report.attempt_count,
     )
 }
 
@@ -725,7 +851,9 @@ mod tests {
     use crate::runtime::mission::{
         HostPlan, HostState, HostTarget, MissionSpec, PlatformHint, TransportKind,
     };
-    use crate::runtime::scheduler::{HostExecutionReport, HostExecutor};
+    use crate::runtime::scheduler::{
+        FailureDisposition, FailurePhase, HostExecutionReport, HostExecutor,
+    };
     use crate::runtime::session_factory::{BoxedHostSession, SessionFactory};
     use crate::runtime::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
     use crate::runtime::workspace::{collector_plan, remote_workspace, CollectorPlan};
@@ -745,18 +873,79 @@ mod tests {
         delay: Duration,
         final_state: HostState,
         error: Option<String>,
+        failure_phase: Option<FailurePhase>,
+        failure_disposition: Option<FailureDisposition>,
+    }
+
+    impl ExecutorBehavior {
+        fn complete(delay: Duration) -> Self {
+            Self {
+                delay,
+                final_state: HostState::Complete,
+                error: None,
+                failure_phase: None,
+                failure_disposition: None,
+            }
+        }
+
+        fn failed(delay: Duration, error: impl Into<String>) -> Self {
+            Self {
+                delay,
+                final_state: HostState::Failed,
+                error: Some(error.into()),
+                failure_phase: None,
+                failure_disposition: None,
+            }
+        }
+
+        fn terminal_failure(
+            delay: Duration,
+            phase: FailurePhase,
+            error: impl Into<String>,
+        ) -> Self {
+            Self {
+                delay,
+                final_state: HostState::Failed,
+                error: Some(error.into()),
+                failure_phase: Some(phase),
+                failure_disposition: Some(FailureDisposition::Terminal),
+            }
+        }
+
+        fn retryable_failure(
+            delay: Duration,
+            phase: FailurePhase,
+            error: impl Into<String>,
+        ) -> Self {
+            Self {
+                delay,
+                final_state: HostState::Failed,
+                error: Some(error.into()),
+                failure_phase: Some(phase),
+                failure_disposition: Some(FailureDisposition::Retryable),
+            }
+        }
     }
 
     #[derive(Clone)]
     struct RecordingExecutor {
-        behaviors: Arc<HashMap<IpAddr, ExecutorBehavior>>,
+        behaviors: Arc<Mutex<HashMap<IpAddr, Vec<ExecutorBehavior>>>>,
         completions: Arc<Mutex<Vec<IpAddr>>>,
     }
 
     impl RecordingExecutor {
         fn new(entries: Vec<(IpAddr, ExecutorBehavior)>) -> Self {
+            Self::new_sequences(
+                entries
+                    .into_iter()
+                    .map(|(ip, behavior)| (ip, vec![behavior]))
+                    .collect(),
+            )
+        }
+
+        fn new_sequences(entries: Vec<(IpAddr, Vec<ExecutorBehavior>)>) -> Self {
             Self {
-                behaviors: Arc::new(entries.into_iter().collect()),
+                behaviors: Arc::new(Mutex::new(entries.into_iter().collect())),
                 completions: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -774,8 +963,16 @@ mod tests {
         async fn run(&self, plan: HostPlan) -> HostExecutionReport {
             let behavior = self
                 .behaviors
-                .get(&plan.target.ip)
-                .cloned()
+                .lock()
+                .expect("behaviors lock should be available")
+                .get_mut(&plan.target.ip)
+                .and_then(|behaviors| {
+                    if behaviors.len() > 1 {
+                        Some(behaviors.remove(0))
+                    } else {
+                        behaviors.first().cloned()
+                    }
+                })
                 .expect("behavior should exist for host");
             tokio::time::sleep(behavior.delay).await;
             self.completions
@@ -785,12 +982,35 @@ mod tests {
 
             match behavior.final_state {
                 HostState::Complete => HostExecutionReport::success(plan, HostState::Complete),
-                HostState::Failed => HostExecutionReport::failure(
-                    plan,
-                    behavior
-                        .error
-                        .unwrap_or_else(|| "synthetic failure".to_string()),
-                ),
+                HostState::Failed => match (
+                    behavior.failure_phase,
+                    behavior.failure_disposition,
+                ) {
+                    (Some(phase), Some(FailureDisposition::Retryable)) => {
+                        HostExecutionReport::retryable_failure(
+                            plan,
+                            phase,
+                            behavior
+                                .error
+                                .unwrap_or_else(|| "synthetic failure".to_string()),
+                        )
+                    }
+                    (Some(phase), Some(FailureDisposition::Terminal)) => {
+                        HostExecutionReport::terminal_failure(
+                            plan,
+                            phase,
+                            behavior
+                                .error
+                                .unwrap_or_else(|| "synthetic failure".to_string()),
+                        )
+                    }
+                    _ => HostExecutionReport::failure(
+                        plan,
+                        behavior
+                            .error
+                            .unwrap_or_else(|| "synthetic failure".to_string()),
+                    ),
+                },
                 state => HostExecutionReport::success(plan, state),
             }
         }
@@ -1549,19 +1769,11 @@ mod tests {
         let executor = Arc::new(RecordingExecutor::new(vec![
             (
                 fast.host.ip,
-                ExecutorBehavior {
-                    delay: Duration::from_millis(150),
-                    final_state: HostState::Complete,
-                    error: None,
-                },
+                ExecutorBehavior::complete(Duration::from_millis(150)),
             ),
             (
                 slow.host.ip,
-                ExecutorBehavior {
-                    delay: Duration::from_millis(10),
-                    final_state: HostState::Complete,
-                    error: None,
-                },
+                ExecutorBehavior::complete(Duration::from_millis(10)),
             ),
         ]));
         let records = stream::iter(vec![
@@ -1608,27 +1820,15 @@ mod tests {
         let executor = Arc::new(RecordingExecutor::new(vec![
             (
                 first.host.ip,
-                ExecutorBehavior {
-                    delay: Duration::from_millis(20),
-                    final_state: HostState::Complete,
-                    error: None,
-                },
+                ExecutorBehavior::complete(Duration::from_millis(20)),
             ),
             (
                 failed.host.ip,
-                ExecutorBehavior {
-                    delay: Duration::from_millis(10),
-                    final_state: HostState::Failed,
-                    error: Some("auth failed".to_string()),
-                },
+                ExecutorBehavior::failed(Duration::from_millis(10), "auth failed"),
             ),
             (
                 late.host.ip,
-                ExecutorBehavior {
-                    delay: Duration::from_millis(20),
-                    final_state: HostState::Complete,
-                    error: None,
-                },
+                ExecutorBehavior::complete(Duration::from_millis(20)),
             ),
         ]));
         let records = stream::iter(vec![
@@ -1664,6 +1864,82 @@ mod tests {
                 .await
                 .is_ok()
         );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn runner_retries_retryable_host_failures_and_records_attempts() {
+        let root = temp_root("streaming-retryable");
+        let runner = PandorasBoxRunner::new(spec(root.clone()));
+        let retried = record(24);
+        let executor = Arc::new(RecordingExecutor::new_sequences(vec![(
+            retried.host.ip,
+            vec![
+                ExecutorBehavior::retryable_failure(
+                    Duration::from_millis(5),
+                    FailurePhase::Connect,
+                    "connection reset by peer",
+                ),
+                ExecutorBehavior::complete(Duration::from_millis(5)),
+            ],
+        )]));
+
+        let summary = runner
+            .run_with_stream_and_executor(stream::iter(vec![retried.clone()]), Arc::clone(&executor))
+            .await
+            .expect("retryable failures should recover");
+
+        assert_eq!(summary.completed_hosts, 1);
+        assert_eq!(summary.failed_hosts, 0);
+        assert_eq!(executor.completions(), vec![retried.host.ip, retried.host.ip]);
+
+        let status = tokio::fs::read_to_string(
+            root.join("mission-123/hosts/10.0.0.24/status.json"),
+        )
+        .await
+        .expect("status artifact should exist");
+        assert!(status.contains("\"final_state\": \"complete\""));
+        assert!(status.contains("\"attempt_count\": 2"));
+        assert!(status.contains("\"failure_phase\": null"));
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn runner_stops_after_terminal_host_failures() {
+        let root = temp_root("streaming-terminal");
+        let runner = PandorasBoxRunner::new(spec(root.clone()));
+        let failed = record(26);
+        let executor = Arc::new(RecordingExecutor::new_sequences(vec![(
+            failed.host.ip,
+            vec![
+                ExecutorBehavior::terminal_failure(
+                    Duration::from_millis(5),
+                    FailurePhase::Connect,
+                    "auth failed",
+                ),
+                ExecutorBehavior::complete(Duration::from_millis(5)),
+            ],
+        )]));
+
+        let summary = runner
+            .run_with_stream_and_executor(stream::iter(vec![failed.clone()]), Arc::clone(&executor))
+            .await
+            .expect("non-strict mode should return a summary");
+
+        assert_eq!(summary.completed_hosts, 0);
+        assert_eq!(summary.failed_hosts, 1);
+        assert_eq!(executor.completions(), vec![failed.host.ip]);
+
+        let status = tokio::fs::read_to_string(
+            root.join("mission-123/hosts/10.0.0.26/status.json"),
+        )
+        .await
+        .expect("status artifact should exist");
+        assert!(status.contains("\"failure_phase\": \"connect\""));
+        assert!(status.contains("\"failure_disposition\": \"terminal\""));
+        assert!(status.contains("\"attempt_count\": 1"));
 
         let _ = tokio::fs::remove_dir_all(root).await;
     }

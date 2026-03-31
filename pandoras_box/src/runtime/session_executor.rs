@@ -5,7 +5,9 @@ use async_trait::async_trait;
 
 use super::mission::{HostPlan, HostState};
 use super::policy::{ExecutionPolicy, OperationKind};
-use super::scheduler::{HostExecutionReport, HostExecutor};
+use super::scheduler::{
+    FailureDisposition, FailurePhase, HostExecutionReport, HostExecutor,
+};
 use super::session_factory::SessionFactory;
 use super::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
 
@@ -110,13 +112,14 @@ impl<F> SessionExecutor<F> {
     ) -> HostExecutionReport {
         plan = match plan.transition(HostState::Connected) {
             Ok(plan) => plan,
-            Err(err) => return HostExecutionReport::failure(plan, err.to_string()),
+            Err(err) => return transition_failure(plan, FailurePhase::Connect, err),
         };
 
         for operation in &self.operations {
+            let phase = operation.phase();
             plan = match plan.transition(HostState::Executing) {
                 Ok(plan) => plan,
-                Err(err) => return HostExecutionReport::failure(plan, err.to_string()),
+                Err(err) => return transition_failure(plan, phase, err),
             };
 
             match operation {
@@ -124,15 +127,12 @@ impl<F> SessionExecutor<F> {
                     Ok(response) => {
                         if let Err(err) = validate_exec_response(request, &response) {
                             let _ = session.cleanup().await;
-                            return HostExecutionReport::failure(
-                                plan,
-                                format!("exec failed: {err}"),
-                            );
+                            return terminal_phase_failure(plan, phase, "exec failed", err);
                         }
                     }
                     Err(err) => {
                         let _ = session.cleanup().await;
-                        return HostExecutionReport::failure(plan, format!("exec failed: {err}"));
+                        return operation_transport_failure(plan, phase, "exec failed", err);
                     }
                 },
                 SessionOperation::CaptureExec {
@@ -142,24 +142,30 @@ impl<F> SessionExecutor<F> {
                     Ok(response) => {
                         if let Err(err) = write_exec_capture(local_path, request, &response).await {
                             let _ = session.cleanup().await;
-                            return HostExecutionReport::failure(
+                            return terminal_phase_failure(
                                 plan,
-                                format!("capture_exec failed: {err}"),
+                                phase,
+                                "capture_exec failed",
+                                err,
                             );
                         }
                         if let Err(err) = validate_exec_response(request, &response) {
                             let _ = session.cleanup().await;
-                            return HostExecutionReport::failure(
+                            return terminal_phase_failure(
                                 plan,
-                                format!("capture_exec failed: {err}"),
+                                phase,
+                                "capture_exec failed",
+                                err,
                             );
                         }
                     }
                     Err(err) => {
                         let _ = session.cleanup().await;
-                        return HostExecutionReport::failure(
+                        return operation_transport_failure(
                             plan,
-                            format!("capture_exec failed: {err}"),
+                            phase,
+                            "capture_exec failed",
+                            err,
                         );
                     }
                 },
@@ -170,12 +176,12 @@ impl<F> SessionExecutor<F> {
 
                     if let Err(err) = validate_remote_path(&transfer.remote_path) {
                         let _ = session.cleanup().await;
-                        return HostExecutionReport::failure(plan, format!("put failed: {err}"));
+                        return terminal_phase_failure(plan, phase, "put failed", err);
                     }
 
                     if let Err(err) = session.put(transfer).await {
                         let _ = session.cleanup().await;
-                        return HostExecutionReport::failure(plan, format!("put failed: {err}"));
+                        return operation_transport_failure(plan, phase, "put failed", err);
                     }
                 }
                 SessionOperation::GetFile { transfer } => {
@@ -185,12 +191,12 @@ impl<F> SessionExecutor<F> {
 
                     if let Err(err) = validate_remote_path(&transfer.remote_path) {
                         let _ = session.cleanup().await;
-                        return HostExecutionReport::failure(plan, format!("get failed: {err}"));
+                        return terminal_phase_failure(plan, phase, "get failed", err);
                     }
 
                     if let Err(err) = session.get(transfer).await {
                         let _ = session.cleanup().await;
-                        return HostExecutionReport::failure(plan, format!("get failed: {err}"));
+                        return operation_transport_failure(plan, phase, "get failed", err);
                     }
                 }
                 SessionOperation::EnsureDir { remote_dir } => {
@@ -204,17 +210,16 @@ impl<F> SessionExecutor<F> {
 
                     if let Err(err) = validate_remote_path(remote_dir) {
                         let _ = session.cleanup().await;
-                        return HostExecutionReport::failure(
-                            plan,
-                            format!("ensure_dir failed: {err}"),
-                        );
+                        return terminal_phase_failure(plan, phase, "ensure_dir failed", err);
                     }
 
                     if let Err(err) = session.ensure_dir(remote_dir).await {
                         let _ = session.cleanup().await;
-                        return HostExecutionReport::failure(
+                        return operation_transport_failure(
                             plan,
-                            format!("ensure_dir failed: {err}"),
+                            phase,
+                            "ensure_dir failed",
+                            err,
                         );
                     }
                 }
@@ -227,17 +232,21 @@ impl<F> SessionExecutor<F> {
                         Ok(response) => {
                             if let Err(err) = validate_exec_response(request, &response) {
                                 let _ = session.cleanup().await;
-                                return HostExecutionReport::failure(
+                                return terminal_phase_failure(
                                     plan,
-                                    format!("cleanup_exec failed: {err}"),
+                                    phase,
+                                    "cleanup_exec failed",
+                                    err,
                                 );
                             }
                         }
                         Err(err) => {
                             let _ = session.cleanup().await;
-                            return HostExecutionReport::failure(
+                            return operation_transport_failure(
                                 plan,
-                                format!("cleanup_exec failed: {err}"),
+                                phase,
+                                "cleanup_exec failed",
+                                err,
                             );
                         }
                     }
@@ -247,11 +256,11 @@ impl<F> SessionExecutor<F> {
 
         let complete_plan = match plan.transition(HostState::Complete) {
             Ok(plan) => plan,
-            Err(err) => return HostExecutionReport::failure(plan, err.to_string()),
+            Err(err) => return transition_failure(plan, FailurePhase::Cleanup, err),
         };
 
         if let Err(err) = session.cleanup().await {
-            return HostExecutionReport::failure(complete_plan, format!("cleanup failed: {err}"));
+            return terminal_phase_failure(complete_plan, FailurePhase::Cleanup, "cleanup failed", err);
         }
 
         HostExecutionReport::success(complete_plan, HostState::Complete)
@@ -313,6 +322,89 @@ fn is_absolute_remote_path(remote_path: &str) -> bool {
         })
 }
 
+impl SessionOperation {
+    fn phase(&self) -> FailurePhase {
+        match self {
+            Self::PutFile { .. } | Self::EnsureDir { .. } => FailurePhase::Stage,
+            Self::GetFile { .. } => FailurePhase::Collect,
+            Self::CleanupExec { .. } => FailurePhase::Cleanup,
+            Self::Exec { .. } | Self::CaptureExec { .. } => FailurePhase::Execute,
+        }
+    }
+}
+
+fn transition_failure(plan: HostPlan, phase: FailurePhase, err: impl std::fmt::Display) -> HostExecutionReport {
+    HostExecutionReport::terminal_failure(plan, phase, err.to_string())
+}
+
+fn terminal_phase_failure(
+    plan: HostPlan,
+    phase: FailurePhase,
+    context: &str,
+    err: impl std::fmt::Display,
+) -> HostExecutionReport {
+    HostExecutionReport::terminal_failure(plan, phase, format!("{context}: {err}"))
+}
+
+fn operation_transport_failure(
+    plan: HostPlan,
+    phase: FailurePhase,
+    context: &str,
+    err: impl std::fmt::Display,
+) -> HostExecutionReport {
+    let rendered = format!("{context}: {err}");
+    let disposition = phase_failure_disposition(phase, &rendered);
+    HostExecutionReport::failure_with_disposition(plan, phase, disposition, rendered)
+}
+
+fn phase_failure_disposition(phase: FailurePhase, error: &str) -> FailureDisposition {
+    if phase == FailurePhase::Execute || is_terminal_error(error) {
+        FailureDisposition::Terminal
+    } else {
+        FailureDisposition::Retryable
+    }
+}
+
+fn classify_connect_failure(plan: HostPlan, error: impl std::fmt::Display) -> HostExecutionReport {
+    let rendered = error.to_string();
+    let disposition = if is_terminal_error(&rendered) {
+        FailureDisposition::Terminal
+    } else {
+        FailureDisposition::Retryable
+    };
+    HostExecutionReport::failure_with_disposition(
+        plan,
+        FailurePhase::Connect,
+        disposition,
+        rendered,
+    )
+}
+
+fn is_terminal_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    [
+        "auth failed",
+        "authentication failed",
+        "permission denied",
+        "access denied",
+        "access is denied",
+        "host key verification failed",
+        "host key for",
+        "no ssh port",
+        "smb fallback is disabled",
+        "not valid for unix targets",
+        "remote path must be absolute",
+        "no usable transport",
+        "missing exit status",
+        "exit status",
+        "invalid ip",
+        "invalid subnet",
+        "unknown os",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 #[async_trait]
 impl<F> HostExecutor for SessionExecutor<F>
 where
@@ -321,7 +413,7 @@ where
     async fn run(&self, plan: HostPlan) -> HostExecutionReport {
         let mut plan = match plan.transition(HostState::Connecting) {
             Ok(plan) => plan,
-            Err(err) => return HostExecutionReport::failure(plan, err.to_string()),
+            Err(err) => return transition_failure(plan, FailurePhase::Connect, err),
         };
 
         let mut errors = Vec::new();
@@ -345,7 +437,7 @@ where
             errors.join("; ")
         };
 
-        HostExecutionReport::failure(plan, error)
+        classify_connect_failure(plan, error)
     }
 }
 
@@ -354,7 +446,9 @@ mod tests {
     use super::{SessionExecutor, SessionOperation};
     use crate::runtime::mission::{HostPlan, HostState, HostTarget, PlatformHint, TransportKind};
     use crate::runtime::policy::ExecutionPolicy;
-    use crate::runtime::scheduler::{HostExecutor, Scheduler};
+    use crate::runtime::scheduler::{
+        FailureDisposition, FailurePhase, HostExecutor, Scheduler,
+    };
     use crate::runtime::session_factory::{BoxedHostSession, SessionFactory};
     use crate::runtime::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
     use crate::Error;
@@ -370,6 +464,7 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConnectBehavior {
         AuthFail,
+        TransientFail,
         Success,
     }
 
@@ -526,6 +621,9 @@ mod tests {
                 ConnectBehavior::AuthFail => {
                     Err(Error::CommunicatorError("auth failed".to_string()))
                 }
+                ConnectBehavior::TransientFail => Err(Error::CommunicatorError(
+                    "connection reset by peer".to_string(),
+                )),
                 ConnectBehavior::Success => {
                     let template = self
                         .templates
@@ -820,6 +918,11 @@ mod tests {
             .as_deref()
             .expect("error should exist")
             .contains("cleanup failed"));
+        assert_eq!(report.failure_phase, Some(FailurePhase::Cleanup));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
     }
 
     #[tokio::test]
@@ -855,6 +958,11 @@ mod tests {
             .as_deref()
             .expect("error should exist")
             .contains("missing exit status"));
+        assert_eq!(report.failure_phase, Some(FailurePhase::Execute));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
     }
 
     #[tokio::test]
@@ -892,6 +1000,11 @@ mod tests {
             .as_deref()
             .expect("error should exist")
             .contains("exit status 23"));
+        assert_eq!(report.failure_phase, Some(FailurePhase::Execute));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
         let capture = tokio::fs::read_to_string(&capture_path)
             .await
             .expect("failed capture should still be written");
@@ -932,6 +1045,11 @@ mod tests {
             .as_deref()
             .expect("error should exist")
             .contains("remote path must be absolute"));
+        assert_eq!(report.failure_phase, Some(FailurePhase::Stage));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 
@@ -965,7 +1083,56 @@ mod tests {
             .as_deref()
             .expect("error should exist")
             .contains("remote path must be absolute"));
+        assert_eq!(report.failure_phase, Some(FailurePhase::Collect));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
         let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn session_executor_classifies_auth_connect_failures_as_terminal() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 30));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::UnixSsh),
+            ConnectBehavior::AuthFail,
+            template(0, false),
+        )]));
+        let executor = SessionExecutor::new(factory, ExecutionPolicy::default(), Vec::new());
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Failed);
+        assert_eq!(report.failure_phase, Some(FailurePhase::Connect));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+    }
+
+    #[tokio::test]
+    async fn session_executor_classifies_transient_connect_failures_as_retryable() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 31));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::UnixSsh),
+            ConnectBehavior::TransientFail,
+            template(0, false),
+        )]));
+        let executor = SessionExecutor::new(factory, ExecutionPolicy::default(), Vec::new());
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Failed);
+        assert_eq!(report.failure_phase, Some(FailurePhase::Connect));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Retryable)
+        );
     }
 
     #[tokio::test]

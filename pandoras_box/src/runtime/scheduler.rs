@@ -6,11 +6,54 @@ use tokio::sync::Semaphore;
 
 use super::mission::{HostPlan, HostState};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailurePhase {
+    Connect,
+    Stage,
+    Execute,
+    Collect,
+    Cleanup,
+    Unknown,
+}
+
+impl FailurePhase {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Stage => "stage",
+            Self::Execute => "execute",
+            Self::Collect => "collect",
+            Self::Cleanup => "cleanup",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureDisposition {
+    Retryable,
+    Terminal,
+}
+
+impl FailureDisposition {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retryable => "retryable",
+            Self::Terminal => "terminal",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostExecutionReport {
     pub plan: HostPlan,
     pub final_state: HostState,
     pub error: Option<String>,
+    pub failure_phase: Option<FailurePhase>,
+    pub failure_disposition: Option<FailureDisposition>,
+    pub attempt_count: u8,
 }
 
 impl HostExecutionReport {
@@ -20,16 +63,66 @@ impl HostExecutionReport {
             plan: plan.force_state(final_state),
             final_state,
             error: None,
+            failure_phase: None,
+            failure_disposition: None,
+            attempt_count: 1,
         }
     }
 
     #[must_use]
     pub fn failure(plan: HostPlan, error: impl Into<String>) -> Self {
+        Self::terminal_failure(plan, FailurePhase::Unknown, error)
+    }
+
+    #[must_use]
+    pub fn terminal_failure(
+        plan: HostPlan,
+        phase: FailurePhase,
+        error: impl Into<String>,
+    ) -> Self {
+        Self::failure_with_disposition(plan, phase, FailureDisposition::Terminal, error)
+    }
+
+    #[must_use]
+    pub fn retryable_failure(
+        plan: HostPlan,
+        phase: FailurePhase,
+        error: impl Into<String>,
+    ) -> Self {
+        Self::failure_with_disposition(plan, phase, FailureDisposition::Retryable, error)
+    }
+
+    #[must_use]
+    pub fn failure_with_disposition(
+        plan: HostPlan,
+        phase: FailurePhase,
+        disposition: FailureDisposition,
+        error: impl Into<String>,
+    ) -> Self {
         Self {
             plan: plan.force_state(HostState::Failed),
             final_state: HostState::Failed,
             error: Some(error.into()),
+            failure_phase: Some(phase),
+            failure_disposition: Some(disposition),
+            attempt_count: 1,
         }
+    }
+
+    #[must_use]
+    pub fn with_attempt_count(mut self, attempt_count: u8) -> Self {
+        self.attempt_count = attempt_count.max(1);
+        self
+    }
+
+    #[must_use]
+    pub fn should_retry(&self, max_attempts: u8) -> bool {
+        self.final_state == HostState::Failed
+            && matches!(
+                self.failure_disposition,
+                Some(FailureDisposition::Retryable)
+            )
+            && self.attempt_count < max_attempts.max(1)
     }
 }
 
