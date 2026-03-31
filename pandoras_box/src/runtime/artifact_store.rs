@@ -38,6 +38,21 @@ impl ArtifactStore {
     }
 
     #[must_use]
+    pub fn asset_inventory_json_path(&self) -> PathBuf {
+        self.mission_dir().join("asset_inventory.json")
+    }
+
+    #[must_use]
+    pub fn asset_inventory_markdown_path(&self) -> PathBuf {
+        self.mission_dir().join("asset_inventory.md")
+    }
+
+    #[must_use]
+    pub fn asset_inventory_csv_path(&self) -> PathBuf {
+        self.mission_dir().join("asset_inventory.csv")
+    }
+
+    #[must_use]
     pub fn hosts_dir(&self) -> PathBuf {
         self.mission_dir().join("hosts")
     }
@@ -97,6 +112,21 @@ impl ArtifactStore {
         tokio::fs::write(self.summary_path(), contents).await
     }
 
+    pub async fn write_asset_inventory_json(&self, contents: &str) -> io::Result<()> {
+        tokio::fs::create_dir_all(self.mission_dir()).await?;
+        tokio::fs::write(self.asset_inventory_json_path(), contents).await
+    }
+
+    pub async fn write_asset_inventory_markdown(&self, contents: &str) -> io::Result<()> {
+        tokio::fs::create_dir_all(self.mission_dir()).await?;
+        tokio::fs::write(self.asset_inventory_markdown_path(), contents).await
+    }
+
+    pub async fn write_asset_inventory_csv(&self, contents: &str) -> io::Result<()> {
+        tokio::fs::create_dir_all(self.mission_dir()).await?;
+        tokio::fs::write(self.asset_inventory_csv_path(), contents).await
+    }
+
     pub async fn write_host_plan(&self, ip: IpAddr, contents: &str) -> io::Result<()> {
         tokio::fs::create_dir_all(self.host_dir(ip)).await?;
         tokio::fs::write(self.host_plan_path(ip), contents).await
@@ -127,6 +157,10 @@ mod tests {
         assert_eq!(
             store.summary_path(),
             PathBuf::from("/tmp/pandoras-box/mission-123/summary.json")
+        );
+        assert_eq!(
+            store.asset_inventory_json_path(),
+            PathBuf::from("/tmp/pandoras-box/mission-123/asset_inventory.json")
         );
     }
 

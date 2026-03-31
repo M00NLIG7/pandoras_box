@@ -11,6 +11,7 @@ use super::discovery::{DiscoveryConfig, DiscoveryRecord, TcpDiscovery};
 use super::mission::{HostPlan, HostState, MissionSpec};
 use super::planner::Planner;
 use super::policy::ExecutionPolicy;
+use super::reporting::write_asset_inventory_bundle;
 use super::scheduler::{HostExecutionReport, HostExecutor};
 use super::session_executor::{SessionExecutor, SessionOperation};
 use super::session_factory::SessionFactory;
@@ -207,6 +208,7 @@ impl PandorasBoxRunner {
                 .count(),
         };
 
+        write_asset_inventory_bundle(store, &reports, discovered_hosts).await?;
         store.write_summary(&render_summary_json(&summary)).await?;
 
         if self.spec.strict_mode && summary.failed_hosts > 0 {
@@ -1087,9 +1089,131 @@ mod tests {
         assert!(json.contains("\"failed_hosts\": 1"));
     }
 
+    #[tokio::test]
+    async fn finalize_summary_writes_asset_inventory_bundle_for_completed_hosts() {
+        let root = temp_root("asset-inventory-complete");
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let runner = PandorasBoxRunner::new(spec(root.clone()));
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 41));
+        let plan = HostPlan::queued(
+            HostTarget {
+                ip,
+                platform: PlatformHint::Unix,
+                open_ports: vec![22],
+            },
+            vec![TransportKind::UnixSsh],
+        );
+
+        store
+            .ensure_layout(vec![ip])
+            .await
+            .expect("host layout should exist");
+        tokio::fs::write(
+            store.host_files_dir(ip).join("inventory.json"),
+            r#"{
+  "hostname": "lab",
+  "ip": "10.0.0.41",
+  "os": "Ubuntu 24.04",
+  "ports": [{"port": 22, "protocol": "TCP"}],
+  "services": [{"name": "sshd", "state": "OK", "startMode": "enabled", "status": "active"}],
+  "users": [{"name": "root", "uid": "0", "gid": "0", "isAdmin": true, "groups": ["root"], "isLocal": true}],
+  "shares": [],
+  "containers": []
+}"#,
+        )
+        .await
+        .expect("inventory fixture should exist");
+
+        let summary = runner
+            .finalize_summary(
+                &store,
+                1,
+                vec![HostExecutionReport::success(plan, HostState::Complete)],
+            )
+            .await
+            .expect("summary finalization should succeed");
+
+        assert_eq!(summary.completed_hosts, 1);
+        assert!(
+            tokio::fs::read_to_string(root.join("mission-123/asset_inventory.json"))
+                .await
+                .expect("asset inventory json should exist")
+                .contains("\"hostname\": \"lab\"")
+        );
+        assert!(
+            tokio::fs::read_to_string(root.join("mission-123/asset_inventory.md"))
+                .await
+                .expect("asset inventory markdown should exist")
+                .contains(
+                    "| 10.0.0.41 | complete | unix | lab | Ubuntu 24.04 | 22 | root | sshd | - |"
+                )
+        );
+        assert!(
+            tokio::fs::read_to_string(root.join("mission-123/asset_inventory.csv"))
+                .await
+                .expect("asset inventory csv should exist")
+                .contains("10.0.0.41,complete,unix,lab,Ubuntu 24.04,22,root,sshd,-,")
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn finalize_summary_asset_inventory_includes_failed_hosts_without_inventory() {
+        let root = temp_root("asset-inventory-failed");
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let runner = PandorasBoxRunner::new(spec(root.clone()));
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42));
+        let plan = HostPlan::queued(
+            HostTarget {
+                ip,
+                platform: PlatformHint::Windows,
+                open_ports: vec![2222, 445],
+            },
+            vec![TransportKind::WindowsSsh],
+        );
+
+        store
+            .ensure_layout(vec![ip])
+            .await
+            .expect("host layout should exist");
+
+        let summary = runner
+            .finalize_summary(
+                &store,
+                1,
+                vec![HostExecutionReport::failure(
+                    plan,
+                    "ssh connect failed: timeout waiting for banner",
+                )],
+            )
+            .await
+            .expect("summary finalization should still succeed");
+
+        assert_eq!(summary.failed_hosts, 1);
+        assert!(
+            tokio::fs::read_to_string(root.join("mission-123/asset_inventory.json"))
+                .await
+                .expect("asset inventory json should exist")
+                .contains("\"error\": \"ssh connect failed: timeout waiting for banner\"")
+        );
+        assert!(
+            tokio::fs::read_to_string(root.join("mission-123/asset_inventory.md"))
+                .await
+                .expect("asset inventory markdown should exist")
+                .contains("| 10.0.0.42 | failed | windows | - | - | 2222,445 | - | - | - | ssh connect failed: timeout waiting for banner |")
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
     #[test]
     fn collector_url_formats_ipv4_targets() {
-        let url = collector_url(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)), 44372, "/inventory.json");
+        let url = collector_url(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+            44372,
+            "/inventory.json",
+        );
 
         assert_eq!(url, "http://10.0.0.9:44372/inventory.json");
     }

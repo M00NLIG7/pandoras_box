@@ -3,6 +3,7 @@ pub mod discovery;
 pub mod mission;
 pub mod planner;
 pub mod policy;
+pub mod reporting;
 pub mod runner;
 pub mod scheduler;
 pub mod session_executor;
@@ -18,6 +19,7 @@ pub use mission::{
 };
 pub use planner::Planner;
 pub use policy::{ExecutionPolicy, OperationKind, PolicyViolation};
+pub use reporting::{AssetInventoryBundle, AssetInventoryHost};
 pub use runner::{PandorasBoxRunSummary, PandorasBoxRunner};
 pub use scheduler::{HostExecutionReport, HostExecutor, Scheduler};
 pub use session_executor::{SessionExecutor, SessionOperation};
