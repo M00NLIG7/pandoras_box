@@ -48,15 +48,23 @@ absolute_path() {
 
 ensure_nat_forward() {
   local rule_name="$1"
-  local host_port="$2"
-  local guest_port="$3"
+  local host_ip="$2"
+  local host_port="$3"
+  local guest_port="$4"
   local vm_info
 
   vm_info="$(VBoxManage showvminfo "$VM_NAME" --machinereadable)"
-  if ! printf '%s\n' "$vm_info" | grep -Fq ",tcp,,${host_port},,${guest_port}\""; then
-    printf 'Adding Tiny11 NAT forward %s (%s -> %s)\n' "$rule_name" "$host_port" "$guest_port"
-    VBoxManage controlvm "$VM_NAME" natpf1 "${rule_name},tcp,,${host_port},,${guest_port}"
+  if printf '%s\n' "$vm_info" | grep -Fq "\"${rule_name},tcp,${host_ip},${host_port},,${guest_port}\""; then
+    return 0
   fi
+
+  if printf '%s\n' "$vm_info" | grep -Fq "\"${rule_name},tcp,"; then
+    printf 'Rebinding Tiny11 NAT forward %s to %s:%s -> %s\n' "$rule_name" "$host_ip" "$host_port" "$guest_port"
+    VBoxManage controlvm "$VM_NAME" natpf1 delete "$rule_name"
+  else
+    printf 'Adding Tiny11 NAT forward %s (%s:%s -> %s)\n' "$rule_name" "$host_ip" "$host_port" "$guest_port"
+  fi
+  VBoxManage controlvm "$VM_NAME" natpf1 "${rule_name},tcp,${host_ip},${host_port},,${guest_port}"
 }
 
 require_command VBoxManage
@@ -73,9 +81,9 @@ if [[ "$vm_state" != "running" ]]; then
   exit 1
 fi
 
-ensure_nat_forward "$SSH_RULE_NAME" "$SSH_PORT" 22
-ensure_nat_forward "$SMB_RULE_NAME" "$SMB_PORT" 445
-ensure_nat_forward "$COLLECTOR_RULE_NAME" "$COLLECTOR_PORT" "$COLLECTOR_PORT"
+ensure_nat_forward "$SSH_RULE_NAME" "$WINDOWS_HOST" "$SSH_PORT" 22
+ensure_nat_forward "$SMB_RULE_NAME" "$WINDOWS_HOST" "$SMB_PORT" 445
+ensure_nat_forward "$COLLECTOR_RULE_NAME" "$WINDOWS_HOST" "$COLLECTOR_PORT" "$COLLECTOR_PORT"
 
 nc -vz "$WINDOWS_HOST" "$SSH_PORT"
 nc -vz "$WINDOWS_HOST" "$SMB_PORT"

@@ -4,6 +4,7 @@ set -euo pipefail
 VM_NAME="${PANDORAS_BOX_WINDOWS_VM:-Tiny11}"
 SSH_HOST="${PANDORAS_BOX_LIVE_WINDOWS_SSH_HOST:-127.0.0.1}"
 SSH_PORT="${PANDORAS_BOX_LIVE_WINDOWS_SSH_PORT:-2222}"
+SMB_HOST="${PANDORAS_BOX_LIVE_WINDOWS_SMB_HOST:-$SSH_HOST}"
 SMB_PORT="${PANDORAS_BOX_LIVE_WINDOWS_SMB_PORT:-445}"
 WINDOWS_USER="${PANDORAS_BOX_LIVE_WINDOWS_SSH_USERNAME:-${SMOLDER_WINDOWS_USERNAME:-}}"
 WINDOWS_PASSWORD="${PANDORAS_BOX_LIVE_WINDOWS_SSH_PASSWORD:-${SMOLDER_WINDOWS_PASSWORD:-}}"
@@ -27,11 +28,30 @@ require_non_empty() {
   fi
 }
 
+run_guestcontrol() {
+  local remote_command="$1"
+
+  VBoxManage guestcontrol "$VM_NAME" run \
+    --exe "C:\\Windows\\System32\\cmd.exe" \
+    --username "$WINDOWS_USER" \
+    --password "$WINDOWS_PASSWORD" \
+    -- cmd.exe /c "$remote_command"
+}
+
+capture_guestcontrol() {
+  local remote_command="$1"
+
+  set +e
+  REMOTE_OUTPUT="$(run_guestcontrol "$remote_command" 2>&1 | tr -d '\r')"
+  REMOTE_STATUS=$?
+  set -e
+}
+
 run_remote() {
   local remote_command="$1"
   local timeout="${2:-60s}"
 
-  "$PSEXEC_BIN" "smb://${SSH_HOST}:${SMB_PORT}" \
+  "$PSEXEC_BIN" "smb://${SMB_HOST}:${SMB_PORT}" \
     --command "$remote_command" \
     --timeout "$timeout" \
     --username "$WINDOWS_USER" \
@@ -77,11 +97,20 @@ if ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >/dev/null 2>&1; then
   exit 0
 fi
 
-capture_remote 'cmd.exe /c sc query sshd'
+if command -v VBoxManage >/dev/null 2>&1; then
+  capture_guestcontrol 'sc query sshd'
+else
+  capture_remote 'cmd.exe /c sc query sshd'
+fi
 if [[ "$REMOTE_STATUS" -eq 0 ]]; then
   printf 'Tiny11 already has sshd installed; ensuring the service is running.\n'
-  run_remote 'cmd.exe /c sc config sshd start= auto' >/dev/null || true
-  run_remote 'cmd.exe /c sc start sshd' >/dev/null || true
+  if command -v VBoxManage >/dev/null 2>&1; then
+    run_guestcontrol 'sc config sshd start= auto' >/dev/null || true
+    run_guestcontrol 'sc start sshd' >/dev/null || true
+  else
+    run_remote 'cmd.exe /c sc config sshd start= auto' >/dev/null || true
+    run_remote 'cmd.exe /c sc start sshd' >/dev/null || true
+  fi
   if wait_for_ssh; then
     exit 0
   fi
