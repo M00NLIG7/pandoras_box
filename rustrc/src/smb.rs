@@ -1,10 +1,10 @@
+use rand::Rng;
 use std::io::{Read, Write};
 use std::net::IpAddr;
-use tokio::net::{lookup_host, TcpStream, ToSocketAddrs};
-use tokio::io::AsyncWriteExt;
-use tokio::io::AsyncReadExt;
 use std::time::Duration;
-use rand::Rng;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::{lookup_host, TcpStream, ToSocketAddrs};
 
 const SMB_COM_NEGOTIATE: u8 = 0x72;
 
@@ -17,7 +17,10 @@ fn write_u32_be(v: u32) -> [u8; 4] {
 }
 
 fn read_u32_be(bytes: &[u8]) -> u32 {
-    ((bytes[0] as u32) << 24) | ((bytes[1] as u32) << 16) | ((bytes[2] as u32) << 8) | (bytes[3] as u32)
+    ((bytes[0] as u32) << 24)
+        | ((bytes[1] as u32) << 16)
+        | ((bytes[2] as u32) << 8)
+        | (bytes[3] as u32)
 }
 
 struct SMBCommand {
@@ -28,7 +31,11 @@ struct SMBCommand {
 
 impl SMBCommand {
     fn new(command: u8, parameters: Vec<u8>, data: Vec<u8>) -> Self {
-        SMBCommand { command, parameters, data }
+        SMBCommand {
+            command,
+            parameters,
+            data,
+        }
     }
 
     fn pack(&self) -> Vec<u8> {
@@ -97,7 +104,10 @@ struct NetBIOSSessionService {
 
 impl NetBIOSSessionService {
     async fn connect<A: ToSocketAddrs>(addr: A, timeout: Duration) -> std::io::Result<Self> {
-        let addr = lookup_host(addr).await?.next().ok_or_else(|| std::io::ErrorKind::AddrNotAvailable)?;
+        let addr = lookup_host(addr)
+            .await?
+            .next()
+            .ok_or_else(|| std::io::ErrorKind::AddrNotAvailable)?;
 
         let stream = tokio::time::timeout(timeout, TcpStream::connect(addr)).await??;
         // let stream = TcpStream::connect_timeout(&addr.to_socket_addrs().next().unwrap(), timeout)?;
@@ -105,7 +115,9 @@ impl NetBIOSSessionService {
     }
 
     async fn send_packet(&mut self, data: &[u8]) -> crate::Result<()> {
-        self.stream.write_all(&write_u32_be(data.len() as u32)).await?;
+        self.stream
+            .write_all(&write_u32_be(data.len() as u32))
+            .await?;
         self.stream.write_all(data).await?;
         Ok(())
     }
@@ -127,7 +139,12 @@ fn create_smb_negotiate_packet(flags1: u8, flags2: u16, nego_data: &[u8]) -> New
     packet
 }
 
-pub async fn negotiate_session(server: &IpAddr, port: u16, timeout: Duration, extended_security: bool) -> crate::Result<Option<Vec<u8>>> {
+pub async fn negotiate_session(
+    server: &IpAddr,
+    port: u16,
+    timeout: Duration,
+    extended_security: bool,
+) -> crate::Result<Option<Vec<u8>>> {
     const FLAGS1_PATHCASELESS: u8 = 0x08;
     const FLAGS1_CANONICALIZED_PATHS: u8 = 0x10;
     const FLAGS2_EXTENDED_SECURITY: u16 = 0x0800;

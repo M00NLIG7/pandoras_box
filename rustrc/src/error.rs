@@ -42,4 +42,3 @@ impl From<russh_keys::Error> for Error {
 
 /// A custom `Result` type for our client operations.
 pub type Result<T> = std::result::Result<T, Error>;
-

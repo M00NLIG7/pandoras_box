@@ -679,11 +679,18 @@ impl Session for WinexeContainer {
         };
 
         // Always cleanup firewall rule regardless of success/failure
-        if let Err(e) = self.exec(&crate::cmd!(format!(
-            "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
-            port_number
-        ))).await {
-            log::warn!("Failed to cleanup firewall rule for port {}: {}", port_number, e);
+        if let Err(e) = self
+            .exec(&crate::cmd!(format!(
+                "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
+                port_number
+            )))
+            .await
+        {
+            log::warn!(
+                "Failed to cleanup firewall rule for port {}: {}",
+                port_number,
+                e
+            );
         }
 
         result
@@ -720,7 +727,10 @@ impl Session for WinexeContainer {
             match TcpStream::connect(&socket).await {
                 Ok(s) => {
                     if attempt > 0 {
-                        log::info!("Connection for file transfer succeeded on attempt {}/20", attempt + 1);
+                        log::info!(
+                            "Connection for file transfer succeeded on attempt {}/20",
+                            attempt + 1
+                        );
                     }
                     stream = Some(s);
                     break;
@@ -755,11 +765,18 @@ impl Session for WinexeContainer {
         };
 
         // Always cleanup firewall rule regardless of success/failure
-        if let Err(e) = self.exec(&crate::cmd!(format!(
-            "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
-            port_number
-        ))).await {
-            log::warn!("Failed to cleanup firewall rule for port {}: {}", port_number, e);
+        if let Err(e) = self
+            .exec(&crate::cmd!(format!(
+                "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
+                port_number
+            )))
+            .await
+        {
+            log::warn!(
+                "Failed to cleanup firewall rule for port {}: {}",
+                port_number,
+                e
+            );
         }
 
         result

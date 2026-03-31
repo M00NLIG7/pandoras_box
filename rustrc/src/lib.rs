@@ -3,8 +3,8 @@ use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
 use std::process::Command;
 
-pub mod error;
 pub mod client;
+pub mod error;
 
 pub mod traits;
 pub use traits::*;
@@ -21,11 +21,11 @@ pub mod stateful_process;
 #[cfg(feature = "telnet")]
 pub mod telnet;
 
+#[cfg(feature = "winexe")]
+pub mod smb;
 /// Gate behind winexe feature
 #[cfg(feature = "winexe")]
 pub mod winexe;
-#[cfg(feature = "winexe")]
-pub mod smb;
 
 /// Gate behind winrm feature
 #[cfg(feature = "winrm")]
@@ -49,7 +49,6 @@ pub mod macros {
     }
 }
 
-
 pub fn get_local_ip() -> String {
     // Read and parse /proc/net/route
     let default_route = match get_default_route() {
@@ -72,15 +71,20 @@ struct RouteEntry {
 fn get_default_route() -> Option<RouteEntry> {
     let file = File::open("/proc/net/route").ok()?;
     let reader = BufReader::new(file);
-    
-    for line in reader.lines().skip(1) { // Skip header
+
+    for line in reader.lines().skip(1) {
+        // Skip header
         let line = line.ok()?;
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() >= 2 {
             let interface = fields[0].to_string();
             let destination = u32::from_str_radix(fields[1], 16).ok()?;
-            if destination == 0 { // 0.0.0.0 is the default route
-                return Some(RouteEntry { interface, destination });
+            if destination == 0 {
+                // 0.0.0.0 is the default route
+                return Some(RouteEntry {
+                    interface,
+                    destination,
+                });
             }
         }
     }
@@ -92,7 +96,7 @@ fn get_interface_ip(interface: &str) -> Option<Ipv4Addr> {
         .args(&["addr", "show", interface])
         .output()
         .ok()?;
-    
+
     let output = String::from_utf8_lossy(&output.stdout);
     for line in output.lines() {
         if line.contains("inet ") {
@@ -113,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_macro() {
-        let cmd = cmd!("ls", "-l","-a");
+        let cmd = cmd!("ls", "-l", "-a");
         assert_eq!(cmd.get_cmd(), "ls");
         assert_eq!(cmd.get_args(), &vec!["-l", "-a"]);
     }

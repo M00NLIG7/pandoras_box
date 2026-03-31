@@ -3,14 +3,18 @@ use async_trait::async_trait;
 use byteorder::{BigEndian, WriteBytesExt};
 use russh::client;
 use russh_keys::key::PrivateKeyWithHashAlg;
+use russh_keys::known_hosts::{
+    check_known_hosts, check_known_hosts_path, known_host_keys, known_host_keys_path,
+};
 use russh_keys::load_secret_key;
 use russh_keys::ssh_key::public::PublicKey;
 use std::{
+    borrow::Cow,
     net::{IpAddr, SocketAddr},
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 use tokio::{
     io::AsyncWriteExt,
@@ -27,6 +31,13 @@ pub struct SSHSession {
     config: SSHConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostKeyPolicy {
+    AcceptAny,
+    MatchKnownHostsIfPresent,
+    RequireKnownHosts,
+}
+
 #[derive(Debug, Clone)]
 pub enum SSHConfig {
     Key {
@@ -34,12 +45,14 @@ pub enum SSHConfig {
         socket: SocketAddr,
         key_path: PathBuf,
         inactivity_timeout: Duration,
+        host_key_policy: HostKeyPolicy,
     },
     Password {
         username: String,
         socket: SocketAddr,
         password: String,
         inactivity_timeout: Duration,
+        host_key_policy: HostKeyPolicy,
     },
 }
 
@@ -64,11 +77,29 @@ impl SSHConfig {
         key_path: P,
         inactivity_timeout: Duration,
     ) -> crate::Result<Self> {
+        Self::key_with_policy(
+            username,
+            socket,
+            key_path,
+            inactivity_timeout,
+            HostKeyPolicy::AcceptAny,
+        )
+        .await
+    }
+
+    pub async fn key_with_policy<U: Into<String>, S: ToSocketAddrs, P: Into<PathBuf>>(
+        username: U,
+        socket: S,
+        key_path: P,
+        inactivity_timeout: Duration,
+        host_key_policy: HostKeyPolicy,
+    ) -> crate::Result<Self> {
         Ok(SSHConfig::Key {
             username: username.into(),
             socket: Self::resolve_socket(socket).await?,
             key_path: key_path.into(),
             inactivity_timeout,
+            host_key_policy,
         })
     }
 
@@ -78,11 +109,29 @@ impl SSHConfig {
         socket: S,
         inactivity_timeout: Duration,
     ) -> crate::Result<Self> {
+        Self::password_with_policy(
+            username,
+            password,
+            socket,
+            inactivity_timeout,
+            HostKeyPolicy::AcceptAny,
+        )
+        .await
+    }
+
+    pub async fn password_with_policy<U: Into<String>, S: ToSocketAddrs, P: Into<String>>(
+        username: U,
+        password: P,
+        socket: S,
+        inactivity_timeout: Duration,
+        host_key_policy: HostKeyPolicy,
+    ) -> crate::Result<Self> {
         Ok(SSHConfig::Password {
             username: username.into(),
             socket: Self::resolve_socket(socket).await?,
             password: password.into(),
             inactivity_timeout,
+            host_key_policy,
         })
     }
 }
@@ -200,61 +249,7 @@ impl Session for SSHSession {
         file_contents: Arc<Vec<u8>>,
         remote_dest: &str,
     ) -> crate::Result<()> {
-        info!(
-            dest = remote_dest,
-            size = file_contents.len(),
-            "Starting file transfer"
-        );
-
-        let sftp = match self.create_sftp_session_with_retry().await {
-            Ok(session) => {
-                debug!("Successfully created SFTP session");
-                session
-            }
-            Err(e) => {
-                error!(error = ?e, "Failed to create SFTP session");
-                return Err(e);
-            }
-        };
-
-        match self
-            .try_direct_file_transfer(&sftp, &file_contents, remote_dest)
-            .await
-        {
-            Ok(()) => {
-                info!("File transfer completed successfully");
-                Ok(())
-            }
-            Err(e) => {
-                warn!(
-                    error = ?e,
-                    "Direct file transfer failed, attempting batch transfer"
-                );
-
-                let _ = sftp.remove_file(remote_dest).await;
-
-                match self.ensure_transfer_helper(&sftp).await {
-                    Ok(()) => {
-                        debug!("Transfer helper ensured");
-                        match self.batch_transfer_file(file_contents, remote_dest).await {
-                            Ok(()) => {
-                                info!("Batch file transfer completed successfully");
-                                Ok(())
-                            }
-                            Err(e) => {
-                                error!(error = ?e, "Batch file transfer failed");
-                                let _ = sftp.remove_file(remote_dest).await;
-                                Err(e)
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(error = ?e, "Failed to ensure transfer helper");
-                        Err(e)
-                    }
-                }
-            }
-        }
+        self.transfer_file_with_timeout(file_contents, remote_dest).await
     }
 }
 
@@ -281,6 +276,89 @@ fn extract_disconnect_message(error_msg: &str) -> Option<String> {
     }
 
     None
+}
+
+fn is_windows_remote_path(path: &str) -> bool {
+    path.starts_with("C:\\")
+        || path.starts_with("c:\\")
+        || path.starts_with("C:/")
+        || path.starts_with("c:/")
+}
+
+fn normalized_sftp_path(remote_dest: &str) -> Cow<'_, str> {
+    if is_windows_remote_path(remote_dest) {
+        Cow::Owned(windows_sftp_path_candidates(remote_dest)[0].clone())
+    } else {
+        Cow::Borrowed(remote_dest)
+    }
+}
+
+fn push_unique_path(paths: &mut Vec<String>, candidate: String) {
+    if !paths.iter().any(|existing| existing.eq_ignore_ascii_case(&candidate)) {
+        paths.push(candidate);
+    }
+}
+
+fn windows_sftp_path_candidates(remote_dest: &str) -> Vec<String> {
+    let normalized = remote_dest.replace('\\', "/");
+    let mut candidates = Vec::new();
+
+    if let Some((drive, rest)) = normalized.split_once(":/") {
+        let rest = rest.trim_start_matches('/');
+        push_unique_path(&mut candidates, format!("/{drive}:/{rest}"));
+        push_unique_path(&mut candidates, format!("/{drive}/{rest}"));
+        push_unique_path(&mut candidates, format!("{drive}:/{rest}"));
+    } else {
+        push_unique_path(&mut candidates, normalized);
+    }
+
+    candidates
+}
+
+fn windows_parent_directories(remote_dest: &str) -> Option<Vec<String>> {
+    let normalized = remote_dest.replace('\\', "/");
+
+    let (prefix, rest) = if let Some(rest) = normalized.strip_prefix('/') {
+        if let Some((drive, remainder)) = rest.split_once(":/") {
+            (format!("/{drive}:"), remainder)
+        } else if let Some((drive, remainder)) = rest.split_once('/') {
+            if drive.len() != 1 || !drive.chars().all(|ch| ch.is_ascii_alphabetic()) {
+                return None;
+            }
+            (format!("/{drive}"), remainder)
+        } else {
+            return None;
+        }
+    } else if let Some((drive, remainder)) = normalized.split_once(":/") {
+        (format!("/{drive}:"), remainder)
+    } else {
+        return None;
+    };
+
+    let mut parts = rest
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        return Some(Vec::new());
+    }
+
+    parts.pop();
+
+    let mut current = format!("{prefix}/");
+    let mut parent_dirs = Vec::with_capacity(parts.len());
+    for part in parts {
+        if current.ends_with('/') {
+            current.push_str(part);
+        } else {
+            current.push('/');
+            current.push_str(part);
+        }
+        parent_dirs.push(current.clone());
+    }
+
+    Some(parent_dirs)
 }
 
 impl SSHSession {
@@ -348,7 +426,7 @@ impl SSHSession {
         &self,
         channel: &mut russh::Channel<russh::client::Msg>,
     ) -> crate::Result<CommandOutput> {
-        const TIMEOUT_SECONDS: u64 = 300;  // Increased from 120s to 5 minutes for long-running operations
+        const TIMEOUT_SECONDS: u64 = 300; // Increased from 120s to 5 minutes for long-running operations
         const BUFFER_CAPACITY: usize = 1024 * 1024; // 1MB initial capacity
 
         let processing = async {
@@ -358,14 +436,10 @@ impl SSHSession {
             // Track EOF and exit status
             let mut remote_eof_received = false;
             let mut exit_status = None;
-            let mut last_activity = std::time::Instant::now();
 
             loop {
                 match channel.wait().await {
                     Some(msg) => {
-                        // Update last activity timestamp on ANY message
-                        last_activity = std::time::Instant::now();
-
                         match msg {
                             russh::ChannelMsg::Data { ref data } => {
                                 if !data.is_empty() {
@@ -415,13 +489,6 @@ impl SSHSession {
                         break;
                     }
                 }
-
-                // Check for inactivity timeout (300 seconds of no messages)
-                // Long timeout needed for inventory collection and downloads that produce no intermediate output
-                if last_activity.elapsed() > Duration::from_secs(300) {
-                    warn!("Channel inactive for 300 seconds");
-                    break;
-                }
             }
 
             // Send EOF if we haven't received an exit status
@@ -453,7 +520,7 @@ impl SSHSession {
             }
         }
     }
-    
+
     #[instrument(skip(self))]
     async fn create_sftp_session(&self) -> crate::Result<russh_sftp::client::SftpSession> {
         debug!("Opening SSH channel for SFTP session");
@@ -506,7 +573,7 @@ impl SSHSession {
         }
     }
 
-    async fn transfer_file(
+    async fn transfer_file_with_timeout(
         &self,
         file_contents: Arc<Vec<u8>>,
         remote_dest: &str,
@@ -515,7 +582,7 @@ impl SSHSession {
 
         match tokio::time::timeout(
             TRANSFER_TIMEOUT,
-            self._transfer_file_inner(file_contents, remote_dest),
+            self.transfer_file_inner(file_contents, remote_dest),
         )
         .await
         {
@@ -526,12 +593,12 @@ impl SSHSession {
         }
     }
 
-    async fn _transfer_file_inner(
+    async fn transfer_file_inner(
         &self,
         file_contents: Arc<Vec<u8>>,
         remote_dest: &str,
     ) -> crate::Result<()> {
-        let is_windows = remote_dest.starts_with("C:\\") || remote_dest.starts_with("c:\\");
+        let is_windows = is_windows_remote_path(remote_dest);
 
         // For Windows paths, try SFTP once and then immediately try batch transfer
         if is_windows {
@@ -606,15 +673,37 @@ impl SSHSession {
                     _ => e
                 });
             }
-        };
+        }; 
 
+        if is_windows_remote_path(remote_dest) {
+            let mut failures = Vec::new();
+            for candidate in windows_sftp_path_candidates(remote_dest) {
+                match self
+                    .try_direct_file_transfer(&sftp, &file_contents, &candidate)
+                    .await
+                {
+                    Ok(()) => return Ok(()),
+                    Err(err) => {
+                        let _ = sftp.remove_file(&candidate).await;
+                        failures.push(format!("{candidate}: {err}"));
+                    }
+                }
+            }
+
+            return Err(crate::Error::FileTransferError(format!(
+                "SFTP Error: {}",
+                failures.join(" | ")
+            )));
+        }
+
+        let sftp_dest = normalized_sftp_path(remote_dest);
         match self
-            .try_direct_file_transfer(&sftp, &file_contents, remote_dest)
+            .try_direct_file_transfer(&sftp, &file_contents, sftp_dest.as_ref())
             .await
         {
             Ok(()) => Ok(()),
             Err(e) => {
-                let _ = sftp.remove_file(remote_dest).await;
+                let _ = sftp.remove_file(sftp_dest.as_ref()).await;
                 Err(e)
             }
         }
@@ -657,7 +746,7 @@ impl SSHSession {
 
     async fn verify_file_exists(&self, path: &str) -> crate::Result<bool> {
         // Windows paths need special handling
-        let cmd = if path.starts_with("C:\\") || path.starts_with("c:\\") {
+        let cmd = if is_windows_remote_path(path) {
             format!("cmd.exe /c if exist {} echo TRUE", path)
         } else {
             format!("cmd.exe /c if exist \"{}\" echo TRUE", path)
@@ -756,6 +845,21 @@ impl SSHSession {
         sftp: &russh_sftp::client::SftpSession,
         remote_dest: &str,
     ) -> crate::Result<()> {
+        if let Some(parent_dirs) = windows_parent_directories(remote_dest) {
+            for dir in parent_dirs {
+                if !sftp.try_exists(&dir).await.unwrap_or(false) {
+                    match sftp.create_dir(&dir).await {
+                        Ok(()) => {}
+                        Err(err) if sftp.try_exists(&dir).await.unwrap_or(false) => {
+                            debug!(path = %dir, error = ?err, "Windows SFTP directory appeared during creation");
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
+                }
+            }
+            return Ok(());
+        }
+
         let path = Path::new(remote_dest);
         if let Some(parent) = path.parent() {
             let mut current = String::with_capacity(remote_dest.len());
@@ -1176,8 +1280,10 @@ impl Config for SSHConfig {
                 inactivity_timeout,
                 username,
                 socket,
+                host_key_policy,
             } => {
-                let mut session = get_handle(*socket, *inactivity_timeout).await?;
+                let mut session =
+                    get_handle(*socket, *inactivity_timeout, *host_key_policy).await?;
 
                 let key_pair = load_secret_key(key_path, None)?;
                 let auth_res = session
@@ -1203,8 +1309,10 @@ impl Config for SSHConfig {
                 socket,
                 password,
                 inactivity_timeout,
+                host_key_policy,
             } => {
-                let mut session = get_handle(*socket, *inactivity_timeout).await?;
+                let mut session =
+                    get_handle(*socket, *inactivity_timeout, *host_key_policy).await?;
                 let auth_res = session.authenticate_password(username, password).await?;
 
                 if !auth_res {
@@ -1222,9 +1330,10 @@ impl Config for SSHConfig {
     }
 }
 
-async fn get_handle<S: ToSocketAddrs>(
-    socket: S,
+async fn get_handle(
+    socket: SocketAddr,
     timeout: Duration,
+    host_key_policy: HostKeyPolicy,
 ) -> crate::Result<russh::client::Handle<Handler>> {
     let config = client::Config {
         inactivity_timeout: Some(timeout),
@@ -1232,11 +1341,91 @@ async fn get_handle<S: ToSocketAddrs>(
     };
 
     let config = Arc::new(config);
-    let sh = Handler {};
+    let sh = Handler {
+        socket,
+        host_key_policy,
+    };
     Ok(client::connect(config, socket, sh).await?)
 }
 
-struct Handler {}
+struct Handler {
+    socket: SocketAddr,
+    host_key_policy: HostKeyPolicy,
+}
+
+fn verify_server_key(
+    socket: SocketAddr,
+    host_key_policy: HostKeyPolicy,
+    key: &PublicKey,
+    known_hosts_path: Option<&Path>,
+) -> crate::Result<()> {
+    let host = socket.ip().to_string();
+    let port = socket.port();
+
+    match host_key_policy {
+        HostKeyPolicy::AcceptAny => Ok(()),
+        HostKeyPolicy::MatchKnownHostsIfPresent => {
+            let known_entries =
+                lookup_known_hosts(&host, port, known_hosts_path).map_err(|err| {
+                    crate::Error::ConnectionError(format!(
+                        "known_hosts lookup failed for {socket}: {err}"
+                    ))
+                })?;
+
+            if known_entries.is_empty() {
+                return Ok(());
+            }
+
+            if check_known_host_match(&host, port, key, known_hosts_path).map_err(|err| {
+                crate::Error::ConnectionError(format!(
+                    "host key verification failed for {socket}: {err}"
+                ))
+            })? {
+                Ok(())
+            } else {
+                Err(crate::Error::ConnectionError(format!(
+                    "host key for {socket} is not present in known_hosts"
+                )))
+            }
+        }
+        HostKeyPolicy::RequireKnownHosts => {
+            if check_known_host_match(&host, port, key, known_hosts_path).map_err(|err| {
+                crate::Error::ConnectionError(format!(
+                    "host key verification failed for {socket}: {err}"
+                ))
+            })? {
+                Ok(())
+            } else {
+                Err(crate::Error::ConnectionError(format!(
+                    "host key for {socket} is not present in known_hosts"
+                )))
+            }
+        }
+    }
+}
+
+fn lookup_known_hosts(
+    host: &str,
+    port: u16,
+    known_hosts_path: Option<&Path>,
+) -> std::result::Result<Vec<(usize, PublicKey)>, russh_keys::Error> {
+    match known_hosts_path {
+        Some(path) => known_host_keys_path(host, port, path),
+        None => known_host_keys(host, port),
+    }
+}
+
+fn check_known_host_match(
+    host: &str,
+    port: u16,
+    key: &PublicKey,
+    known_hosts_path: Option<&Path>,
+) -> std::result::Result<bool, russh_keys::Error> {
+    match known_hosts_path {
+        Some(path) => check_known_hosts_path(host, port, key, path),
+        None => check_known_hosts(host, port, key),
+    }
+}
 
 #[async_trait]
 impl client::Handler for Handler {
@@ -1244,8 +1433,139 @@ impl client::Handler for Handler {
 
     async fn check_server_key(
         &mut self,
-        _key: &PublicKey,
+        key: &PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        Ok(true)
+        match verify_server_key(self.socket, self.host_key_policy, key, None) {
+            Ok(()) => Ok(true),
+            Err(err) => {
+                warn!(
+                    socket = %self.socket,
+                    policy = ?self.host_key_policy,
+                    error = %err,
+                    "rejecting SSH server key"
+                );
+                Ok(false)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        normalized_sftp_path, verify_server_key, windows_parent_directories,
+        windows_sftp_path_candidates, HostKeyPolicy,
+    };
+    use russh_keys::ssh_key::PublicKey;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const RSA_3072_PUBLIC_KEY: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCmjkeMm8k3JkNrf16eb5pG4bc77B6Mt3VN4saltsRV8vASpyWa/PlBgdaeldOaNJ5NK0gqU3KyiUNzHbdcc8572e7IUBDJS/rlaWARiSL4aos2VbNX0k56Z5zYp9m/bq5m9/mlb+PQkNBjIhimgpYNiq2TwBiYeA6tLb79cPtHA0cX5BLk/a5oUpLsiR4kI/f+Q98vVDKasKXXVh5YLkLobrruDB6er2A9fOcIUF0O4JCRLh/Dc161gE3fQrYTMQenbppZzfxrZfQ8YwLPvKjnqm+XRX+pbTtaJuj0EgTSzUK+EZxoSw8CNwiZpxrjwecTMVQ8w/srQmh4ABGuTqk0wP8HcI7hg+fpBv7kiejh5X/Oehxt+Puu85u9GVXb1a0av/vhJvUCBcuISvCA/z1wVJ0xdLhb1/ZiTDdTzyNbZQ0OQijzK+e1SlkNhp+3eGVZu3pNZvnTppwIXv3wg6kV1HodkWGgh1ayY7Buc52Z8okDYqvJat5CzOj5OaQNr/k= user@example.com";
+    const RSA_4096_PUBLIC_KEY: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC0WRHtxuxefSJhpIxGq4ibGFgwYnESPm8C3JFM88A1JJLoprenklrd7VJ+VH3Ov/bQwZwLyRU5dRmfR/SWTtIPWs7tToJVayKKDB+/qoXmM5ui/0CU2U4rCdQ6PdaCJdC7yFgpPL8WexjWN06+eSIKYz1AAXbx9rRv1iasslK/KUqtsqzVliagI6jl7FPO2GhRZMcso6LsZGgSxuYf/Lp0D/FcBU8GkeOo1Sx5xEt8H8bJcErtCe4Blb8JxcW6EXO3sReb4z+zcR07gumPgFITZ6hDA8sSNuvo/AlWg0IKTeZSwHHVknWdQqDJ0uczE837caBxyTZllDNIGkBjCIIOFzuTT76HfYc/7CTTGk07uaNkUFXKN79xDiFOX8JQ1ZZMZvGOTwWjuT9CqgdTvQRORbRWwOYv3MH8re9ykw3Ip6lrPifY7s6hOaAKry/nkGPMt40m1TdiW98MTIpooE7W+WXu96ax2l2OJvxX8QR7l+LFlKnkIEEJd/ItF1G22UmOjkVwNASTwza/hlY+8DoVvEmwum/nMgH2TwQT3bTQzF9s9DOJkH4d8p4Mw4gEDjNx0EgUFA91ysCAeUMQQyIvuR8HXXa+VcvhOOO5mmBcVhxJ3qUOJTyDBsT0932Zb4mNtkxdigoVxu+iiwk0vwtvKwGVDYdyMP5EAQeEIP1t0w== user@example.com";
+
+    fn temp_known_hosts_path(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("rustrc-known-hosts-{label}-{unique}"))
+    }
+
+    fn key(value: &str) -> PublicKey {
+        PublicKey::from_openssh(value).expect("test public key should parse")
+    }
+
+    #[test]
+    fn normalized_sftp_path_rewrites_windows_separators() {
+        assert_eq!(
+            normalized_sftp_path(r"C:\Temp\pandoras_box\chimera.exe"),
+            "/C:/Temp/pandoras_box/chimera.exe"
+        );
+    }
+
+    #[test]
+    fn windows_parent_directories_build_drive_aware_chain() {
+        assert_eq!(
+            windows_parent_directories(r"C:\Temp\pandoras_box\mission\chimera.exe"),
+            Some(vec![
+                "/C:/Temp".to_string(),
+                "/C:/Temp/pandoras_box".to_string(),
+                "/C:/Temp/pandoras_box/mission".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn windows_sftp_path_candidates_try_multiple_shapes() {
+        assert_eq!(
+            windows_sftp_path_candidates(r"C:\Temp\pandoras_box\chimera.exe"),
+            vec![
+                "/C:/Temp/pandoras_box/chimera.exe".to_string(),
+                "/C/Temp/pandoras_box/chimera.exe".to_string(),
+                "C:/Temp/pandoras_box/chimera.exe".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_parent_directories_support_drive_without_colon_segment() {
+        assert_eq!(
+            windows_parent_directories("/C/Temp/pandoras_box/mission/chimera.exe"),
+            Some(vec![
+                "/C/Temp".to_string(),
+                "/C/Temp/pandoras_box".to_string(),
+                "/C/Temp/pandoras_box/mission".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn match_known_hosts_if_present_accepts_unknown_host() {
+        let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 22);
+        let path = temp_known_hosts_path("unknown-host");
+
+        verify_server_key(
+            socket,
+            HostKeyPolicy::MatchKnownHostsIfPresent,
+            &key(RSA_3072_PUBLIC_KEY),
+            Some(&path),
+        )
+        .expect("unknown hosts should be accepted by match-if-present policy");
+    }
+
+    #[test]
+    fn match_known_hosts_if_present_rejects_changed_key() {
+        let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 22);
+        let path = temp_known_hosts_path("key-change");
+        std::fs::write(&path, format!("10.0.0.8 {RSA_3072_PUBLIC_KEY}\n"))
+            .expect("known_hosts fixture should be written");
+
+        let error = verify_server_key(
+            socket,
+            HostKeyPolicy::MatchKnownHostsIfPresent,
+            &key(RSA_4096_PUBLIC_KEY),
+            Some(&path),
+        )
+        .expect_err("changed keys should be rejected");
+
+        assert!(error.to_string().contains("host key verification failed"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn require_known_hosts_rejects_unknown_host() {
+        let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 22);
+        let path = temp_known_hosts_path("require-known");
+
+        let error = verify_server_key(
+            socket,
+            HostKeyPolicy::RequireKnownHosts,
+            &key(RSA_3072_PUBLIC_KEY),
+            Some(&path),
+        )
+        .expect_err("strict known_hosts policy should reject unseen hosts");
+
+        assert!(error.to_string().contains("is not present in known_hosts"));
     }
 }
