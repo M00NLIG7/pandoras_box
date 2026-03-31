@@ -9,6 +9,8 @@ struct LiveUnixCase {
     label: &'static str,
     host_env: &'static str,
     port_env: &'static str,
+    username_env: &'static str,
+    default_username: &'static str,
     password_env: &'static str,
     chimera_env: &'static str,
     artifact_root_env: &'static str,
@@ -33,6 +35,10 @@ fn artifact_root(case: &LiveUnixCase) -> PathBuf {
         .unwrap_or_else(|_| temp_root(case.label))
 }
 
+fn optional_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
 async fn run_live_unix_case(case: LiveUnixCase) {
     let chimera_path = PathBuf::from(required_env(case.chimera_env));
     assert!(
@@ -47,6 +53,9 @@ async fn run_live_unix_case(case: LiveUnixCase) {
     let ssh_port = required_env(case.port_env)
         .parse::<u16>()
         .expect("interop SSH port should be a valid u16");
+    let username = optional_env(case.username_env)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| case.default_username.to_string());
     let password = required_env(case.password_env);
     let artifact_root = artifact_root(&case);
     let mission_id = case.label.to_string();
@@ -55,7 +64,7 @@ async fn run_live_unix_case(case: LiveUnixCase) {
         targets: vec![target_ip],
         artifact_root: artifact_root.clone(),
         mission_id: mission_id.clone(),
-        unix_username: "root".to_string(),
+        unix_username: username,
         password,
         ssh_port,
         discovery_ports: vec![ssh_port],
@@ -149,6 +158,8 @@ async fn live_unix_ssh_target_collects_inventory_and_cleans_up() {
         label: "live-unix-ssh",
         host_env: "PANDORAS_BOX_LIVE_UNIX_SSH_HOST",
         port_env: "PANDORAS_BOX_LIVE_UNIX_SSH_PORT",
+        username_env: "PANDORAS_BOX_LIVE_UNIX_SSH_USERNAME",
+        default_username: "root",
         password_env: "PANDORAS_BOX_LIVE_UNIX_SSH_PASSWORD",
         chimera_env: "PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH",
         artifact_root_env: "PANDORAS_BOX_LIVE_UNIX_SSH_ARTIFACT_ROOT",
@@ -163,9 +174,27 @@ async fn live_alpine_ssh_target_collects_inventory_and_cleans_up() {
         label: "live-alpine-ssh",
         host_env: "PANDORAS_BOX_LIVE_ALPINE_SSH_HOST",
         port_env: "PANDORAS_BOX_LIVE_ALPINE_SSH_PORT",
+        username_env: "PANDORAS_BOX_LIVE_ALPINE_SSH_USERNAME",
+        default_username: "root",
         password_env: "PANDORAS_BOX_LIVE_ALPINE_SSH_PASSWORD",
         chimera_env: "PANDORAS_BOX_LIVE_ALPINE_CHIMERA_UNIX_PATH",
         artifact_root_env: "PANDORAS_BOX_LIVE_ALPINE_SSH_ARTIFACT_ROOT",
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires a BSD SSH target; run scripts/run-bsd-ssh-interop.sh"]
+async fn live_bsd_ssh_target_collects_inventory_and_cleans_up() {
+    run_live_unix_case(LiveUnixCase {
+        label: "live-bsd-ssh",
+        host_env: "PANDORAS_BOX_LIVE_BSD_SSH_HOST",
+        port_env: "PANDORAS_BOX_LIVE_BSD_SSH_PORT",
+        username_env: "PANDORAS_BOX_LIVE_BSD_SSH_USERNAME",
+        default_username: "root",
+        password_env: "PANDORAS_BOX_LIVE_BSD_SSH_PASSWORD",
+        chimera_env: "PANDORAS_BOX_LIVE_CHIMERA_BSD_PATH",
+        artifact_root_env: "PANDORAS_BOX_LIVE_BSD_SSH_ARTIFACT_ROOT",
     })
     .await;
 }
