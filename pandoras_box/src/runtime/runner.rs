@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::{Stream, StreamExt};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -30,6 +31,33 @@ pub struct PandorasBoxRunSummary {
     pub discovered_hosts: usize,
     pub completed_hosts: usize,
     pub failed_hosts: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+struct PersistedHostStatus {
+    ip: String,
+    final_state: String,
+    error: Option<String>,
+    failure_phase: Option<String>,
+    failure_disposition: Option<String>,
+    attempt_count: u8,
+    completed_phases: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResumeMode {
+    Fresh,
+    CollectOnly,
+    CleanupOnly,
+    SkipCompleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResumeCheckpoint {
+    mode: ResumeMode,
+    attempt_count: u8,
+    completed_phases: Vec<super::scheduler::FailurePhase>,
 }
 
 pub struct PandorasBoxRunner {
@@ -116,7 +144,7 @@ impl PandorasBoxRunner {
                     plan,
                     collector_job,
                 )
-                .await;
+                .await?;
                 store
                     .write_host_status(report.plan.target.ip, &render_report_json(&report))
                     .await?;
@@ -168,8 +196,7 @@ impl PandorasBoxRunner {
                     .await
                     .expect("Pandora's Box semaphore unexpectedly closed");
                 let report =
-                    execute_host_plan_with_retry(&retry_policy, Arc::clone(&executor), plan)
-                        .await;
+                    execute_host_plan_with_retry(&retry_policy, Arc::clone(&executor), plan).await;
                 store
                     .write_host_status(report.plan.target.ip, &render_report_json(&report))
                     .await?;
@@ -325,7 +352,7 @@ impl CollectorJobPlan {
             .unwrap_or_default()
     }
 
-    fn session_operations(&self) -> Vec<SessionOperation> {
+    fn stage_operations(&self) -> Vec<SessionOperation> {
         let mut operations = vec![SessionOperation::capture_exec(
             self.identity.command.clone(),
             self.identity.capture_path.clone(),
@@ -348,6 +375,12 @@ impl CollectorJobPlan {
             }
         }
 
+        operations
+    }
+
+    fn run_operations(&self) -> Vec<SessionOperation> {
+        let mut operations = Vec::new();
+
         operations.push(SessionOperation::capture_exec(
             self.run.collector_command.clone(),
             self.run.collector_capture_path.clone(),
@@ -357,11 +390,6 @@ impl CollectorJobPlan {
                 self.run.serve_command.clone(),
                 self.run.serve_capture_path.clone(),
             ));
-        }
-
-        match self.cleanup {
-            CollectorCleanupJob::SessionDisconnectOnly | CollectorCleanupJob::RemoteExec { .. } => {
-            }
         }
 
         operations
@@ -437,6 +465,147 @@ fn plan_collector_job(
     }
 }
 
+fn progress_report(
+    plan: &HostPlan,
+    state: HostState,
+    completed_phases: &[super::scheduler::FailurePhase],
+    attempt_count: u8,
+) -> HostExecutionReport {
+    HostExecutionReport::success(plan.force_state(state), state)
+        .with_completed_phases(completed_phases.to_vec())
+        .with_attempt_count(attempt_count)
+}
+
+fn phase_strings(
+    completed_phases: &[super::scheduler::FailurePhase],
+) -> Vec<String> {
+    completed_phases
+        .iter()
+        .map(|phase| phase.as_str().to_string())
+        .collect()
+}
+
+fn persisted_status_from_report(report: &HostExecutionReport) -> PersistedHostStatus {
+    PersistedHostStatus {
+        ip: report.plan.target.ip.to_string(),
+        final_state: report.final_state.as_str().to_string(),
+        error: report.error.clone(),
+        failure_phase: report
+            .failure_phase
+            .map(|phase| phase.as_str().to_string()),
+        failure_disposition: report
+            .failure_disposition
+            .map(|disposition| disposition.as_str().to_string()),
+        attempt_count: report.attempt_count.max(1),
+        completed_phases: phase_strings(&report.completed_phases),
+    }
+}
+
+fn infer_legacy_completed_phases(
+    final_state: HostState,
+    failure_phase: Option<super::scheduler::FailurePhase>,
+) -> Vec<super::scheduler::FailurePhase> {
+    use super::scheduler::FailurePhase::{Cleanup, Collect, Execute, Stage};
+
+    match (final_state, failure_phase) {
+        (HostState::Complete, _) => vec![Stage, Execute, Collect, Cleanup],
+        (HostState::Failed, Some(Cleanup)) => vec![Stage, Execute, Collect],
+        (HostState::Failed, Some(Collect)) => vec![Stage, Execute],
+        (HostState::Failed, Some(Execute)) => vec![Stage],
+        _ => Vec::new(),
+    }
+}
+
+fn parse_completed_phases(
+    status: &PersistedHostStatus,
+) -> Vec<super::scheduler::FailurePhase> {
+    let parsed = status
+        .completed_phases
+        .iter()
+        .filter_map(|phase| super::scheduler::FailurePhase::from_str(phase))
+        .collect::<Vec<_>>();
+
+    if parsed.is_empty() {
+        let final_state = HostState::from_str(&status.final_state).unwrap_or(HostState::Failed);
+        let failure_phase = status
+            .failure_phase
+            .as_deref()
+            .and_then(super::scheduler::FailurePhase::from_str);
+        infer_legacy_completed_phases(final_state, failure_phase)
+    } else {
+        parsed
+    }
+}
+
+async fn host_artifacts_exist(store: &ArtifactStore, ip: std::net::IpAddr) -> bool {
+    tokio::fs::metadata(store.host_inventory_path(ip)).await.is_ok()
+        && tokio::fs::metadata(store.host_application_log_path(ip))
+            .await
+            .is_ok()
+}
+
+async fn load_resume_checkpoint(
+    store: &ArtifactStore,
+    plan: &HostPlan,
+) -> Result<ResumeCheckpoint> {
+    let raw = match store.read_host_status(plan.target.ip).await {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ResumeCheckpoint {
+                mode: ResumeMode::Fresh,
+                attempt_count: 0,
+                completed_phases: Vec::new(),
+            });
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    let status: PersistedHostStatus = serde_json::from_str(&raw).map_err(|err| {
+        Error::CommunicatorError(format!(
+            "failed to parse {}: {err}",
+            store.host_status_path(plan.target.ip).display()
+        ))
+    })?;
+
+    let completed_phases = parse_completed_phases(&status);
+    let final_state = HostState::from_str(&status.final_state).unwrap_or(HostState::Failed);
+    let artifacts_exist = host_artifacts_exist(store, plan.target.ip).await;
+
+    let mode = if final_state == HostState::Complete && artifacts_exist {
+        ResumeMode::SkipCompleted
+    } else if completed_phases.contains(&super::scheduler::FailurePhase::Collect)
+        && artifacts_exist
+    {
+        ResumeMode::CleanupOnly
+    } else if completed_phases.contains(&super::scheduler::FailurePhase::Execute) {
+        ResumeMode::CollectOnly
+    } else {
+        ResumeMode::Fresh
+    };
+
+    Ok(ResumeCheckpoint {
+        mode,
+        attempt_count: status.attempt_count.max(1),
+        completed_phases,
+    })
+}
+
+async fn write_checkpoint(store: &ArtifactStore, report: &HostExecutionReport) -> Result<()> {
+    store
+        .write_host_status(report.plan.target.ip, &render_report_json(report))
+        .await?;
+    Ok(())
+}
+
+fn skipped_resume_report(
+    plan: &HostPlan,
+    checkpoint: &ResumeCheckpoint,
+) -> HostExecutionReport {
+    HostExecutionReport::success(plan.clone(), HostState::Complete)
+        .with_attempt_count(checkpoint.attempt_count.max(1))
+        .with_completed_phases(checkpoint.completed_phases.clone())
+}
+
 async fn stage_support_files(files: &[LocalSupportFilePlan]) -> Result<()> {
     for file in files {
         if let Some(parent) = file.staged_path.parent() {
@@ -483,14 +652,14 @@ async fn collect_host_artifacts(
     };
     let ip = collecting_plan.target.ip;
 
+    let completed_phases = report.completed_phases.clone();
+
     if let Err(err) = fetch_host_http_artifact(
         &client,
         ip,
         spec.collector_port,
         inventory_endpoint,
-        store
-            .host_files_dir(ip)
-            .join(http_artifact_filename(inventory_endpoint)),
+        store.host_files_dir(ip).join(http_artifact_filename(inventory_endpoint)),
         spec.retry_policy.backoff,
     )
     .await
@@ -499,7 +668,8 @@ async fn collect_host_artifacts(
             collecting_plan,
             super::scheduler::FailurePhase::Collect,
             err.to_string(),
-        );
+        )
+        .with_completed_phases(completed_phases);
     }
 
     if let Err(err) = fetch_host_http_artifact(
@@ -507,9 +677,7 @@ async fn collect_host_artifacts(
         ip,
         spec.collector_port,
         log_endpoint,
-        store
-            .host_logs_dir(ip)
-            .join(http_artifact_filename(log_endpoint)),
+        store.host_logs_dir(ip).join(http_artifact_filename(log_endpoint)),
         spec.retry_policy.backoff,
     )
     .await
@@ -518,10 +686,13 @@ async fn collect_host_artifacts(
             collecting_plan,
             super::scheduler::FailurePhase::Collect,
             err.to_string(),
-        );
+        )
+        .with_completed_phases(completed_phases);
     }
 
     HostExecutionReport::success(collecting_plan, HostState::Complete)
+        .with_completed_phases(completed_phases)
+        .mark_phase_completed(super::scheduler::FailurePhase::Collect)
 }
 
 async fn collect_host_artifacts_with_retry(
@@ -580,6 +751,7 @@ async fn disconnect_host_session(
             super::scheduler::FailurePhase::Cleanup,
             format!("cleanup failed: {err}"),
         )
+        .with_completed_phases(report.completed_phases)
         .with_attempt_count(report.attempt_count),
     }
 }
@@ -599,7 +771,7 @@ where
     }
 
     if matches!(cleanup, CollectorCleanupJob::SessionDisconnectOnly) {
-        return report;
+        return report.mark_phase_completed(super::scheduler::FailurePhase::Cleanup);
     }
 
     let base_attempt_count = report.attempt_count;
@@ -609,10 +781,15 @@ where
     let mut next_report = cleanup_executor
         .run_connected_session(cleanup_plan.clone(), &mut **session, false)
         .await
+        .with_completed_phases(report.completed_phases.clone())
         .with_attempt_count(base_attempt_count.max(1));
 
     if !next_report.should_retry(max_attempts) {
-        return next_report;
+        return if next_report.final_state == HostState::Complete {
+            next_report.mark_phase_completed(super::scheduler::FailurePhase::Cleanup)
+        } else {
+            next_report
+        };
     }
 
     for attempt in 2..=max_attempts {
@@ -621,7 +798,9 @@ where
         let mut reconnected = match cleanup_executor.connect_session(&cleanup_plan).await {
             Ok(session) => session,
             Err(report) => {
-                let report = report.with_attempt_count(base_attempt_count.max(attempt));
+                let report = report
+                    .with_completed_phases(next_report.completed_phases.clone())
+                    .with_attempt_count(base_attempt_count.max(attempt));
                 if !report.should_retry(max_attempts) {
                     return report;
                 }
@@ -632,16 +811,21 @@ where
         next_report = cleanup_executor
             .run_connected_session(cleanup_plan.clone(), &mut *reconnected, false)
             .await
+            .with_completed_phases(report.completed_phases.clone())
             .with_attempt_count(base_attempt_count.max(attempt));
 
         *session = reconnected;
 
         if !next_report.should_retry(max_attempts) {
-            return next_report;
+            return if next_report.final_state == HostState::Complete {
+                next_report.mark_phase_completed(super::scheduler::FailurePhase::Cleanup)
+            } else {
+                next_report
+            };
         }
     }
 
-    unreachable!("cleanup_host_workspace_with_live_session should always return");
+    unreachable!("cleanup_host_workspace_with_live_session should always return")
 }
 
 async fn execute_host_with_persistent_session_with_retry<F>(
@@ -651,65 +835,182 @@ async fn execute_host_with_persistent_session_with_retry<F>(
     factory: Arc<F>,
     plan: HostPlan,
     collector_job: CollectorJobPlan,
-) -> HostExecutionReport
+) -> Result<HostExecutionReport>
 where
     F: SessionFactory + 'static,
 {
+    let checkpoint = load_resume_checkpoint(store, &plan).await?;
+    if checkpoint.mode == ResumeMode::SkipCompleted {
+        let report = skipped_resume_report(&plan, &checkpoint);
+        write_checkpoint(store, &report).await?;
+        return Ok(report);
+    }
+
     let max_attempts = spec.retry_policy.max_attempts.max(1);
-    let stage_executor = SessionExecutor::new(
-        Arc::clone(&factory),
-        policy,
-        collector_job.session_operations(),
-    );
+    let stage_executor =
+        SessionExecutor::new(Arc::clone(&factory), policy, collector_job.stage_operations());
+    let run_executor =
+        SessionExecutor::new(Arc::clone(&factory), policy, collector_job.run_operations());
     let cleanup_executor = SessionExecutor::new(
         factory,
         policy,
         cleanup_session_operations(&collector_job.cleanup),
     );
 
-    for attempt in 1..=max_attempts {
+    for local_attempt in 1..=max_attempts {
+        let attempt = checkpoint.attempt_count.saturating_add(local_attempt);
         let connect_plan = match plan.transition(HostState::Connecting) {
             Ok(plan) => plan,
             Err(err) => {
-                return HostExecutionReport::terminal_failure(
+                return Ok(HostExecutionReport::terminal_failure(
                     plan,
                     super::scheduler::FailurePhase::Connect,
                     err.to_string(),
-                );
+                )
+                .with_completed_phases(checkpoint.completed_phases.clone())
+                .with_attempt_count(attempt));
             }
         };
 
         let mut session = match stage_executor.connect_session(&connect_plan).await {
             Ok(session) => session,
             Err(report) => {
-                let report = report.with_attempt_count(attempt);
+                let report = report
+                    .with_completed_phases(checkpoint.completed_phases.clone())
+                    .with_attempt_count(attempt);
                 if !report.should_retry(max_attempts) {
-                    return report;
+                    write_checkpoint(store, &report).await?;
+                    return Ok(report);
                 }
                 tokio::time::sleep(spec.retry_policy.backoff).await;
                 continue;
             }
         };
 
-        let stage_report = stage_executor
-            .run_connected_session(connect_plan.clone(), &mut *session, false)
-            .await
-            .with_attempt_count(attempt);
-        if stage_report.final_state != HostState::Complete {
-            if !stage_report.should_retry(max_attempts) {
-                return stage_report;
+        let mut completed_phases = checkpoint.completed_phases.clone();
+
+        if checkpoint.mode == ResumeMode::Fresh {
+            let stage_report = stage_executor
+                .run_connected_session(connect_plan.clone(), &mut *session, false)
+                .await
+                .with_attempt_count(attempt)
+                .with_completed_phases(completed_phases.clone());
+            if stage_report.final_state != HostState::Complete {
+                write_checkpoint(store, &stage_report).await?;
+                if !stage_report.should_retry(max_attempts) {
+                    return Ok(stage_report);
+                }
+                tokio::time::sleep(spec.retry_policy.backoff).await;
+                continue;
             }
-            tokio::time::sleep(spec.retry_policy.backoff).await;
-            continue;
+
+            completed_phases.push(super::scheduler::FailurePhase::Stage);
+            let stage_progress = progress_report(
+                &plan,
+                HostState::Executing,
+                &completed_phases,
+                attempt,
+            );
+            write_checkpoint(store, &stage_progress).await?;
         }
 
-        let collect_report =
-            collect_host_artifacts_with_retry(spec, store, &collector_job.collect, stage_report)
-                .await;
+        let run_report = if checkpoint.mode == ResumeMode::CleanupOnly {
+            HostExecutionReport::success(plan.force_state(HostState::Collecting), HostState::Complete)
+                .with_completed_phases(completed_phases.clone())
+                .with_attempt_count(attempt)
+        } else {
+            let should_skip_execute =
+                checkpoint.mode == ResumeMode::CollectOnly
+                    && completed_phases.contains(&super::scheduler::FailurePhase::Execute);
+
+            if should_skip_execute {
+                HostExecutionReport::success(
+                    plan.force_state(HostState::Collecting),
+                    HostState::Complete,
+                )
+                .with_completed_phases(completed_phases.clone())
+                .with_attempt_count(attempt)
+            } else {
+                let run_report = run_executor
+                    .run_connected_session(connect_plan.clone(), &mut *session, false)
+                    .await
+                    .with_attempt_count(attempt)
+                    .with_completed_phases(completed_phases.clone());
+                if run_report.final_state != HostState::Complete {
+                    write_checkpoint(store, &run_report).await?;
+                    return Ok(run_report);
+                }
+
+                completed_phases.push(super::scheduler::FailurePhase::Execute);
+                let execute_progress = progress_report(
+                    &plan,
+                    HostState::Collecting,
+                    &completed_phases,
+                    attempt,
+                );
+                write_checkpoint(store, &execute_progress).await?;
+                run_report
+                    .with_completed_phases(completed_phases.clone())
+                    .with_attempt_count(attempt)
+            }
+        };
+
+        let mut collect_report = if checkpoint.mode == ResumeMode::CleanupOnly {
+            run_report
+                .with_completed_phases(completed_phases.clone())
+                .mark_phase_completed(super::scheduler::FailurePhase::Collect)
+        } else {
+            collect_host_artifacts_with_retry(spec, store, &collector_job.collect, run_report).await
+        };
         if collect_report.final_state != HostState::Complete {
-            let _ = session.cleanup().await;
-            return collect_report;
+            if checkpoint.mode == ResumeMode::CollectOnly {
+                let rerun_report = run_executor
+                    .run_connected_session(connect_plan.clone(), &mut *session, false)
+                    .await
+                    .with_attempt_count(attempt)
+                    .with_completed_phases(completed_phases.clone());
+                if rerun_report.final_state != HostState::Complete {
+                    write_checkpoint(store, &rerun_report).await?;
+                    let _ = session.cleanup().await;
+                    return Ok(rerun_report);
+                }
+
+                if !completed_phases.contains(&super::scheduler::FailurePhase::Execute) {
+                    completed_phases.push(super::scheduler::FailurePhase::Execute);
+                }
+                let execute_progress = progress_report(
+                    &plan,
+                    HostState::Collecting,
+                    &completed_phases,
+                    attempt,
+                );
+                write_checkpoint(store, &execute_progress).await?;
+                collect_report = collect_host_artifacts_with_retry(
+                    spec,
+                    store,
+                    &collector_job.collect,
+                    rerun_report
+                        .with_completed_phases(completed_phases.clone())
+                        .with_attempt_count(attempt),
+                )
+                .await;
+            }
+
+            if collect_report.final_state != HostState::Complete {
+                write_checkpoint(store, &collect_report).await?;
+                let _ = session.cleanup().await;
+                return Ok(collect_report);
+            }
         }
+
+        completed_phases = collect_report.completed_phases.clone();
+        let collect_progress = progress_report(
+            &plan,
+            HostState::Collecting,
+            &completed_phases,
+            attempt,
+        );
+        write_checkpoint(store, &collect_progress).await?;
 
         let cleanup_report = cleanup_host_workspace_with_live_session(
             spec,
@@ -720,10 +1021,13 @@ where
         )
         .await;
         if cleanup_report.final_state != HostState::Complete {
-            return cleanup_report;
+            write_checkpoint(store, &cleanup_report).await?;
+            return Ok(cleanup_report);
         }
 
-        return disconnect_host_session(cleanup_report, &mut *session).await;
+        let final_report = disconnect_host_session(cleanup_report, &mut *session).await;
+        write_checkpoint(store, &final_report).await?;
+        return Ok(final_report);
     }
 
     unreachable!("execute_host_with_persistent_session_with_retry should always return");
@@ -876,38 +1180,9 @@ fn render_plan_json(plan: &HostPlan) -> String {
 }
 
 fn render_report_json(report: &HostExecutionReport) -> String {
-    let error = report
-        .error
-        .as_ref()
-        .map(|error| format!("\"{}\"", escape_json(error)))
-        .unwrap_or_else(|| "null".to_string());
-    let failure_phase = report
-        .failure_phase
-        .map(|phase| format!("\"{}\"", phase.as_str()))
-        .unwrap_or_else(|| "null".to_string());
-    let failure_disposition = report
-        .failure_disposition
-        .map(|disposition| format!("\"{}\"", disposition.as_str()))
-        .unwrap_or_else(|| "null".to_string());
-
-    format!(
-        concat!(
-            "{{\n",
-            "  \"ip\": \"{}\",\n",
-            "  \"final_state\": \"{}\",\n",
-            "  \"error\": {},\n",
-            "  \"failure_phase\": {},\n",
-            "  \"failure_disposition\": {},\n",
-            "  \"attempt_count\": {}\n",
-            "}}\n"
-        ),
-        report.plan.target.ip,
-        report.final_state.as_str(),
-        error,
-        failure_phase,
-        failure_disposition,
-        report.attempt_count,
-    )
+    serde_json::to_string_pretty(&persisted_status_from_report(report))
+        .expect("host status should serialize to JSON")
+        + "\n"
 }
 
 fn render_summary_json(summary: &PandorasBoxRunSummary) -> String {
@@ -937,7 +1212,7 @@ mod tests {
         collector_url, plan_collector_job, render_mission_manifest, render_summary_json,
         resolved_discovery_ports, CollectorCleanupJob, CollectorCollectJob, CollectorJobPlan,
         CollectorRunJob, CollectorStageJob, IdentityCaptureJob, LocalSupportFilePlan,
-        PandorasBoxRunSummary, PandorasBoxRunner, StagedSupportFile,
+        PandorasBoxRunSummary, PandorasBoxRunner, PersistedHostStatus, StagedSupportFile,
     };
     use crate::runtime::discovery::DiscoveryRecord;
     use crate::runtime::mission::{
@@ -1074,10 +1349,7 @@ mod tests {
 
             match behavior.final_state {
                 HostState::Complete => HostExecutionReport::success(plan, HostState::Complete),
-                HostState::Failed => match (
-                    behavior.failure_phase,
-                    behavior.failure_disposition,
-                ) {
+                HostState::Failed => match (behavior.failure_phase, behavior.failure_disposition) {
                     (Some(phase), Some(FailureDisposition::Retryable)) => {
                         HostExecutionReport::retryable_failure(
                             plan,
@@ -2023,19 +2295,24 @@ mod tests {
         )]));
 
         let summary = runner
-            .run_with_stream_and_executor(stream::iter(vec![retried.clone()]), Arc::clone(&executor))
+            .run_with_stream_and_executor(
+                stream::iter(vec![retried.clone()]),
+                Arc::clone(&executor),
+            )
             .await
             .expect("retryable failures should recover");
 
         assert_eq!(summary.completed_hosts, 1);
         assert_eq!(summary.failed_hosts, 0);
-        assert_eq!(executor.completions(), vec![retried.host.ip, retried.host.ip]);
+        assert_eq!(
+            executor.completions(),
+            vec![retried.host.ip, retried.host.ip]
+        );
 
-        let status = tokio::fs::read_to_string(
-            root.join("mission-123/hosts/10.0.0.24/status.json"),
-        )
-        .await
-        .expect("status artifact should exist");
+        let status =
+            tokio::fs::read_to_string(root.join("mission-123/hosts/10.0.0.24/status.json"))
+                .await
+                .expect("status artifact should exist");
         assert!(status.contains("\"final_state\": \"complete\""));
         assert!(status.contains("\"attempt_count\": 2"));
         assert!(status.contains("\"failure_phase\": null"));
@@ -2069,11 +2346,10 @@ mod tests {
         assert_eq!(summary.failed_hosts, 1);
         assert_eq!(executor.completions(), vec![failed.host.ip]);
 
-        let status = tokio::fs::read_to_string(
-            root.join("mission-123/hosts/10.0.0.26/status.json"),
-        )
-        .await
-        .expect("status artifact should exist");
+        let status =
+            tokio::fs::read_to_string(root.join("mission-123/hosts/10.0.0.26/status.json"))
+                .await
+                .expect("status artifact should exist");
         assert!(status.contains("\"failure_phase\": \"connect\""));
         assert!(status.contains("\"failure_disposition\": \"terminal\""));
         assert!(status.contains("\"attempt_count\": 1"));
@@ -2259,8 +2535,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runner_session_factory_path_reuses_single_windows_smb_connection_across_collector_phases()
-    {
+    async fn runner_session_factory_path_reuses_single_windows_smb_connection_across_collector_phases(
+    ) {
         let root = temp_root("runner-session-factory-smb");
         let chimera_path = root.join("fixtures/chimera.exe");
         write_fixture(&chimera_path, b"fake chimera binary").await;
@@ -2879,6 +3155,208 @@ mod tests {
                 &format!("exec:{cleanup_command}"),
                 "disconnect"
             ]
+        );
+        server
+            .join()
+            .expect("test HTTP artifact server should exit cleanly");
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn runner_skips_completed_host_when_resume_artifacts_exist() {
+        let root = temp_root("runner-resume-skip-complete");
+        let chimera_path = root.join("fixtures/chimera");
+        write_fixture(&chimera_path, b"fake chimera binary").await;
+        let spec = MissionSpec {
+            artifact_root: root.clone(),
+            mission_id: "mission-123".to_string(),
+            chimera_unix_path: chimera_path,
+            ..spec(root.clone())
+        };
+        let runner = PandorasBoxRunner::new(spec);
+        let record = record_for_host(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            PlatformHint::Unix,
+            vec![22],
+            Some(64),
+        );
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+
+        store
+            .ensure_layout(vec![record.host.ip])
+            .await
+            .expect("host layout should exist");
+        tokio::fs::write(
+            store.host_inventory_path(record.host.ip),
+            r#"{"hostname":"lab","os":"Ubuntu 24.04","ports":[],"connections":[],"services":[],"users":[],"shares":[],"containers":[]}"#,
+        )
+        .await
+        .expect("inventory fixture should exist");
+        tokio::fs::write(store.host_application_log_path(record.host.ip), "collector log\n")
+            .await
+            .expect("log fixture should exist");
+        let persisted = PersistedHostStatus {
+            ip: record.host.ip.to_string(),
+            final_state: HostState::Complete.as_str().to_string(),
+            error: None,
+            failure_phase: None,
+            failure_disposition: None,
+            attempt_count: 3,
+            completed_phases: vec![
+                "stage".to_string(),
+                "execute".to_string(),
+                "collect".to_string(),
+                "cleanup".to_string(),
+            ],
+        };
+        tokio::fs::write(
+            store.host_status_path(record.host.ip),
+            serde_json::to_string_pretty(&persisted).expect("status should serialize"),
+        )
+        .await
+        .expect("status fixture should exist");
+
+        let factory = Arc::new(FakeSessionFactory::new(vec![]));
+        let summary = runner
+            .run_with_stream_and_factory(stream::iter(vec![record.clone()]), Arc::clone(&factory))
+            .await
+            .expect("completed host resume should succeed");
+
+        assert_eq!(summary.discovered_hosts, 1);
+        assert_eq!(summary.completed_hosts, 1);
+        assert_eq!(summary.failed_hosts, 0);
+        assert!(factory.connect_events().is_empty());
+
+        let persisted: PersistedHostStatus = serde_json::from_str(
+            &tokio::fs::read_to_string(store.host_status_path(record.host.ip))
+                .await
+                .expect("status artifact should exist"),
+        )
+        .expect("status should parse");
+        assert_eq!(persisted.final_state, "complete");
+        assert_eq!(persisted.attempt_count, 3);
+        assert_eq!(
+            persisted.completed_phases,
+            vec!["stage", "execute", "collect", "cleanup"]
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn runner_resumes_collect_phase_without_restaging_or_reexecuting() {
+        let root = temp_root("runner-resume-collect");
+        let chimera_path = root.join("fixtures/chimera");
+        write_fixture(&chimera_path, b"fake chimera binary").await;
+        let (collector_port, requests, server) = spawn_http_artifact_server(vec![
+            ("/inventory.json", b"{\"hostname\":\"lab\"}\n"),
+            ("/application.log", b"collector log\n"),
+        ]);
+        let spec = MissionSpec {
+            artifact_root: root.clone(),
+            mission_id: "mission-123".to_string(),
+            chimera_unix_path: chimera_path.clone(),
+            collector_port,
+            ..spec(root.clone())
+        };
+        let runner = PandorasBoxRunner::new(spec.clone());
+        let record = record_for_host(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            PlatformHint::Unix,
+            vec![22],
+            Some(64),
+        );
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        store
+            .ensure_layout(vec![record.host.ip])
+            .await
+            .expect("host layout should exist");
+        let persisted = PersistedHostStatus {
+            ip: record.host.ip.to_string(),
+            final_state: HostState::Failed.as_str().to_string(),
+            error: Some("artifact collection failed".to_string()),
+            failure_phase: Some("collect".to_string()),
+            failure_disposition: Some("retryable".to_string()),
+            attempt_count: 1,
+            completed_phases: vec!["stage".to_string(), "execute".to_string()],
+        };
+        tokio::fs::write(
+            store.host_status_path(record.host.ip),
+            serde_json::to_string_pretty(&persisted).expect("status should serialize"),
+        )
+        .await
+        .expect("status fixture should exist");
+
+        let workspace = remote_workspace(
+            &spec,
+            &HostPlan::queued(record.host.clone(), vec![TransportKind::UnixSsh]),
+        );
+        let cleanup_command = workspace.cleanup_command();
+        let session_template = SessionTemplate {
+            events: Arc::new(Mutex::new(Vec::new())),
+            exec_outputs: Arc::new(HashMap::from([(
+                cleanup_command.clone(),
+                ExecResponse {
+                    stdout: b"cleanup complete\n".to_vec(),
+                    stderr: Vec::new(),
+                    status_code: Some(0),
+                },
+            )])),
+            exec_errors: Arc::new(Mutex::new(HashMap::new())),
+            downloads: Arc::new(HashMap::new()),
+            uploads: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let events = Arc::clone(&session_template.events);
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (record.host.ip, TransportKind::UnixSsh),
+            session_template,
+        )]));
+
+        let summary = runner
+            .run_with_stream_and_factory(stream::iter(vec![record.clone()]), Arc::clone(&factory))
+            .await
+            .expect("collect resume should succeed");
+
+        assert_eq!(summary.discovered_hosts, 1);
+        assert_eq!(summary.completed_hosts, 1);
+        assert_eq!(summary.failed_hosts, 0);
+        assert_eq!(
+            requests
+                .lock()
+                .expect("requests lock should be available")
+                .as_slice(),
+            ["/inventory.json", "/application.log"]
+        );
+        assert_eq!(
+            events
+                .lock()
+                .expect("events lock should be available")
+                .as_slice(),
+            [&format!("exec:{cleanup_command}"), "disconnect"]
+        );
+        assert_eq!(
+            factory.connect_events(),
+            vec![(record.host.ip, TransportKind::UnixSsh)]
+        );
+
+        let persisted: PersistedHostStatus = serde_json::from_str(
+            &tokio::fs::read_to_string(store.host_status_path(record.host.ip))
+                .await
+                .expect("status artifact should exist"),
+        )
+        .expect("status should parse");
+        assert_eq!(persisted.final_state, "complete");
+        assert_eq!(persisted.attempt_count, 2);
+        assert_eq!(
+            persisted.completed_phases,
+            vec!["stage", "execute", "collect", "cleanup"]
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(store.host_inventory_path(record.host.ip))
+                .await
+                .expect("inventory artifact should exist"),
+            "{\"hostname\":\"lab\"}\n"
         );
         server
             .join()

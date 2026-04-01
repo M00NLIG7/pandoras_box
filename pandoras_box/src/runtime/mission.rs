@@ -141,6 +141,21 @@ impl HostState {
             Self::Failed => "failed",
         }
     }
+
+    #[must_use]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "discovered" => Some(Self::Discovered),
+            "queued" => Some(Self::Queued),
+            "connecting" => Some(Self::Connecting),
+            "connected" => Some(Self::Connected),
+            "executing" => Some(Self::Executing),
+            "collecting" => Some(Self::Collecting),
+            "complete" => Some(Self::Complete),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
 }
 
 impl PlatformHint {

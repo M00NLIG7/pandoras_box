@@ -28,6 +28,19 @@ impl FailurePhase {
             Self::Unknown => "unknown",
         }
     }
+
+    #[must_use]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "connect" => Some(Self::Connect),
+            "stage" => Some(Self::Stage),
+            "execute" => Some(Self::Execute),
+            "collect" => Some(Self::Collect),
+            "cleanup" => Some(Self::Cleanup),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +57,15 @@ impl FailureDisposition {
             Self::Terminal => "terminal",
         }
     }
+
+    #[must_use]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "retryable" => Some(Self::Retryable),
+            "terminal" => Some(Self::Terminal),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +76,7 @@ pub struct HostExecutionReport {
     pub failure_phase: Option<FailurePhase>,
     pub failure_disposition: Option<FailureDisposition>,
     pub attempt_count: u8,
+    pub completed_phases: Vec<FailurePhase>,
 }
 
 impl HostExecutionReport {
@@ -66,6 +89,7 @@ impl HostExecutionReport {
             failure_phase: None,
             failure_disposition: None,
             attempt_count: 1,
+            completed_phases: Vec::new(),
         }
     }
 
@@ -75,11 +99,7 @@ impl HostExecutionReport {
     }
 
     #[must_use]
-    pub fn terminal_failure(
-        plan: HostPlan,
-        phase: FailurePhase,
-        error: impl Into<String>,
-    ) -> Self {
+    pub fn terminal_failure(plan: HostPlan, phase: FailurePhase, error: impl Into<String>) -> Self {
         Self::failure_with_disposition(plan, phase, FailureDisposition::Terminal, error)
     }
 
@@ -106,6 +126,7 @@ impl HostExecutionReport {
             failure_phase: Some(phase),
             failure_disposition: Some(disposition),
             attempt_count: 1,
+            completed_phases: Vec::new(),
         }
     }
 
@@ -113,6 +134,24 @@ impl HostExecutionReport {
     pub fn with_attempt_count(mut self, attempt_count: u8) -> Self {
         self.attempt_count = attempt_count.max(1);
         self
+    }
+
+    #[must_use]
+    pub fn with_completed_phases(mut self, completed_phases: Vec<FailurePhase>) -> Self {
+        self.completed_phases = normalize_completed_phases(completed_phases);
+        self
+    }
+
+    #[must_use]
+    pub fn mark_phase_completed(mut self, phase: FailurePhase) -> Self {
+        self.completed_phases.push(phase);
+        self.completed_phases = normalize_completed_phases(self.completed_phases);
+        self
+    }
+
+    #[must_use]
+    pub fn has_completed_phase(&self, phase: FailurePhase) -> bool {
+        self.completed_phases.contains(&phase)
     }
 
     #[must_use]
@@ -124,6 +163,19 @@ impl HostExecutionReport {
             )
             && self.attempt_count < max_attempts.max(1)
     }
+}
+
+fn normalize_completed_phases(mut completed_phases: Vec<FailurePhase>) -> Vec<FailurePhase> {
+    completed_phases.sort_by_key(|phase| match phase {
+        FailurePhase::Connect => 0,
+        FailurePhase::Stage => 1,
+        FailurePhase::Execute => 2,
+        FailurePhase::Collect => 3,
+        FailurePhase::Cleanup => 4,
+        FailurePhase::Unknown => 5,
+    });
+    completed_phases.dedup();
+    completed_phases
 }
 
 #[async_trait]

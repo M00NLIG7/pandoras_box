@@ -112,6 +112,16 @@ impl ArtifactStore {
         self.host_dir(ip).join("logs")
     }
 
+    #[must_use]
+    pub fn host_inventory_path(&self, ip: IpAddr) -> PathBuf {
+        self.host_files_dir(ip).join("inventory.json")
+    }
+
+    #[must_use]
+    pub fn host_application_log_path(&self, ip: IpAddr) -> PathBuf {
+        self.host_logs_dir(ip).join("application.log")
+    }
+
     pub async fn ensure_layout<I>(&self, hosts: I) -> io::Result<()>
     where
         I: IntoIterator<Item = IpAddr>,
@@ -185,6 +195,10 @@ impl ArtifactStore {
     pub async fn write_host_status(&self, ip: IpAddr, contents: &str) -> io::Result<()> {
         tokio::fs::create_dir_all(self.host_dir(ip)).await?;
         tokio::fs::write(self.host_status_path(ip), contents).await
+    }
+
+    pub async fn read_host_status(&self, ip: IpAddr) -> io::Result<String> {
+        tokio::fs::read_to_string(self.host_status_path(ip)).await
     }
 }
 
