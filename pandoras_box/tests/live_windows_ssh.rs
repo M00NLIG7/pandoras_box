@@ -5,6 +5,10 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod support;
+
+use support::wait_for_discovery;
+
 fn required_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for live interop tests"))
 }
@@ -72,10 +76,14 @@ async fn live_windows_ssh_target_collects_inventory_and_cleans_up() {
         connect_timeout: Duration::from_secs(2),
         concurrency_limit: 1,
     });
-    let discovery_record = discovery
-        .probe_ip(target_ip)
-        .await
-        .expect("expected discovery to reach the Tiny11 fixture before the live run");
+    let discovery_record = wait_for_discovery(
+        &discovery,
+        target_ip,
+        Duration::from_secs(10),
+        Duration::from_millis(250),
+    )
+    .await
+    .expect("expected discovery to reach the Tiny11 fixture before the live run");
     assert_eq!(
         discovery_record.host.platform.as_str(),
         "windows",

@@ -5,6 +5,10 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod support;
+
+use support::wait_for_discovery;
+
 struct LiveUnixCase {
     label: &'static str,
     host_env: &'static str,
@@ -84,7 +88,13 @@ async fn run_live_unix_case(case: LiveUnixCase) {
         connect_timeout: Duration::from_secs(2),
         concurrency_limit: 1,
     });
-    let discovery_record = discovery.probe_ip(target_ip).await;
+    let discovery_record = wait_for_discovery(
+        &discovery,
+        target_ip,
+        Duration::from_secs(10),
+        Duration::from_millis(250),
+    )
+    .await;
     assert!(
         discovery_record.is_some(),
         "expected discovery to reach {target_ip}:{ssh_port} before the live run"
