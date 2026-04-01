@@ -71,6 +71,7 @@ pub struct MissionSpec {
     pub retry_policy: RetryPolicy,
     pub artifact_root: PathBuf,
     pub mission_id: String,
+    pub mission_id_explicit: bool,
     pub identity_command: String,
     pub unix_username: String,
     pub windows_username: String,
@@ -94,6 +95,7 @@ impl Default for MissionSpec {
             retry_policy: RetryPolicy::default(),
             artifact_root: PathBuf::from("artifacts"),
             mission_id: "mission".to_string(),
+            mission_id_explicit: true,
             identity_command: "whoami".to_string(),
             unix_username: "root".to_string(),
             windows_username: "Administrator".to_string(),
@@ -107,6 +109,50 @@ impl Default for MissionSpec {
             allow_smb_fallback: true,
             windows_smb_exec_mode: WindowsSmbExecMode::SmbExec,
         }
+    }
+}
+
+impl MissionSpec {
+    #[must_use]
+    pub fn resume_signature(&self) -> String {
+        let mut targets = self
+            .targets
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>();
+        targets.sort();
+
+        let mut discovery_ports = self.discovery_ports.clone();
+        discovery_ports.sort_unstable();
+
+        format!(
+            concat!(
+                "targets={};",
+                "identity={};",
+                "unix_user={};",
+                "windows_user={};",
+                "ssh_port={};",
+                "discovery_ports={};",
+                "collector_port={};",
+                "dry_run={};",
+                "allow_smb_fallback={};",
+                "windows_smb_exec_mode={}"
+            ),
+            targets.join(","),
+            self.identity_command,
+            self.unix_username,
+            self.windows_username,
+            self.ssh_port,
+            discovery_ports
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            self.collector_port,
+            self.dry_run,
+            self.allow_smb_fallback,
+            self.windows_smb_exec_mode.as_str(),
+        )
     }
 }
 

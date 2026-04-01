@@ -90,6 +90,7 @@ mod tests {
 
         assert_eq!(spec.targets, targets);
         assert_eq!(spec.mission_id, "mission-override");
+        assert!(spec.mission_id_explicit);
         assert_eq!(spec.collector_port, 44_372);
         assert_eq!(spec.chimera_unix_path, PathBuf::from("release/chimera"));
         assert_eq!(
@@ -98,6 +99,27 @@ mod tests {
         );
         assert_eq!(spec.password, "secret");
         assert!(spec.allow_smb_fallback);
+    }
+
+    #[test]
+    fn mission_spec_from_matches_marks_generated_mission_ids_as_auto_resumable() {
+        let matches = build_cli()
+            .try_get_matches_from([
+                "pandoras_box",
+                "--range",
+                "10.0.0.0/30",
+                "--password",
+                "secret",
+            ])
+            .expect("CLI should parse Pandora's Box arguments");
+        let targets = Subnet::try_from("10.0.0.0/30")
+            .expect("subnet should parse")
+            .hosts();
+
+        let spec = mission_spec_from_matches(&matches, targets, "secret".to_string());
+
+        assert!(!spec.mission_id_explicit);
+        assert!(!spec.mission_id.is_empty());
     }
 }
 
@@ -150,6 +172,8 @@ fn mission_spec_from_matches(
     targets: Vec<IpAddr>,
     password: String,
 ) -> runtime::MissionSpec {
+    let mission_id_explicit = matches.contains_id("mission_id")
+        && matches.get_one::<String>("mission_id").is_some();
     let mission_id = matches
         .get_one::<String>("mission_id")
         .cloned()
@@ -163,6 +187,7 @@ fn mission_spec_from_matches(
                 .expect("artifact_root should have a default"),
         ),
         mission_id,
+        mission_id_explicit,
         identity_command: matches
             .get_one::<String>("identity_command")
             .expect("identity_command should have a default")

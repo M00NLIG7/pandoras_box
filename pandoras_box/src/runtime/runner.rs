@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use super::artifact_store::ArtifactStore;
+use super::artifact_store::{ActiveMissionRecord, ArtifactStore};
 use super::discovery::{DiscoveryConfig, DiscoveryRecord, TcpDiscovery};
 use super::mission::{HostPlan, HostState, MissionSpec, RetryPolicy};
 use super::planner::Planner;
@@ -104,13 +104,13 @@ impl PandorasBoxRunner {
         S: Stream<Item = DiscoveryRecord>,
         F: SessionFactory + 'static,
     {
-        let store = self.prepare_store().await?;
+        let (spec, store) = self.prepare_store().await?;
         let policy = ExecutionPolicy {
-            dry_run: self.spec.dry_run,
-            allow_smb_fallback: self.spec.allow_smb_fallback,
+            dry_run: spec.dry_run,
+            allow_smb_fallback: spec.allow_smb_fallback,
         };
         let mut discovered_hosts = 0usize;
-        let semaphore = Arc::new(Semaphore::new(self.spec.concurrency_limit.max(1)));
+        let semaphore = Arc::new(Semaphore::new(spec.concurrency_limit.max(1)));
         let mut tasks = JoinSet::new();
         let mut reports = Vec::new();
 
@@ -118,17 +118,16 @@ impl PandorasBoxRunner {
 
         while let Some(record) = records.next().await {
             discovered_hosts += 1;
-            let plan = Planner::plan_host(&self.spec, record.host);
+            let plan = Planner::plan_host(&spec, record.host);
             store.ensure_layout([plan.target.ip]).await?;
             store
                 .write_host_plan(plan.target.ip, &render_plan_json(&plan))
                 .await?;
 
-            let collector_job = plan_collector_job(&self.spec, &store, &plan);
-            stage_support_files(&collector_job.support_files()).await?;
+            let collector_job = plan_collector_job(&spec, &store, &plan);
             let semaphore = Arc::clone(&semaphore);
             let store = store.clone();
-            let spec = self.spec.clone();
+            let spec = spec.clone();
             let policy = policy;
             let factory = Arc::clone(&factory);
             tasks.spawn(async move {
@@ -156,7 +155,7 @@ impl PandorasBoxRunner {
             reports.push(report.expect("Pandora's Box task should not panic")?);
         }
 
-        self.finalize_summary(&store, discovered_hosts, reports)
+        self.finalize_summary(&spec, &store, discovered_hosts, reports)
             .await
     }
 
@@ -170,9 +169,9 @@ impl PandorasBoxRunner {
         S: Stream<Item = DiscoveryRecord>,
         E: HostExecutor + Send + Sync + 'static,
     {
-        let store = self.prepare_store().await?;
+        let (spec, store) = self.prepare_store().await?;
         let mut discovered_hosts = 0usize;
-        let semaphore = Arc::new(Semaphore::new(self.spec.concurrency_limit.max(1)));
+        let semaphore = Arc::new(Semaphore::new(spec.concurrency_limit.max(1)));
         let mut tasks = JoinSet::new();
         let mut reports = Vec::new();
 
@@ -180,7 +179,7 @@ impl PandorasBoxRunner {
 
         while let Some(record) = records.next().await {
             discovered_hosts += 1;
-            let plan = Planner::plan_host(&self.spec, record.host);
+            let plan = Planner::plan_host(&spec, record.host);
             store.ensure_layout([plan.target.ip]).await?;
             store
                 .write_host_plan(plan.target.ip, &render_plan_json(&plan))
@@ -189,7 +188,7 @@ impl PandorasBoxRunner {
             let executor = Arc::clone(&executor);
             let semaphore = Arc::clone(&semaphore);
             let store = store.clone();
-            let retry_policy = self.spec.retry_policy.clone();
+            let retry_policy = spec.retry_policy.clone();
             tasks.spawn(async move {
                 let _permit = semaphore
                     .acquire_owned()
@@ -208,20 +207,62 @@ impl PandorasBoxRunner {
             reports.push(report.expect("Pandora's Box task should not panic")?);
         }
 
-        self.finalize_summary(&store, discovered_hosts, reports)
+        self.finalize_summary(&spec, &store, discovered_hosts, reports)
             .await
     }
 
-    async fn prepare_store(&self) -> Result<ArtifactStore> {
-        let store = ArtifactStore::new(&self.spec.artifact_root, &self.spec.mission_id);
+    async fn prepare_store(&self) -> Result<(MissionSpec, ArtifactStore)> {
+        let spec = self.resolve_mission_spec().await?;
+        let store = ArtifactStore::new(&spec.artifact_root, &spec.mission_id);
+        ArtifactStore::write_active_mission(
+            &spec.artifact_root,
+            &ActiveMissionRecord {
+                mission_id: spec.mission_id.clone(),
+                signature: spec.resume_signature(),
+            },
+        )
+        .await?;
         store
-            .write_mission_manifest(&render_mission_manifest(&self.spec))
+            .write_mission_manifest(&render_mission_manifest(&spec))
             .await?;
-        Ok(store)
+        Ok((spec, store))
+    }
+
+    async fn resolve_mission_spec(&self) -> Result<MissionSpec> {
+        let mut spec = self.spec.clone();
+        if spec.mission_id_explicit {
+            return Ok(spec);
+        }
+
+        let signature = spec.resume_signature();
+        let Some(active) = ArtifactStore::read_active_mission(&spec.artifact_root).await? else {
+            return Ok(spec);
+        };
+
+        if active.signature != signature {
+            return Ok(spec);
+        }
+
+        let active_store = ArtifactStore::new(&spec.artifact_root, &active.mission_id);
+        if !tokio::fs::try_exists(active_store.mission_dir()).await? {
+            return Ok(spec);
+        }
+        if tokio::fs::try_exists(active_store.summary_path()).await? {
+            ArtifactStore::clear_active_mission_if_matches(
+                &spec.artifact_root,
+                &active.mission_id,
+            )
+            .await?;
+            return Ok(spec);
+        }
+
+        spec.mission_id = active.mission_id;
+        Ok(spec)
     }
 
     async fn finalize_summary(
         &self,
+        spec: &MissionSpec,
         store: &ArtifactStore,
         discovered_hosts: usize,
         reports: Vec<HostExecutionReport>,
@@ -241,8 +282,10 @@ impl PandorasBoxRunner {
 
         write_asset_inventory_bundle(store, &reports, discovered_hosts).await?;
         store.write_summary(&render_summary_json(&summary)).await?;
+        ArtifactStore::clear_active_mission_if_matches(&spec.artifact_root, &spec.mission_id)
+            .await?;
 
-        if self.spec.strict_mode && summary.failed_hosts > 0 {
+        if spec.strict_mode && summary.failed_hosts > 0 {
             return Err(Error::CommunicatorError(format!(
                 "Pandora's Box finished with {} failed hosts in strict mode",
                 summary.failed_hosts
@@ -890,6 +933,19 @@ where
         let mut completed_phases = checkpoint.completed_phases.clone();
 
         if checkpoint.mode == ResumeMode::Fresh {
+            if let Err(err) = stage_support_files(&collector_job.support_files()).await {
+                let report = HostExecutionReport::terminal_failure(
+                    plan.clone(),
+                    super::scheduler::FailurePhase::Stage,
+                    format!("stage file prep failed: {err}"),
+                )
+                .with_completed_phases(completed_phases.clone())
+                .with_attempt_count(attempt);
+                write_checkpoint(store, &report).await?;
+                let _ = session.cleanup().await;
+                return Ok(report);
+            }
+
             let stage_report = stage_executor
                 .run_connected_session(connect_plan.clone(), &mut *session, false)
                 .await
@@ -1033,6 +1089,7 @@ where
     unreachable!("execute_host_with_persistent_session_with_retry should always return");
 }
 
+#[cfg(test)]
 async fn execute_host_plan_with_retry<E>(
     retry_policy: &RetryPolicy,
     executor: Arc<E>,
@@ -1218,6 +1275,7 @@ mod tests {
     use crate::runtime::mission::{
         HostPlan, HostState, HostTarget, MissionSpec, PlatformHint, TransportKind,
     };
+    use crate::runtime::Planner;
     use crate::runtime::scheduler::{
         FailureDisposition, FailurePhase, HostExecutionReport, HostExecutor,
     };
@@ -1723,7 +1781,8 @@ mod tests {
     async fn finalize_summary_writes_asset_inventory_bundle_for_completed_hosts() {
         let root = temp_root("asset-inventory-complete");
         let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
-        let runner = PandorasBoxRunner::new(spec(root.clone()));
+        let mission_spec = spec(root.clone());
+        let runner = PandorasBoxRunner::new(mission_spec.clone());
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 41));
         let plan = HostPlan::queued(
             HostTarget {
@@ -1756,6 +1815,7 @@ mod tests {
 
         let summary = runner
             .finalize_summary(
+                &mission_spec,
                 &store,
                 1,
                 vec![HostExecutionReport::success(plan, HostState::Complete)],
@@ -1818,7 +1878,8 @@ mod tests {
     async fn finalize_summary_asset_inventory_includes_failed_hosts_without_inventory() {
         let root = temp_root("asset-inventory-failed");
         let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
-        let runner = PandorasBoxRunner::new(spec(root.clone()));
+        let mission_spec = spec(root.clone());
+        let runner = PandorasBoxRunner::new(mission_spec.clone());
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42));
         let plan = HostPlan::queued(
             HostTarget {
@@ -1836,6 +1897,7 @@ mod tests {
 
         let summary = runner
             .finalize_summary(
+                &mission_spec,
                 &store,
                 1,
                 vec![HostExecutionReport::failure(
@@ -1867,7 +1929,8 @@ mod tests {
     async fn finalize_summary_writes_network_topology_for_connected_hosts() {
         let root = temp_root("network-topology");
         let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
-        let runner = PandorasBoxRunner::new(spec(root.clone()));
+        let mission_spec = spec(root.clone());
+        let runner = PandorasBoxRunner::new(mission_spec.clone());
         let ip_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 51));
         let ip_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 52));
         let plan_a = HostPlan::queued(
@@ -1926,6 +1989,7 @@ mod tests {
 
         runner
             .finalize_summary(
+                &mission_spec,
                 &store,
                 2,
                 vec![
@@ -3357,6 +3421,226 @@ mod tests {
                 .await
                 .expect("inventory artifact should exist"),
             "{\"hostname\":\"lab\"}\n"
+        );
+        server
+            .join()
+            .expect("test HTTP artifact server should exit cleanly");
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn runner_reuses_active_auto_resume_mission_for_matching_spec() {
+        let root = temp_root("runner-mission-resume-match");
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let previous_mission_id = "mission-active".to_string();
+        let mission_spec = MissionSpec {
+            artifact_root: root.clone(),
+            mission_id: "mission-fresh".to_string(),
+            mission_id_explicit: false,
+            targets: vec![ip],
+            ..spec(root.clone())
+        };
+        let previous_store = crate::runtime::artifact_store::ArtifactStore::new(
+            &root,
+            &previous_mission_id,
+        );
+
+        previous_store
+            .ensure_layout(vec![ip])
+            .await
+            .expect("previous mission layout should exist");
+        write_fixture(
+            &previous_store.host_inventory_path(ip),
+            b"{\"hostname\":\"lab\"}\n",
+        )
+        .await;
+        write_fixture(
+            &previous_store.host_application_log_path(ip),
+            b"collector log\n",
+        )
+        .await;
+        let persisted = PersistedHostStatus {
+            ip: ip.to_string(),
+            final_state: HostState::Complete.as_str().to_string(),
+            error: None,
+            failure_phase: None,
+            failure_disposition: None,
+            attempt_count: 2,
+            completed_phases: vec![
+                "stage".to_string(),
+                "execute".to_string(),
+                "collect".to_string(),
+                "cleanup".to_string(),
+            ],
+        };
+        tokio::fs::write(
+            previous_store.host_status_path(ip),
+            serde_json::to_string_pretty(&persisted).expect("status should serialize"),
+        )
+        .await
+        .expect("previous host status should be written");
+        write_fixture(
+            &root.join(".active_mission.json"),
+            format!(
+                "{{\n  \"mission_id\": \"{}\",\n  \"signature\": \"{}\"\n}}\n",
+                previous_mission_id,
+                mission_spec.resume_signature()
+            )
+            .as_bytes(),
+        )
+        .await;
+
+        let runner = PandorasBoxRunner::new(mission_spec);
+        let record = record_for_host(ip, PlatformHint::Unix, vec![22], Some(64));
+        let factory = Arc::new(FakeSessionFactory::new(vec![]));
+
+        let summary = runner
+            .run_with_stream_and_factory(stream::iter(vec![record]), Arc::clone(&factory))
+            .await
+            .expect("matching active mission should resume");
+
+        assert_eq!(summary.discovered_hosts, 1);
+        assert_eq!(summary.completed_hosts, 1);
+        assert_eq!(summary.failed_hosts, 0);
+        assert_eq!(summary.mission_dir, root.join(&previous_mission_id));
+        assert!(factory.connect_events().is_empty());
+        assert!(
+            !tokio::fs::try_exists(root.join(".active_mission.json"))
+                .await
+                .expect("active mission marker check should succeed")
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn runner_ignores_incompatible_active_auto_resume_mission() {
+        let root = temp_root("runner-mission-resume-mismatch");
+        let chimera_path = root.join("fixtures/chimera");
+        write_fixture(&chimera_path, b"fake chimera binary").await;
+        let (collector_port, requests, server) = spawn_http_artifact_server(vec![
+            ("/inventory.json", b"{\"hostname\":\"lab\"}\n"),
+            ("/application.log", b"collector log\n"),
+        ]);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let mission_spec = MissionSpec {
+            artifact_root: root.clone(),
+            mission_id: "mission-fresh".to_string(),
+            mission_id_explicit: false,
+            targets: vec![ip],
+            chimera_unix_path: chimera_path.clone(),
+            collector_port,
+            ..spec(root.clone())
+        };
+        let incompatible_spec = MissionSpec {
+            artifact_root: root.clone(),
+            mission_id: "mission-other".to_string(),
+            mission_id_explicit: false,
+            targets: vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99))],
+            ..spec(root.clone())
+        };
+        write_fixture(
+            &root.join(".active_mission.json"),
+            format!(
+                "{{\n  \"mission_id\": \"mission-other\",\n  \"signature\": \"{}\"\n}}\n",
+                incompatible_spec.resume_signature()
+            )
+            .as_bytes(),
+        )
+        .await;
+
+        let runner = PandorasBoxRunner::new(mission_spec.clone());
+        let record = record_for_host(ip, PlatformHint::Unix, vec![22], Some(64));
+        let plan = Planner::plan_host(&mission_spec, record.host.clone());
+        let workspace = remote_workspace(&mission_spec, &plan);
+        let ensure_directories_command = workspace.ensure_directories_command();
+        let post_stage_command = workspace.post_stage_commands()[0].clone();
+        let collector_command = workspace.collector_command();
+        let serve_command = workspace.serve_command();
+        let cleanup_command = workspace.cleanup_command();
+        let session_template = SessionTemplate {
+            events: Arc::new(Mutex::new(Vec::new())),
+            exec_outputs: Arc::new(HashMap::from([
+                (
+                    "whoami".to_string(),
+                    ExecResponse {
+                        stdout: b"root\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    ensure_directories_command.clone(),
+                    ExecResponse {
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    post_stage_command.clone(),
+                    ExecResponse {
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    collector_command.clone(),
+                    ExecResponse {
+                        stdout: b"collector complete\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    serve_command.clone(),
+                    ExecResponse {
+                        stdout: b"serve started\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    cleanup_command.clone(),
+                    ExecResponse {
+                        stdout: b"cleanup complete\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+            ])),
+            exec_errors: Arc::new(Mutex::new(HashMap::new())),
+            downloads: Arc::new(HashMap::new()),
+            uploads: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::UnixSsh),
+            session_template,
+        )]));
+
+        let summary = runner
+            .run_with_stream_and_factory(stream::iter(vec![record]), Arc::clone(&factory))
+            .await
+            .expect("incompatible active mission should start fresh");
+
+        assert_eq!(summary.discovered_hosts, 1);
+        assert_eq!(summary.completed_hosts, 1);
+        assert_eq!(summary.failed_hosts, 0);
+        assert_eq!(summary.mission_dir, root.join("mission-fresh"));
+        assert_eq!(factory.connect_events(), vec![(ip, TransportKind::UnixSsh)]);
+        assert_eq!(
+            requests
+                .lock()
+                .expect("requests lock should be available")
+                .as_slice(),
+            ["/inventory.json", "/application.log"]
+        );
+        assert!(
+            !tokio::fs::try_exists(root.join(".active_mission.json"))
+                .await
+                .expect("active mission marker check should succeed")
         );
         server
             .join()

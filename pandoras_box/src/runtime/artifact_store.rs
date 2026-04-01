@@ -1,6 +1,13 @@
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveMissionRecord {
+    pub mission_id: String,
+    pub signature: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactStore {
@@ -9,6 +16,11 @@ pub struct ArtifactStore {
 }
 
 impl ArtifactStore {
+    #[must_use]
+    pub fn active_mission_path(root: impl AsRef<Path>) -> PathBuf {
+        root.as_ref().join(".active_mission.json")
+    }
+
     #[must_use]
     pub fn new(root: impl Into<PathBuf>, mission_id: impl Into<String>) -> Self {
         Self {
@@ -199,6 +211,48 @@ impl ArtifactStore {
 
     pub async fn read_host_status(&self, ip: IpAddr) -> io::Result<String> {
         tokio::fs::read_to_string(self.host_status_path(ip)).await
+    }
+
+    pub async fn read_active_mission(
+        root: impl AsRef<Path>,
+    ) -> io::Result<Option<ActiveMissionRecord>> {
+        let path = Self::active_mission_path(root);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(raw) => serde_json::from_str(&raw).map(Some).map_err(io::Error::other),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn write_active_mission(
+        root: impl AsRef<Path>,
+        record: &ActiveMissionRecord,
+    ) -> io::Result<()> {
+        tokio::fs::create_dir_all(root.as_ref()).await?;
+        let payload = serde_json::to_string_pretty(record).map_err(io::Error::other)?;
+        tokio::fs::write(Self::active_mission_path(root), format!("{payload}\n")).await
+    }
+
+    pub async fn clear_active_mission(root: impl AsRef<Path>) -> io::Result<()> {
+        match tokio::fs::remove_file(Self::active_mission_path(root)).await {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn clear_active_mission_if_matches(
+        root: impl AsRef<Path>,
+        mission_id: &str,
+    ) -> io::Result<()> {
+        let root = root.as_ref();
+        let Some(record) = Self::read_active_mission(root).await? else {
+            return Ok(());
+        };
+        if record.mission_id == mission_id {
+            Self::clear_active_mission(root).await?;
+        }
+        Ok(())
     }
 }
 
