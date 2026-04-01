@@ -9,7 +9,7 @@ use tokio::task::JoinSet;
 
 use super::artifact_store::{ActiveMissionRecord, ArtifactStore};
 use super::discovery::{DiscoveryConfig, DiscoveryRecord, TcpDiscovery};
-use super::mission::{HostPlan, HostState, MissionSpec};
+use super::mission::{HostPlan, HostState, MissionSpec, RetryPolicy, TransportKind};
 use super::planner::Planner;
 use super::policy::ExecutionPolicy;
 use super::reporting::write_asset_inventory_bundle;
@@ -21,14 +21,13 @@ use super::workspace::{collector_plan, CollectorPlan};
 use crate::{Error, Result};
 
 #[cfg(test)]
-use super::mission::RetryPolicy;
-#[cfg(test)]
 use super::scheduler::HostExecutor;
 
 #[cfg(not(test))]
 const COLLECTOR_READY_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
 const COLLECTOR_READY_TIMEOUT: Duration = Duration::from_millis(800);
+const SMB_CONNECT_RETRY_COOLDOWN: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PandorasBoxRunSummary {
@@ -769,7 +768,7 @@ async fn collect_host_artifacts_with_retry(
             return next_report;
         }
 
-        tokio::time::sleep(spec.retry_policy.backoff).await;
+        tokio::time::sleep(retry_delay_for_report(&spec.retry_policy, &next_report)).await;
     }
 
     unreachable!("collect_host_artifacts_with_retry should always return");
@@ -841,7 +840,7 @@ where
     }
 
     for attempt in 2..=max_attempts {
-        tokio::time::sleep(spec.retry_policy.backoff).await;
+        tokio::time::sleep(retry_delay_for_report(&spec.retry_policy, &next_report)).await;
 
         let mut reconnected = match cleanup_executor.connect_session(&cleanup_plan).await {
             Ok(session) => session,
@@ -852,6 +851,7 @@ where
                 if !report.should_retry(max_attempts) {
                     return report;
                 }
+                next_report = report;
                 continue;
             }
         };
@@ -930,7 +930,7 @@ where
                     write_checkpoint(store, &report).await?;
                     return Ok(report);
                 }
-                tokio::time::sleep(spec.retry_policy.backoff).await;
+                tokio::time::sleep(retry_delay_for_report(&spec.retry_policy, &report)).await;
                 continue;
             }
         };
@@ -961,7 +961,8 @@ where
                 if !stage_report.should_retry(max_attempts) {
                     return Ok(stage_report);
                 }
-                tokio::time::sleep(spec.retry_policy.backoff).await;
+                tokio::time::sleep(retry_delay_for_report(&spec.retry_policy, &stage_report))
+                    .await;
                 continue;
             }
 
@@ -1111,7 +1112,7 @@ where
             return report;
         }
 
-        tokio::time::sleep(retry_policy.backoff).await;
+        tokio::time::sleep(retry_delay_for_report(retry_policy, &report)).await;
     }
 
     unreachable!("execute_host_plan_with_retry should always return");
@@ -1160,6 +1161,50 @@ fn collector_url(ip: std::net::IpAddr, port: u16, endpoint: &str) -> String {
         std::net::IpAddr::V6(_) => format!("[{ip}]"),
     };
     format!("http://{host}:{port}/{}", endpoint.trim_start_matches('/'))
+}
+
+fn retry_delay_for_report(
+    retry_policy: &RetryPolicy,
+    report: &HostExecutionReport,
+) -> Duration {
+    if should_apply_smb_connect_cooldown(report) {
+        std::cmp::max(retry_policy.backoff, SMB_CONNECT_RETRY_COOLDOWN)
+    } else {
+        retry_policy.backoff
+    }
+}
+
+fn should_apply_smb_connect_cooldown(report: &HostExecutionReport) -> bool {
+    report.failure_phase == Some(super::scheduler::FailurePhase::Connect)
+        && report.failure_disposition == Some(super::scheduler::FailureDisposition::Retryable)
+        && report
+            .plan
+            .transport_chain
+            .contains(&TransportKind::WindowsSmb)
+        && report
+            .error
+            .as_deref()
+            .is_some_and(is_smb_session_setup_burst_error)
+}
+
+fn is_smb_session_setup_burst_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("smb")
+        && [
+            "sessionsetup",
+            "session setup",
+            "0xc000006d",
+            "status_logon_failure",
+            "logon failure",
+            "account restriction",
+            "account locked",
+            "user session deleted",
+            "session deleted",
+            "too many sessions",
+            "too many connections",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
 }
 
 fn http_artifact_filename(endpoint: &str) -> &str {
@@ -1278,7 +1323,7 @@ mod tests {
     };
     use crate::runtime::discovery::DiscoveryRecord;
     use crate::runtime::mission::{
-        HostPlan, HostState, HostTarget, MissionSpec, PlatformHint, TransportKind,
+        HostPlan, HostState, HostTarget, MissionSpec, PlatformHint, RetryPolicy, TransportKind,
     };
     use crate::runtime::Planner;
     use crate::runtime::scheduler::{
@@ -1458,6 +1503,55 @@ mod tests {
             concurrency_limit: 4,
             ..MissionSpec::default()
         }
+    }
+
+    #[test]
+    fn retry_delay_for_report_uses_default_backoff_for_non_smb_failures() {
+        let retry_policy = RetryPolicy {
+            backoff: Duration::from_millis(500),
+            ..RetryPolicy::default()
+        };
+        let report = HostExecutionReport::retryable_failure(
+            HostPlan::queued(
+                HostTarget {
+                    ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 31)),
+                    platform: PlatformHint::Unix,
+                    open_ports: vec![22],
+                },
+                vec![TransportKind::UnixSsh],
+            ),
+            FailurePhase::Connect,
+            "connection reset by peer",
+        );
+
+        assert_eq!(
+            super::retry_delay_for_report(&retry_policy, &report),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn retry_delay_for_report_extends_backoff_for_smb_session_setup_bursts() {
+        let retry_policy = RetryPolicy {
+            backoff: Duration::from_millis(500),
+            ..RetryPolicy::default()
+        };
+        let report = HostExecutionReport::retryable_failure(
+            HostPlan::queued(
+                HostTarget {
+                    ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 32)),
+                    platform: PlatformHint::Windows,
+                    open_ports: vec![445],
+                },
+                vec![TransportKind::WindowsSmb],
+            ),
+            FailurePhase::Connect,
+            "WindowsSmb: smb exec connect to 10.0.0.32:445 failed: unexpected status code 0xc000006d for SessionSetup",
+        );
+
+        assert!(
+            super::retry_delay_for_report(&retry_policy, &report) > Duration::from_millis(500)
+        );
     }
 
     fn record(last_octet: u8) -> DiscoveryRecord {
