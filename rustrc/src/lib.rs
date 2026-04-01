@@ -15,6 +15,7 @@ static TRANSFER_HELPER: &str = include_str!("../resources/transfer_file.bat");
 #[cfg(feature = "ssh")]
 pub mod ssh;
 
+#[cfg(feature = "winexe")]
 pub mod stateful_process;
 
 /// Gate behind telnet feature

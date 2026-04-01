@@ -8,3 +8,9 @@ members = [
 
 resolver = "2"
 
+[profile.release]
+opt-level = "z"
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"

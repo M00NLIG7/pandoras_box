@@ -2057,7 +2057,6 @@ name = "pandoras_box"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "chrono",
  "clap",
  "env_logger",
  "futures",

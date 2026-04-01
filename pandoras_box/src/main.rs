@@ -1,4 +1,3 @@
-use chrono::Local;
 use clap::{arg as carg, command, value_parser, ArgMatches, Command as ClapCommand};
 use log::{error, info};
 use pandoras_box::*;
@@ -7,10 +6,19 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Once;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
 static INIT: Once = Once::new();
+
+fn current_timestamp_string() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string()
+}
 
 struct MemoryReport;
 
@@ -177,7 +185,7 @@ fn mission_spec_from_matches(
     let mission_id = matches
         .get_one::<String>("mission_id")
         .cloned()
-        .unwrap_or_else(|| Local::now().format("%Y%m%d_%H%M%S").to_string());
+        .unwrap_or_else(current_timestamp_string);
 
     runtime::MissionSpec {
         targets,
@@ -211,7 +219,7 @@ pub fn setup_tracing() -> Result<()> {
 
     INIT.call_once(|| {
         // Create log file
-        let timestamp = Local::now().format("%Y%m%d_%H%M%S");
+        let timestamp = current_timestamp_string();
         let log_path = format!("./pandoras_box{}.log", timestamp);
 
         // Create file appender
