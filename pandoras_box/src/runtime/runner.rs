@@ -14,7 +14,7 @@ use super::policy::ExecutionPolicy;
 use super::reporting::write_asset_inventory_bundle;
 use super::scheduler::{HostExecutionReport, HostExecutor};
 use super::session_executor::{SessionExecutor, SessionOperation};
-use super::session_factory::SessionFactory;
+use super::session_factory::{BoxedHostSession, SessionFactory};
 use super::transport::password::PasswordSessionFactory;
 use super::workspace::{collector_plan, CollectorPlan};
 use crate::{Error, Result};
@@ -98,11 +98,6 @@ impl PandorasBoxRunner {
 
             let collector_job = plan_collector_job(&self.spec, &store, &plan);
             stage_support_files(&collector_job.support_files()).await?;
-            let executor = Arc::new(SessionExecutor::new(
-                Arc::clone(&factory),
-                policy,
-                collector_job.session_operations(),
-            ));
             let semaphore = Arc::clone(&semaphore);
             let store = store.clone();
             let spec = self.spec.clone();
@@ -113,18 +108,13 @@ impl PandorasBoxRunner {
                     .acquire_owned()
                     .await
                     .expect("Pandora's Box semaphore unexpectedly closed");
-                let report =
-                    execute_host_plan_with_retry(&spec.retry_policy, Arc::clone(&executor), plan)
-                        .await;
-                let report =
-                    collect_host_artifacts_with_retry(&spec, &store, &collector_job.collect, report)
-                        .await;
-                let report = cleanup_host_workspace_with_retry(
+                let report = execute_host_with_persistent_session_with_retry(
                     &spec,
+                    &store,
                     policy,
                     factory,
-                    &collector_job.cleanup,
-                    report,
+                    plan,
+                    collector_job,
                 )
                 .await;
                 store
@@ -566,11 +556,40 @@ async fn collect_host_artifacts_with_retry(
     unreachable!("collect_host_artifacts_with_retry should always return");
 }
 
-async fn cleanup_host_workspace<F>(
-    policy: ExecutionPolicy,
-    factory: Arc<F>,
+fn cleanup_session_operations(cleanup: &CollectorCleanupJob) -> Vec<SessionOperation> {
+    match cleanup {
+        CollectorCleanupJob::SessionDisconnectOnly => Vec::new(),
+        CollectorCleanupJob::RemoteExec {
+            command,
+            capture_path,
+        } => vec![SessionOperation::cleanup_capture_exec(
+            command.clone(),
+            capture_path.clone(),
+        )],
+    }
+}
+
+async fn disconnect_host_session(
+    report: HostExecutionReport,
+    session: &mut dyn crate::runtime::transport::HostSession,
+) -> HostExecutionReport {
+    match session.cleanup().await {
+        Ok(()) => report,
+        Err(err) => HostExecutionReport::terminal_failure(
+            report.plan,
+            super::scheduler::FailurePhase::Cleanup,
+            format!("cleanup failed: {err}"),
+        )
+        .with_attempt_count(report.attempt_count),
+    }
+}
+
+async fn cleanup_host_workspace_with_live_session<F>(
+    spec: &MissionSpec,
+    cleanup_executor: &SessionExecutor<F>,
     cleanup: &CollectorCleanupJob,
     report: HostExecutionReport,
+    session: &mut BoxedHostSession,
 ) -> HostExecutionReport
 where
     F: SessionFactory + 'static,
@@ -579,63 +598,135 @@ where
         return report;
     }
 
-    let CollectorCleanupJob::RemoteExec {
-        command,
-        capture_path,
-    } = cleanup
-    else {
-        return report;
-    };
-
-    let executor = SessionExecutor::new(
-        factory,
-        policy,
-        vec![SessionOperation::capture_exec(
-            command.clone(),
-            capture_path.clone(),
-        )],
-    );
-
-    executor
-        .run(report.plan.force_state(HostState::Queued))
-        .await
-}
-
-async fn cleanup_host_workspace_with_retry<F>(
-    spec: &MissionSpec,
-    policy: ExecutionPolicy,
-    factory: Arc<F>,
-    cleanup: &CollectorCleanupJob,
-    report: HostExecutionReport,
-) -> HostExecutionReport
-where
-    F: SessionFactory + 'static,
-{
-    if report.final_state != HostState::Complete {
+    if matches!(cleanup, CollectorCleanupJob::SessionDisconnectOnly) {
         return report;
     }
 
     let base_attempt_count = report.attempt_count;
     let max_attempts = spec.retry_policy.max_attempts.max(1);
+    let cleanup_plan = report.plan.force_state(HostState::Connecting);
 
-    for attempt in 1..=max_attempts {
-        let next_report =
-            cleanup_host_workspace(policy, Arc::clone(&factory), cleanup, report.clone())
-                .await
-                .with_attempt_count(base_attempt_count.max(attempt));
+    let mut next_report = cleanup_executor
+        .run_connected_session(cleanup_plan.clone(), &mut **session, false)
+        .await
+        .with_attempt_count(base_attempt_count.max(1));
 
-        if !matches!(
-            next_report.failure_disposition,
-            Some(super::scheduler::FailureDisposition::Retryable)
-        ) || attempt >= max_attempts
-        {
-            return next_report;
-        }
-
-        tokio::time::sleep(spec.retry_policy.backoff).await;
+    if !next_report.should_retry(max_attempts) {
+        return next_report;
     }
 
-    unreachable!("cleanup_host_workspace_with_retry should always return");
+    for attempt in 2..=max_attempts {
+        tokio::time::sleep(spec.retry_policy.backoff).await;
+
+        let mut reconnected = match cleanup_executor.connect_session(&cleanup_plan).await {
+            Ok(session) => session,
+            Err(report) => {
+                let report = report.with_attempt_count(base_attempt_count.max(attempt));
+                if !report.should_retry(max_attempts) {
+                    return report;
+                }
+                continue;
+            }
+        };
+
+        next_report = cleanup_executor
+            .run_connected_session(cleanup_plan.clone(), &mut *reconnected, false)
+            .await
+            .with_attempt_count(base_attempt_count.max(attempt));
+
+        *session = reconnected;
+
+        if !next_report.should_retry(max_attempts) {
+            return next_report;
+        }
+    }
+
+    unreachable!("cleanup_host_workspace_with_live_session should always return");
+}
+
+async fn execute_host_with_persistent_session_with_retry<F>(
+    spec: &MissionSpec,
+    store: &ArtifactStore,
+    policy: ExecutionPolicy,
+    factory: Arc<F>,
+    plan: HostPlan,
+    collector_job: CollectorJobPlan,
+) -> HostExecutionReport
+where
+    F: SessionFactory + 'static,
+{
+    let max_attempts = spec.retry_policy.max_attempts.max(1);
+    let stage_executor = SessionExecutor::new(
+        Arc::clone(&factory),
+        policy,
+        collector_job.session_operations(),
+    );
+    let cleanup_executor = SessionExecutor::new(
+        factory,
+        policy,
+        cleanup_session_operations(&collector_job.cleanup),
+    );
+
+    for attempt in 1..=max_attempts {
+        let connect_plan = match plan.transition(HostState::Connecting) {
+            Ok(plan) => plan,
+            Err(err) => {
+                return HostExecutionReport::terminal_failure(
+                    plan,
+                    super::scheduler::FailurePhase::Connect,
+                    err.to_string(),
+                );
+            }
+        };
+
+        let mut session = match stage_executor.connect_session(&connect_plan).await {
+            Ok(session) => session,
+            Err(report) => {
+                let report = report.with_attempt_count(attempt);
+                if !report.should_retry(max_attempts) {
+                    return report;
+                }
+                tokio::time::sleep(spec.retry_policy.backoff).await;
+                continue;
+            }
+        };
+
+        let stage_report = stage_executor
+            .run_connected_session(connect_plan.clone(), &mut *session, false)
+            .await
+            .with_attempt_count(attempt);
+        if stage_report.final_state != HostState::Complete {
+            if !stage_report.should_retry(max_attempts) {
+                return stage_report;
+            }
+            tokio::time::sleep(spec.retry_policy.backoff).await;
+            continue;
+        }
+
+        let collect_report =
+            collect_host_artifacts_with_retry(spec, store, &collector_job.collect, stage_report)
+                .await;
+        if collect_report.final_state != HostState::Complete {
+            let _ = session.cleanup().await;
+            return collect_report;
+        }
+
+        let cleanup_report = cleanup_host_workspace_with_live_session(
+            spec,
+            &cleanup_executor,
+            &collector_job.cleanup,
+            collect_report,
+            &mut session,
+        )
+        .await;
+        if cleanup_report.final_state != HostState::Complete {
+            return cleanup_report;
+        }
+
+        return disconnect_host_session(cleanup_report, &mut *session).await;
+    }
+
+    unreachable!("execute_host_with_persistent_session_with_retry should always return");
 }
 
 async fn execute_host_plan_with_retry<E>(
@@ -1139,6 +1230,7 @@ mod tests {
     struct SessionTemplate {
         events: Arc<Mutex<Vec<String>>>,
         exec_outputs: Arc<HashMap<String, ExecResponse>>,
+        exec_errors: Arc<Mutex<HashMap<String, Vec<String>>>>,
         downloads: Arc<HashMap<String, Vec<u8>>>,
         uploads: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     }
@@ -1148,6 +1240,7 @@ mod tests {
             FakeSession {
                 events: self.events,
                 exec_outputs: self.exec_outputs,
+                exec_errors: self.exec_errors,
                 downloads: self.downloads,
                 uploads: self.uploads,
             }
@@ -1157,6 +1250,7 @@ mod tests {
     struct FakeSession {
         events: Arc<Mutex<Vec<String>>>,
         exec_outputs: Arc<HashMap<String, ExecResponse>>,
+        exec_errors: Arc<Mutex<HashMap<String, Vec<String>>>>,
         downloads: Arc<HashMap<String, Vec<u8>>>,
         uploads: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     }
@@ -1168,6 +1262,17 @@ mod tests {
                 .lock()
                 .expect("events lock should be available")
                 .push(format!("exec:{}", request.command));
+
+            if let Some(errors) = self
+                .exec_errors
+                .lock()
+                .expect("exec errors lock should be available")
+                .get_mut(&request.command)
+            {
+                if !errors.is_empty() {
+                    return Err(Error::CommunicatorError(errors.remove(0)));
+                }
+            }
 
             Ok(self
                 .exec_outputs
@@ -1230,14 +1335,35 @@ mod tests {
     }
 
     struct FakeSessionFactory {
-        templates: Arc<Mutex<HashMap<(IpAddr, TransportKind), SessionTemplate>>>,
+        templates: Arc<Mutex<HashMap<(IpAddr, TransportKind), Vec<SessionTemplate>>>>,
+        connect_events: Arc<Mutex<Vec<(IpAddr, TransportKind)>>>,
     }
 
     impl FakeSessionFactory {
         fn new(entries: Vec<((IpAddr, TransportKind), SessionTemplate)>) -> Self {
             Self {
-                templates: Arc::new(Mutex::new(entries.into_iter().collect())),
+                templates: Arc::new(Mutex::new(
+                    entries
+                        .into_iter()
+                        .map(|(key, template)| (key, vec![template]))
+                        .collect(),
+                )),
+                connect_events: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        fn new_sequences(entries: Vec<((IpAddr, TransportKind), Vec<SessionTemplate>)>) -> Self {
+            Self {
+                templates: Arc::new(Mutex::new(entries.into_iter().collect())),
+                connect_events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn connect_events(&self) -> Vec<(IpAddr, TransportKind)> {
+            self.connect_events
+                .lock()
+                .expect("connect events lock should be available")
+                .clone()
         }
     }
 
@@ -1248,12 +1374,22 @@ mod tests {
             plan: &HostPlan,
             transport: TransportKind,
         ) -> Result<BoxedHostSession> {
+            self.connect_events
+                .lock()
+                .expect("connect events lock should be available")
+                .push((plan.target.ip, transport));
             let template = self
                 .templates
                 .lock()
                 .expect("templates lock should be available")
-                .get(&(plan.target.ip, transport))
-                .cloned()
+                .get_mut(&(plan.target.ip, transport))
+                .and_then(|templates| {
+                    if templates.len() > 1 {
+                        Some(templates.remove(0))
+                    } else {
+                        templates.first().cloned()
+                    }
+                })
                 .ok_or_else(|| Error::CommunicatorError("missing fake session".to_string()))?;
 
             Ok(Box::new(template.into_session()))
@@ -2033,6 +2169,7 @@ mod tests {
                     },
                 ),
             ])),
+            exec_errors: Arc::new(Mutex::new(HashMap::new())),
             downloads: Arc::new(HashMap::new()),
             uploads: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -2044,7 +2181,7 @@ mod tests {
         )]));
 
         let summary = runner
-            .run_with_stream_and_factory(stream::iter(vec![record.clone()]), factory)
+            .run_with_stream_and_factory(stream::iter(vec![record.clone()]), Arc::clone(&factory))
             .await
             .expect("session factory runner should succeed");
 
@@ -2106,10 +2243,165 @@ mod tests {
                 &format!("exec:{post_stage_command}"),
                 &format!("exec:{collector_command}"),
                 &format!("exec:{serve_command}"),
-                "disconnect",
                 &format!("exec:{cleanup_command}"),
                 "disconnect"
             ]
+        );
+        assert_eq!(
+            factory.connect_events(),
+            vec![(record.host.ip, TransportKind::UnixSsh)]
+        );
+        server
+            .join()
+            .expect("test HTTP artifact server should exit cleanly");
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn runner_session_factory_path_reuses_single_windows_smb_connection_across_collector_phases()
+    {
+        let root = temp_root("runner-session-factory-smb");
+        let chimera_path = root.join("fixtures/chimera.exe");
+        write_fixture(&chimera_path, b"fake chimera binary").await;
+        let (collector_port, requests, server) = spawn_http_artifact_server(vec![
+            ("/inventory.json", b"{\"hostname\":\"tiny11\"}\n"),
+            ("/application.log", b"collector log\n"),
+        ]);
+        let spec = MissionSpec {
+            artifact_root: root.clone(),
+            mission_id: "mission-123".to_string(),
+            chimera_windows_path: chimera_path.clone(),
+            collector_port,
+            ..spec(root.clone())
+        };
+        let runner = PandorasBoxRunner::new(spec.clone());
+        let record = record_for_host(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            PlatformHint::Windows,
+            vec![445],
+            Some(128),
+        );
+        let workspace = remote_workspace(
+            &spec,
+            &HostPlan::queued(record.host.clone(), vec![TransportKind::WindowsSmb]),
+        );
+        let collector_command = workspace.collector_command();
+        let serve_command = workspace.serve_command();
+        let ensure_directories_command = workspace.ensure_directories_command();
+        let cleanup_command = workspace.cleanup_command();
+        let session_template = SessionTemplate {
+            events: Arc::new(Mutex::new(Vec::new())),
+            exec_outputs: Arc::new(HashMap::from([
+                (
+                    "whoami".to_string(),
+                    ExecResponse {
+                        stdout: b"nt authority\\system\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    ensure_directories_command.clone(),
+                    ExecResponse {
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    collector_command.clone(),
+                    ExecResponse {
+                        stdout: b"collector complete\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    serve_command.clone(),
+                    ExecResponse {
+                        stdout: b"serve started\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    cleanup_command.clone(),
+                    ExecResponse {
+                        stdout: b"cleanup complete\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+            ])),
+            exec_errors: Arc::new(Mutex::new(HashMap::new())),
+            downloads: Arc::new(HashMap::new()),
+            uploads: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let events = Arc::clone(&session_template.events);
+        let uploads = Arc::clone(&session_template.uploads);
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (record.host.ip, TransportKind::WindowsSmb),
+            session_template,
+        )]));
+
+        let summary = runner
+            .run_with_stream_and_factory(stream::iter(vec![record.clone()]), Arc::clone(&factory))
+            .await
+            .expect("smb session factory runner should succeed");
+
+        assert_eq!(summary.discovered_hosts, 1);
+        assert_eq!(summary.completed_hosts, 1);
+        assert_eq!(summary.failed_hosts, 0);
+        assert_eq!(
+            tokio::fs::read_to_string(
+                root.join("mission-123/hosts/127.0.0.1/files/inventory.json")
+            )
+            .await
+            .expect("inventory file should exist"),
+            "{\"hostname\":\"tiny11\"}\n"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(
+                root.join("mission-123/hosts/127.0.0.1/logs/application.log")
+            )
+            .await
+            .expect("application log should exist"),
+            "collector log\n"
+        );
+        assert_eq!(
+            uploads
+                .lock()
+                .expect("uploads lock should be available")
+                .get(&workspace.remote_binary_path)
+                .expect("chimera upload should exist"),
+            b"fake chimera binary"
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .expect("requests lock should be available")
+                .as_slice(),
+            ["/inventory.json", "/application.log"]
+        );
+        assert_eq!(
+            events
+                .lock()
+                .expect("events lock should be available")
+                .as_slice(),
+            [
+                "exec:whoami",
+                &format!("exec:{ensure_directories_command}"),
+                &format!("put:{}", workspace.remote_binary_path),
+                &format!("exec:{collector_command}"),
+                &format!("exec:{serve_command}"),
+                &format!("exec:{cleanup_command}"),
+                "disconnect"
+            ]
+        );
+        assert_eq!(
+            factory.connect_events(),
+            vec![(record.host.ip, TransportKind::WindowsSmb)]
         );
         server
             .join()
@@ -2149,6 +2441,7 @@ mod tests {
                     },
                 ),
             ])),
+            exec_errors: Arc::new(Mutex::new(HashMap::new())),
             downloads: Arc::new(HashMap::new()),
             uploads: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -2272,6 +2565,7 @@ mod tests {
                     },
                 ),
             ])),
+            exec_errors: Arc::new(Mutex::new(HashMap::new())),
             downloads: Arc::new(HashMap::new()),
             uploads: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -2402,6 +2696,7 @@ mod tests {
                     },
                 ),
             ])),
+            exec_errors: Arc::new(Mutex::new(HashMap::new())),
             downloads: Arc::new(HashMap::new()),
             uploads: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -2531,6 +2826,7 @@ mod tests {
                     },
                 ),
             ])),
+            exec_errors: Arc::new(Mutex::new(HashMap::new())),
             downloads: Arc::new(HashMap::new()),
             uploads: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -2580,10 +2876,333 @@ mod tests {
                 &format!("exec:{post_stage_command}"),
                 &format!("exec:{collector_command}"),
                 &format!("exec:{serve_command}"),
+                &format!("exec:{cleanup_command}"),
+                "disconnect"
+            ]
+        );
+        server
+            .join()
+            .expect("test HTTP artifact server should exit cleanly");
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn runner_reconnects_unix_ssh_session_only_after_retryable_cleanup_failure() {
+        let root = temp_root("runner-session-factory-ssh-reconnect");
+        let chimera_path = root.join("fixtures/chimera");
+        write_fixture(&chimera_path, b"fake chimera binary").await;
+        let (collector_port, requests, server) = spawn_http_artifact_server(vec![
+            ("/inventory.json", b"{\"hostname\":\"lab\"}\n"),
+            ("/application.log", b"collector log\n"),
+        ]);
+        let spec = MissionSpec {
+            artifact_root: root.clone(),
+            mission_id: "mission-123".to_string(),
+            chimera_unix_path: chimera_path.clone(),
+            collector_port,
+            ..spec(root.clone())
+        };
+        let runner = PandorasBoxRunner::new(spec.clone());
+        let record = record_for_host(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            PlatformHint::Unix,
+            vec![22],
+            Some(64),
+        );
+        let workspace = remote_workspace(
+            &spec,
+            &HostPlan::queued(record.host.clone(), vec![TransportKind::UnixSsh]),
+        );
+        let collector_command = workspace.collector_command();
+        let serve_command = workspace.serve_command();
+        let ensure_directories_command = workspace.ensure_directories_command();
+        let post_stage_command = workspace
+            .post_stage_commands()
+            .into_iter()
+            .next()
+            .expect("unix workspace should require chmod");
+        let cleanup_command = workspace.cleanup_command();
+        let shared_events = Arc::new(Mutex::new(Vec::new()));
+        let shared_uploads = Arc::new(Mutex::new(HashMap::new()));
+        let first_session = SessionTemplate {
+            events: Arc::clone(&shared_events),
+            exec_outputs: Arc::new(HashMap::from([
+                (
+                    "whoami".to_string(),
+                    ExecResponse {
+                        stdout: b"root\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    ensure_directories_command.clone(),
+                    ExecResponse {
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    post_stage_command.clone(),
+                    ExecResponse {
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    collector_command.clone(),
+                    ExecResponse {
+                        stdout: b"collector complete\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    serve_command.clone(),
+                    ExecResponse {
+                        stdout: b"serve started\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    cleanup_command.clone(),
+                    ExecResponse {
+                        stdout: b"cleanup complete\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+            ])),
+            exec_errors: Arc::new(Mutex::new(HashMap::from([(
+                cleanup_command.clone(),
+                vec!["connection reset by peer".to_string()],
+            )]))),
+            downloads: Arc::new(HashMap::new()),
+            uploads: Arc::clone(&shared_uploads),
+        };
+        let second_session = SessionTemplate {
+            events: Arc::clone(&shared_events),
+            exec_outputs: Arc::new(HashMap::from([(
+                cleanup_command.clone(),
+                ExecResponse {
+                    stdout: b"cleanup complete\n".to_vec(),
+                    stderr: Vec::new(),
+                    status_code: Some(0),
+                },
+            )])),
+            exec_errors: Arc::new(Mutex::new(HashMap::new())),
+            downloads: Arc::new(HashMap::new()),
+            uploads: Arc::clone(&shared_uploads),
+        };
+        let factory = Arc::new(FakeSessionFactory::new_sequences(vec![(
+            (record.host.ip, TransportKind::UnixSsh),
+            vec![first_session, second_session],
+        )]));
+
+        let summary = runner
+            .run_with_stream_and_factory(stream::iter(vec![record.clone()]), Arc::clone(&factory))
+            .await
+            .expect("ssh cleanup retry should recover");
+
+        assert_eq!(summary.discovered_hosts, 1);
+        assert_eq!(summary.completed_hosts, 1);
+        assert_eq!(summary.failed_hosts, 0);
+        assert_eq!(
+            requests
+                .lock()
+                .expect("requests lock should be available")
+                .as_slice(),
+            ["/inventory.json", "/application.log"]
+        );
+        assert_eq!(
+            shared_events
+                .lock()
+                .expect("events lock should be available")
+                .as_slice(),
+            [
+                "exec:whoami",
+                &format!("exec:{ensure_directories_command}"),
+                &format!("put:{}", workspace.remote_binary_path),
+                &format!("exec:{post_stage_command}"),
+                &format!("exec:{collector_command}"),
+                &format!("exec:{serve_command}"),
+                &format!("exec:{cleanup_command}"),
                 "disconnect",
                 &format!("exec:{cleanup_command}"),
                 "disconnect"
             ]
+        );
+        assert_eq!(
+            factory.connect_events(),
+            vec![
+                (record.host.ip, TransportKind::UnixSsh),
+                (record.host.ip, TransportKind::UnixSsh)
+            ]
+        );
+        assert!(
+            tokio::fs::read_to_string(root.join("mission-123/hosts/127.0.0.1/status.json"))
+                .await
+                .expect("status artifact should exist")
+                .contains("\"attempt_count\": 2")
+        );
+        server
+            .join()
+            .expect("test HTTP artifact server should exit cleanly");
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn runner_reconnects_windows_smb_session_only_after_retryable_cleanup_failure() {
+        let root = temp_root("runner-session-factory-smb-reconnect");
+        let chimera_path = root.join("fixtures/chimera.exe");
+        write_fixture(&chimera_path, b"fake chimera binary").await;
+        let (collector_port, requests, server) = spawn_http_artifact_server(vec![
+            ("/inventory.json", b"{\"hostname\":\"tiny11\"}\n"),
+            ("/application.log", b"collector log\n"),
+        ]);
+        let spec = MissionSpec {
+            artifact_root: root.clone(),
+            mission_id: "mission-123".to_string(),
+            chimera_windows_path: chimera_path.clone(),
+            collector_port,
+            ..spec(root.clone())
+        };
+        let runner = PandorasBoxRunner::new(spec.clone());
+        let record = record_for_host(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            PlatformHint::Windows,
+            vec![445],
+            Some(128),
+        );
+        let workspace = remote_workspace(
+            &spec,
+            &HostPlan::queued(record.host.clone(), vec![TransportKind::WindowsSmb]),
+        );
+        let collector_command = workspace.collector_command();
+        let serve_command = workspace.serve_command();
+        let ensure_directories_command = workspace.ensure_directories_command();
+        let cleanup_command = workspace.cleanup_command();
+        let shared_events = Arc::new(Mutex::new(Vec::new()));
+        let shared_uploads = Arc::new(Mutex::new(HashMap::new()));
+        let first_session = SessionTemplate {
+            events: Arc::clone(&shared_events),
+            exec_outputs: Arc::new(HashMap::from([
+                (
+                    "whoami".to_string(),
+                    ExecResponse {
+                        stdout: b"nt authority\\system\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    ensure_directories_command.clone(),
+                    ExecResponse {
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    collector_command.clone(),
+                    ExecResponse {
+                        stdout: b"collector complete\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    serve_command.clone(),
+                    ExecResponse {
+                        stdout: b"serve started\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+                (
+                    cleanup_command.clone(),
+                    ExecResponse {
+                        stdout: b"cleanup complete\n".to_vec(),
+                        stderr: Vec::new(),
+                        status_code: Some(0),
+                    },
+                ),
+            ])),
+            exec_errors: Arc::new(Mutex::new(HashMap::from([(
+                cleanup_command.clone(),
+                vec!["connection reset by peer".to_string()],
+            )]))),
+            downloads: Arc::new(HashMap::new()),
+            uploads: Arc::clone(&shared_uploads),
+        };
+        let second_session = SessionTemplate {
+            events: Arc::clone(&shared_events),
+            exec_outputs: Arc::new(HashMap::from([(
+                cleanup_command.clone(),
+                ExecResponse {
+                    stdout: b"cleanup complete\n".to_vec(),
+                    stderr: Vec::new(),
+                    status_code: Some(0),
+                },
+            )])),
+            exec_errors: Arc::new(Mutex::new(HashMap::new())),
+            downloads: Arc::new(HashMap::new()),
+            uploads: Arc::clone(&shared_uploads),
+        };
+        let factory = Arc::new(FakeSessionFactory::new_sequences(vec![(
+            (record.host.ip, TransportKind::WindowsSmb),
+            vec![first_session, second_session],
+        )]));
+
+        let summary = runner
+            .run_with_stream_and_factory(stream::iter(vec![record.clone()]), Arc::clone(&factory))
+            .await
+            .expect("smb cleanup retry should recover");
+
+        assert_eq!(summary.discovered_hosts, 1);
+        assert_eq!(summary.completed_hosts, 1);
+        assert_eq!(summary.failed_hosts, 0);
+        assert_eq!(
+            requests
+                .lock()
+                .expect("requests lock should be available")
+                .as_slice(),
+            ["/inventory.json", "/application.log"]
+        );
+        assert_eq!(
+            shared_events
+                .lock()
+                .expect("events lock should be available")
+                .as_slice(),
+            [
+                "exec:whoami",
+                &format!("exec:{ensure_directories_command}"),
+                &format!("put:{}", workspace.remote_binary_path),
+                &format!("exec:{collector_command}"),
+                &format!("exec:{serve_command}"),
+                &format!("exec:{cleanup_command}"),
+                "disconnect",
+                &format!("exec:{cleanup_command}"),
+                "disconnect"
+            ]
+        );
+        assert_eq!(
+            factory.connect_events(),
+            vec![
+                (record.host.ip, TransportKind::WindowsSmb),
+                (record.host.ip, TransportKind::WindowsSmb)
+            ]
+        );
+        assert!(
+            tokio::fs::read_to_string(root.join("mission-123/hosts/127.0.0.1/status.json"))
+                .await
+                .expect("status artifact should exist")
+                .contains("\"attempt_count\": 2")
         );
         server
             .join()

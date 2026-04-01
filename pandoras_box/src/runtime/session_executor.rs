@@ -8,7 +8,7 @@ use super::policy::{ExecutionPolicy, OperationKind};
 use super::scheduler::{
     FailureDisposition, FailurePhase, HostExecutionReport, HostExecutor,
 };
-use super::session_factory::SessionFactory;
+use super::session_factory::{BoxedHostSession, SessionFactory};
 use super::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +17,10 @@ pub enum SessionOperation {
         request: ExecRequest,
     },
     CaptureExec {
+        request: ExecRequest,
+        local_path: PathBuf,
+    },
+    CleanupCaptureExec {
         request: ExecRequest,
         local_path: PathBuf,
     },
@@ -52,6 +56,17 @@ impl SessionOperation {
     #[must_use]
     pub fn capture_exec(command: impl Into<String>, local_path: impl Into<PathBuf>) -> Self {
         Self::CaptureExec {
+            request: ExecRequest::new(command),
+            local_path: local_path.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn cleanup_capture_exec(
+        command: impl Into<String>,
+        local_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self::CleanupCaptureExec {
             request: ExecRequest::new(command),
             local_path: local_path.into(),
         }
@@ -105,15 +120,43 @@ impl<F> SessionExecutor<F> {
         }
     }
 
-    async fn run_connected_session(
-        &self,
-        mut plan: HostPlan,
-        session: &mut dyn HostSession,
-    ) -> HostExecutionReport {
-        plan = match plan.transition(HostState::Connected) {
-            Ok(plan) => plan,
-            Err(err) => return transition_failure(plan, FailurePhase::Connect, err),
+    pub(crate) async fn connect_session(&self, plan: &HostPlan) -> Result<BoxedHostSession, HostExecutionReport>
+    where
+        F: SessionFactory + 'static,
+    {
+        let mut errors = Vec::new();
+
+        for transport in plan.transport_chain.clone() {
+            if let Err(err) = self.policy.allow_transport(transport) {
+                errors.push(err.to_string());
+                continue;
+            }
+
+            match self.factory.connect(plan, transport).await {
+                Ok(session) => return Ok(session),
+                Err(err) => errors.push(format!("{transport:?}: {err}")),
+            }
+        }
+
+        let error = if errors.is_empty() {
+            "no usable transport".to_string()
+        } else {
+            errors.join("; ")
         };
+
+        Err(classify_connect_failure(
+            plan.force_state(HostState::Failed),
+            error,
+        ))
+    }
+
+    pub(crate) async fn run_connected_session(
+        &self,
+        plan: HostPlan,
+        session: &mut dyn HostSession,
+        disconnect_on_success: bool,
+    ) -> HostExecutionReport {
+        let mut plan = plan.force_state(HostState::Connected);
 
         for operation in &self.operations {
             let phase = operation.phase();
@@ -165,6 +208,40 @@ impl<F> SessionExecutor<F> {
                             plan,
                             phase,
                             "capture_exec failed",
+                            err,
+                        );
+                    }
+                },
+                SessionOperation::CleanupCaptureExec {
+                    request,
+                    local_path,
+                } => match session.exec(request.clone()).await {
+                    Ok(response) => {
+                        if let Err(err) = write_exec_capture(local_path, request, &response).await {
+                            let _ = session.cleanup().await;
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                "cleanup_exec failed",
+                                err,
+                            );
+                        }
+                        if let Err(err) = validate_exec_response(request, &response) {
+                            let _ = session.cleanup().await;
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                "cleanup_exec failed",
+                                err,
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        let _ = session.cleanup().await;
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            "cleanup_exec failed",
                             err,
                         );
                     }
@@ -259,8 +336,15 @@ impl<F> SessionExecutor<F> {
             Err(err) => return transition_failure(plan, FailurePhase::Cleanup, err),
         };
 
-        if let Err(err) = session.cleanup().await {
-            return terminal_phase_failure(complete_plan, FailurePhase::Cleanup, "cleanup failed", err);
+        if disconnect_on_success {
+            if let Err(err) = session.cleanup().await {
+                return terminal_phase_failure(
+                    complete_plan,
+                    FailurePhase::Cleanup,
+                    "cleanup failed",
+                    err,
+                );
+            }
         }
 
         HostExecutionReport::success(complete_plan, HostState::Complete)
@@ -327,7 +411,7 @@ impl SessionOperation {
         match self {
             Self::PutFile { .. } | Self::EnsureDir { .. } => FailurePhase::Stage,
             Self::GetFile { .. } => FailurePhase::Collect,
-            Self::CleanupExec { .. } => FailurePhase::Cleanup,
+            Self::CleanupExec { .. } | Self::CleanupCaptureExec { .. } => FailurePhase::Cleanup,
             Self::Exec { .. } | Self::CaptureExec { .. } => FailurePhase::Execute,
         }
     }
@@ -411,33 +495,16 @@ where
     F: SessionFactory + 'static,
 {
     async fn run(&self, plan: HostPlan) -> HostExecutionReport {
-        let mut plan = match plan.transition(HostState::Connecting) {
+        let plan = match plan.transition(HostState::Connecting) {
             Ok(plan) => plan,
             Err(err) => return transition_failure(plan, FailurePhase::Connect, err),
         };
-
-        let mut errors = Vec::new();
-
-        for transport in plan.transport_chain.clone() {
-            if let Err(err) = self.policy.allow_transport(transport) {
-                errors.push(err.to_string());
-                continue;
-            }
-
-            match self.factory.connect(&plan, transport).await {
-                Ok(mut session) => return self.run_connected_session(plan, &mut *session).await,
-                Err(err) => errors.push(format!("{transport:?}: {err}")),
-            }
-        }
-
-        plan = plan.force_state(HostState::Failed);
-        let error = if errors.is_empty() {
-            "no usable transport".to_string()
-        } else {
-            errors.join("; ")
+        let mut session = match self.connect_session(&plan).await {
+            Ok(session) => session,
+            Err(report) => return report,
         };
 
-        classify_connect_failure(plan, error)
+        self.run_connected_session(plan, &mut *session, true).await
     }
 }
 
