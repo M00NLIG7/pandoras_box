@@ -9,16 +9,21 @@ use tokio::task::JoinSet;
 
 use super::artifact_store::{ActiveMissionRecord, ArtifactStore};
 use super::discovery::{DiscoveryConfig, DiscoveryRecord, TcpDiscovery};
-use super::mission::{HostPlan, HostState, MissionSpec, RetryPolicy};
+use super::mission::{HostPlan, HostState, MissionSpec};
 use super::planner::Planner;
 use super::policy::ExecutionPolicy;
 use super::reporting::write_asset_inventory_bundle;
-use super::scheduler::{HostExecutionReport, HostExecutor};
+use super::scheduler::HostExecutionReport;
 use super::session_executor::{SessionExecutor, SessionOperation};
 use super::session_factory::{BoxedHostSession, SessionFactory};
 use super::transport::password::PasswordSessionFactory;
 use super::workspace::{collector_plan, CollectorPlan};
 use crate::{Error, Result};
+
+#[cfg(test)]
+use super::mission::RetryPolicy;
+#[cfg(test)]
+use super::scheduler::HostExecutor;
 
 #[cfg(not(test))]
 const COLLECTOR_READY_TIMEOUT: Duration = Duration::from_secs(15);
