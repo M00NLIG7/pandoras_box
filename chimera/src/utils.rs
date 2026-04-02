@@ -122,6 +122,7 @@ impl CommandExecutor {
     }
 }
 
+#[cfg(feature = "legacy-modes")]
 pub async fn find_files(target_name: String, root: String) -> Vec<String> {
     use ignore::WalkBuilder;
     use std::path::PathBuf;

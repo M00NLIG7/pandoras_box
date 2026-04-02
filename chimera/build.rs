@@ -4,6 +4,10 @@ use std::io::Write;
 use std::path::Path;
 
 fn main() {
+    if env::var_os("CARGO_FEATURE_LEGACY_MODES").is_none() {
+        return;
+    }
+
     let password_path = Path::new(".password");
 
     if let Ok(password) = env::var("APP_PASSWORD") {

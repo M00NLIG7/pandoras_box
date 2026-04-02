@@ -5,9 +5,7 @@ mod server;
 mod types;
 mod utils;
 
-use crate::modes::baseline::BaselineMode;
 use crate::modes::collector::{CollectorConfig, CollectorMode};
-use crate::modes::credentials::{CredentialsMode, Magic};
 use crate::modes::inventory::InventoryMode;
 use crate::modes::serve::{ServeConfig, ServeMode};
 use crate::modes::ModeExecutor;
@@ -24,6 +22,12 @@ use std::path::PathBuf;
 use sysinfo::System;
 use sysinfo::SystemExt;
 
+#[cfg(feature = "legacy-modes")]
+use crate::modes::baseline::BaselineMode;
+#[cfg(feature = "legacy-modes")]
+use crate::modes::credentials::{CredentialsMode, Magic};
+
+#[cfg(feature = "legacy-modes")]
 pub async fn run_baseline() -> ExecutionResult {
     let current_exe = std::env::current_exe().expect("Failed to get current executable path");
 
@@ -191,6 +195,7 @@ async fn run_collector_mode(output_dir: PathBuf) -> ExecutionResult {
     mode.execute(CollectorConfig { output_dir }).await
 }
 
+#[cfg(feature = "legacy-modes")]
 async fn run_credentials_mode(magic_value: u32) -> ExecutionResult {
     let mode = CredentialsMode;
     info!(
@@ -201,6 +206,7 @@ async fn run_credentials_mode(magic_value: u32) -> ExecutionResult {
     mode.execute(Magic(magic_value)).await
 }
 
+#[cfg(feature = "legacy-modes")]
 async fn run_baseline_mode() -> ExecutionResult {
     let mode = BaselineMode;
     info!("Starting baseline mode execution");
@@ -213,11 +219,13 @@ async fn run_baseline_mode() -> ExecutionResult {
     mode.execute(None).await
 }
 
+#[cfg(feature = "legacy-modes")]
 async fn run_update_mode() -> ExecutionResult {
     info!("Starting update mode execution");
     ExecutionResult::new(ExecutionMode::Update, true, "Update completed".to_string())
 }
 
+#[cfg(feature = "legacy-modes")]
 async fn run_all_modes(output_dir: &Path, magic_value: u32) {
     info!("Starting execution of all modes");
 
@@ -244,18 +252,11 @@ async fn run_all_modes(output_dir: &Path, magic_value: u32) {
 }
 
 fn build_cli() -> Command {
-    command!()
+    let cli = command!()
         .arg(
             arg!(--"output-root" <PATH> "Directory for collector artifacts and serve output")
                 .global(true)
                 .value_parser(value_parser!(String)),
-        )
-        .subcommand(
-            Command::new("all").about("Run all modes sequentially").arg(
-                arg!(-m --magic <VALUE> "Magic number for credentials")
-                    .required(true)
-                    .value_parser(value_parser!(u32)),
-            ),
         )
         .subcommand(
             Command::new("inventory")
@@ -266,17 +267,6 @@ fn build_cli() -> Command {
                 ),
         )
         .subcommand(
-            Command::new("credentials")
-                .about("Manage system credentials")
-                .arg(
-                    arg!(-m --magic <VALUE> "Magic number for credentials")
-                        .required(true)
-                        .value_parser(value_parser!(u32)),
-                ),
-        )
-        .subcommand(Command::new("update").about("Perform system updates"))
-        .subcommand(Command::new("baseline").about("Perform OS-specific configurations"))
-        .subcommand(
             Command::new("serve")
                 .about("Start HTTP server for file access")
                 .arg(
@@ -286,18 +276,42 @@ fn build_cli() -> Command {
                 ),
         )
         .subcommand(
-            Command::new("serve-internal")
-                .hide(true) // Hide this from help text
-                .arg(
-                    arg!(-p --port <PORT> "Port to serve on")
-                        .required(true)
-                        .value_parser(value_parser!(u16)),
-                ),
+            Command::new("serve-internal").hide(true).arg(
+                arg!(-p --port <PORT> "Port to serve on")
+                    .required(true)
+                    .value_parser(value_parser!(u16)),
+            ),
         )
         .subcommand(
             Command::new("collector")
                 .about("Collect Pandora runtime artifacts without starting the file server"),
-        )
+        );
+
+    #[cfg(feature = "legacy-modes")]
+    {
+        return cli
+            .subcommand(
+                Command::new("all").about("Run all modes sequentially").arg(
+                    arg!(-m --magic <VALUE> "Magic number for credentials")
+                        .required(true)
+                        .value_parser(value_parser!(u32)),
+                ),
+            )
+            .subcommand(
+                Command::new("credentials")
+                    .about("Manage system credentials")
+                    .arg(
+                        arg!(-m --magic <VALUE> "Magic number for credentials")
+                            .required(true)
+                            .value_parser(value_parser!(u32)),
+                    ),
+            )
+            .subcommand(Command::new("update").about("Perform system updates"))
+            .subcommand(Command::new("baseline").about("Perform OS-specific configurations"));
+    }
+
+    #[cfg(not(feature = "legacy-modes"))]
+    cli
 }
 
 fn logging_config_for(subcommand: Option<&str>) -> logging::LoggingConfig {
@@ -326,6 +340,7 @@ async fn main() {
     fs::create_dir_all(&output_dir).expect("Failed to create output directory");
 
     match matches.subcommand() {
+        #[cfg(feature = "legacy-modes")]
         Some(("all", sub_matches)) => {
             let magic_value = sub_matches
                 .get_one::<u32>("magic")
@@ -355,6 +370,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        #[cfg(feature = "legacy-modes")]
         Some(("credentials", sub_matches)) => {
             let magic_value = sub_matches
                 .get_one::<u32>("magic")
@@ -366,6 +382,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        #[cfg(feature = "legacy-modes")]
         Some(("baseline", _)) => {
             let result = run_baseline_mode().await;
             if !result.success {
@@ -373,6 +390,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        #[cfg(feature = "legacy-modes")]
         Some(("update", _)) => {
             let result = run_update_mode().await;
             if !result.success {

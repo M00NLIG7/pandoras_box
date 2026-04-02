@@ -1,5 +1,7 @@
+#[cfg(feature = "legacy-modes")]
 pub mod baseline;
 pub mod collector;
+#[cfg(feature = "legacy-modes")]
 pub mod credentials;
 pub mod inventory;
 pub mod serve;
