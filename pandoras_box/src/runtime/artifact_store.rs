@@ -90,6 +90,11 @@ impl ArtifactStore {
     }
 
     #[must_use]
+    pub fn embedded_payload_dir(&self) -> PathBuf {
+        self.mission_dir().join("payloads")
+    }
+
+    #[must_use]
     pub fn hosts_dir(&self) -> PathBuf {
         self.mission_dir().join("hosts")
     }
@@ -218,7 +223,9 @@ impl ArtifactStore {
     ) -> io::Result<Option<ActiveMissionRecord>> {
         let path = Self::active_mission_path(root);
         match tokio::fs::read_to_string(&path).await {
-            Ok(raw) => serde_json::from_str(&raw).map(Some).map_err(io::Error::other),
+            Ok(raw) => serde_json::from_str(&raw)
+                .map(Some)
+                .map_err(io::Error::other),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err),
         }
