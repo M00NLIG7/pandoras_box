@@ -483,8 +483,14 @@ fn plan_collector_job(
         },
         CollectorPlan::Chimera { workspace } => {
             let cleanup_command = workspace.cleanup_command();
+            let smb_only_rotation = spec.password_rotation_magic.is_some()
+                && matches!(plan.transport_chain.first(), Some(TransportKind::WindowsSmb));
             let credentials = spec.password_rotation_magic.map(|magic| CredentialsRunJob {
-                command: workspace.credentials_cleanup_command(magic),
+                command: if smb_only_rotation {
+                    workspace.credentials_command(magic)
+                } else {
+                    workspace.credentials_cleanup_command(magic)
+                },
             });
             let staged_path = store
                 .host_exec_dir(plan.target.ip)
@@ -518,11 +524,15 @@ fn plan_collector_job(
                     log_endpoint: workspace.log_endpoint,
                 },
                 credentials,
-                cleanup: CollectorCleanupJob::RemoteExec {
-                    command: cleanup_command,
-                    capture_path: store
-                        .host_exec_dir(plan.target.ip)
-                        .join("collector_cleanup.txt"),
+                cleanup: if smb_only_rotation {
+                    CollectorCleanupJob::SessionDisconnectOnly
+                } else {
+                    CollectorCleanupJob::RemoteExec {
+                        command: cleanup_command,
+                        capture_path: store
+                            .host_exec_dir(plan.target.ip)
+                            .join("collector_cleanup.txt"),
+                    }
                 },
             }
         }
@@ -2368,6 +2378,39 @@ mod tests {
                 command: workspace.credentials_cleanup_command(17),
             })
         );
+    }
+
+    #[test]
+    fn collector_job_uses_disconnect_cleanup_for_windows_smb_rotation() {
+        let root = PathBuf::from("/tmp/pandoras-box-runner");
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let spec = MissionSpec {
+            artifact_root: root,
+            mission_id: "mission-123".to_string(),
+            identity_command: "whoami".to_string(),
+            password_rotation_magic: Some(17),
+            ..MissionSpec::default()
+        };
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 34));
+        let plan = HostPlan::queued(
+            HostTarget {
+                ip,
+                platform: PlatformHint::Windows,
+                open_ports: vec![445],
+            },
+            vec![TransportKind::WindowsSmb],
+        );
+
+        let workspace = remote_workspace(&spec, &plan);
+        let job = plan_collector_job(&spec, &store, &plan);
+
+        assert_eq!(
+            job.credentials,
+            Some(CredentialsRunJob {
+                command: workspace.credentials_command(17),
+            })
+        );
+        assert_eq!(job.cleanup, CollectorCleanupJob::SessionDisconnectOnly);
     }
 
     #[test]

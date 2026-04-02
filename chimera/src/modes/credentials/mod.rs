@@ -10,17 +10,22 @@ use std::net::IpAddr;
 
 const PASSWORD_SCHEMA: EncryptedFile = include_crypt!(".password");
 
-const PRIVILEGED_USER: &str = match cfg!(target_os = "windows") {
-    true => "Administrator",
-    false => "root",
-};
+pub fn default_privileged_user() -> &'static str {
+    match cfg!(target_os = "windows") {
+        true => "Administrator",
+        false => "root",
+    }
+}
 
-pub struct Magic(pub u32);
+pub struct CredentialsArgs {
+    pub magic: u32,
+    pub username: String,
+}
 
 pub struct CredentialsMode;
 
 impl ModeExecutor for CredentialsMode {
-    type Args = Magic;
+    type Args = CredentialsArgs;
     type ArgRequirement = super::Required; // This executor requires args
 
     async fn execute(&self, args: Self::Args) -> ExecutionResult {
@@ -55,7 +60,7 @@ impl ModeExecutor for CredentialsMode {
                     }
                 } as u64; // Use u64 to prevent overflow
 
-                let magic = args.0 as u64; // Cast to u64
+                let magic = args.magic as u64; // Cast to u64
 
                 // Use checked multiplication to prevent overflow
                 let suffix = match last_octet.checked_mul(magic) {
@@ -72,7 +77,7 @@ impl ModeExecutor for CredentialsMode {
 
                 password = format!("{}{}", password, suffix);
 
-                if let Err(e) = platform::change_password(PRIVILEGED_USER, password.as_mut_str()) {
+                if let Err(e) = platform::change_password(&args.username, password.as_mut_str()) {
                     error!("Failed to change password: {}", e);
                     return ExecutionResult::new(
                         ExecutionMode::Credentials,

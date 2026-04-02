@@ -42,6 +42,16 @@ fn smb_exec_mode() -> WindowsSmbExecMode {
     }
 }
 
+fn optional_rotation_magic() -> Option<u32> {
+    std::env::var("PANDORAS_BOX_LIVE_PASSWORD_ROTATION_MAGIC")
+        .ok()
+        .map(|value| {
+            value.parse::<u32>().unwrap_or_else(|_| {
+                panic!("PANDORAS_BOX_LIVE_PASSWORD_ROTATION_MAGIC must be a valid u32")
+            })
+        })
+}
+
 #[tokio::test]
 #[ignore = "requires a local Tiny11 SMB target; run scripts/run-windows-smb-interop.sh"]
 async fn live_windows_smb_target_collects_inventory_and_cleans_up() {
@@ -63,23 +73,27 @@ async fn live_windows_smb_target_collects_inventory_and_cleans_up() {
         .expect("interop SMB port should be a valid u16");
     let username = required_env("PANDORAS_BOX_LIVE_WINDOWS_SMB_USERNAME");
     let password = required_env("PANDORAS_BOX_LIVE_WINDOWS_SMB_PASSWORD");
+    let rotation_magic = optional_rotation_magic();
     let artifact_root = artifact_root();
+    let _ = std::fs::remove_dir_all(&artifact_root);
     let mission_id = "live-windows-smb".to_string();
+    let retry_policy = RetryPolicy {
+        max_attempts: 3,
+        connect_timeout: Duration::from_secs(5),
+        backoff: Duration::from_millis(500),
+    };
 
     let spec = MissionSpec {
         targets: vec![target_ip],
         artifact_root: artifact_root.clone(),
         mission_id: mission_id.clone(),
-        windows_username: username,
-        password,
+        windows_username: username.clone(),
+        password: password.clone(),
+        password_rotation_magic: rotation_magic,
         ssh_port: ssh_probe_port,
         discovery_ports: vec![ssh_probe_port, smb_port],
         chimera_windows_path: chimera_path,
-        retry_policy: RetryPolicy {
-            max_attempts: 3,
-            connect_timeout: Duration::from_secs(5),
-            backoff: Duration::from_millis(500),
-        },
+        retry_policy: retry_policy.clone(),
         windows_smb_exec_mode: smb_exec_mode(),
         ..MissionSpec::default()
     };
@@ -169,19 +183,77 @@ async fn live_windows_smb_target_collects_inventory_and_cleans_up() {
         "application.log should not be empty"
     );
 
-    let cleanup = std::fs::read_to_string(&cleanup_path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", cleanup_path.display()));
-    assert!(
-        cleanup.contains("status: 0"),
-        "cleanup should succeed: {cleanup}"
-    );
-
     let status = std::fs::read_to_string(&status_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", status_path.display()));
     assert!(
         status.contains("\"final_state\": \"complete\""),
         "host status should be complete: {status}"
     );
+    if rotation_magic.is_some() {
+        assert!(
+            !cleanup_path.exists(),
+            "rotation cleanup should run through the credentials session instead of collector_cleanup.txt"
+        );
+        assert!(
+            status.contains("\"credentials\""),
+            "host status should record the credentials phase: {status}"
+        );
+        assert!(
+            status.contains("\"cleanup\""),
+            "host status should record cleanup after credentials rotation: {status}"
+        );
+
+        let verify_mission_id = format!(
+            "live-windows-smb-old-password-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        );
+        let verify_spec = MissionSpec {
+            targets: vec![target_ip],
+            artifact_root: artifact_root.clone(),
+            mission_id: verify_mission_id.clone(),
+            windows_username: username,
+            password,
+            ssh_port: ssh_probe_port,
+            discovery_ports: vec![ssh_probe_port, smb_port],
+            chimera_windows_path: PathBuf::from(required_env("PANDORAS_BOX_LIVE_CHIMERA_WINDOWS_PATH")),
+            retry_policy,
+            windows_smb_exec_mode: smb_exec_mode(),
+            ..MissionSpec::default()
+        };
+
+        let failed_summary = PandorasBoxRunner::new(verify_spec)
+            .run()
+            .await
+            .expect("old-password verification run should finish even when auth fails");
+        let failed_status_path = artifact_root
+            .join(verify_mission_id)
+            .join("hosts")
+            .join(target_ip.to_string())
+            .join("status.json");
+        let failed_status = std::fs::read_to_string(&failed_status_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", failed_status_path.display()));
+
+        assert_eq!(failed_summary.discovered_hosts, 1, "{failed_status}");
+        assert_eq!(failed_summary.completed_hosts, 0, "{failed_status}");
+        assert_eq!(failed_summary.failed_hosts, 1, "{failed_status}");
+        let failure_text = failed_status.to_ascii_lowercase();
+        assert!(
+            failure_text.contains("auth")
+                || failure_text.contains("sessionsetup")
+                || failure_text.contains("logon failure"),
+            "old password should be rejected after rotation: {failed_status}"
+        );
+    } else {
+        let cleanup = std::fs::read_to_string(&cleanup_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", cleanup_path.display()));
+        assert!(
+            cleanup.contains("status: 0"),
+            "cleanup should succeed: {cleanup}"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(artifact_root);
 }
