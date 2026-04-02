@@ -12,6 +12,7 @@ pub enum FailurePhase {
     Stage,
     Execute,
     Collect,
+    Credentials,
     Cleanup,
     Unknown,
 }
@@ -24,6 +25,7 @@ impl FailurePhase {
             Self::Stage => "stage",
             Self::Execute => "execute",
             Self::Collect => "collect",
+            Self::Credentials => "credentials",
             Self::Cleanup => "cleanup",
             Self::Unknown => "unknown",
         }
@@ -36,6 +38,7 @@ impl FailurePhase {
             "stage" => Some(Self::Stage),
             "execute" => Some(Self::Execute),
             "collect" => Some(Self::Collect),
+            "credentials" => Some(Self::Credentials),
             "cleanup" => Some(Self::Cleanup),
             "unknown" => Some(Self::Unknown),
             _ => None,
@@ -171,8 +174,9 @@ fn normalize_completed_phases(mut completed_phases: Vec<FailurePhase>) -> Vec<Fa
         FailurePhase::Stage => 1,
         FailurePhase::Execute => 2,
         FailurePhase::Collect => 3,
-        FailurePhase::Cleanup => 4,
-        FailurePhase::Unknown => 5,
+        FailurePhase::Credentials => 4,
+        FailurePhase::Cleanup => 5,
+        FailurePhase::Unknown => 6,
     });
     completed_phases.dedup();
     completed_phases

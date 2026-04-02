@@ -24,7 +24,7 @@ use sysinfo::SystemExt;
 
 #[cfg(feature = "legacy-modes")]
 use crate::modes::baseline::BaselineMode;
-#[cfg(feature = "legacy-modes")]
+#[cfg(feature = "credentials-mode")]
 use crate::modes::credentials::{CredentialsMode, Magic};
 
 #[cfg(feature = "legacy-modes")]
@@ -195,7 +195,7 @@ async fn run_collector_mode(output_dir: PathBuf) -> ExecutionResult {
     mode.execute(CollectorConfig { output_dir }).await
 }
 
-#[cfg(feature = "legacy-modes")]
+#[cfg(feature = "credentials-mode")]
 async fn run_credentials_mode(magic_value: u32) -> ExecutionResult {
     let mode = CredentialsMode;
     info!(
@@ -297,20 +297,21 @@ fn build_cli() -> Command {
                         .value_parser(value_parser!(u32)),
                 ),
             )
-            .subcommand(
-                Command::new("credentials")
-                    .about("Manage system credentials")
-                    .arg(
-                        arg!(-m --magic <VALUE> "Magic number for credentials")
-                            .required(true)
-                            .value_parser(value_parser!(u32)),
-                    ),
-            )
             .subcommand(Command::new("update").about("Perform system updates"))
             .subcommand(Command::new("baseline").about("Perform OS-specific configurations"));
     }
 
-    #[cfg(not(feature = "legacy-modes"))]
+    #[cfg(feature = "credentials-mode")]
+    let cli = cli.subcommand(
+        Command::new("credentials")
+            .about("Manage system credentials")
+            .arg(
+                arg!(-m --magic <VALUE> "Magic number for credentials")
+                    .required(true)
+                    .value_parser(value_parser!(u32)),
+            ),
+    );
+
     cli
 }
 
@@ -370,7 +371,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        #[cfg(feature = "legacy-modes")]
+        #[cfg(feature = "credentials-mode")]
         Some(("credentials", sub_matches)) => {
             let magic_value = sub_matches
                 .get_one::<u32>("magic")

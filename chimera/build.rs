@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::Path;
 
 fn main() {
-    if env::var_os("CARGO_FEATURE_LEGACY_MODES").is_none() {
+    if env::var_os("CARGO_FEATURE_CREDENTIALS_MODE").is_none() {
         return;
     }
 

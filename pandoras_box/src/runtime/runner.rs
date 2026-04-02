@@ -358,6 +358,11 @@ struct CollectorRunJob {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct CredentialsRunJob {
+    command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum CollectorCollectJob {
     None,
     Http {
@@ -381,6 +386,7 @@ struct CollectorJobPlan {
     stage: Option<CollectorStageJob>,
     run: CollectorRunJob,
     collect: CollectorCollectJob,
+    credentials: Option<CredentialsRunJob>,
     cleanup: CollectorCleanupJob,
 }
 
@@ -440,6 +446,13 @@ impl CollectorJobPlan {
 
         operations
     }
+
+    fn credentials_operations(&self) -> Vec<SessionOperation> {
+        self.credentials
+            .as_ref()
+            .map(|credentials| vec![SessionOperation::credentials_exec(credentials.command.clone())])
+            .unwrap_or_default()
+    }
 }
 
 fn plan_collector_job(
@@ -465,10 +478,14 @@ fn plan_collector_job(
                 serve_capture_path: store.host_exec_dir(plan.target.ip).join("serve_skip.txt"),
             },
             collect: CollectorCollectJob::None,
+            credentials: None,
             cleanup: CollectorCleanupJob::SessionDisconnectOnly,
         },
         CollectorPlan::Chimera { workspace } => {
             let cleanup_command = workspace.cleanup_command();
+            let credentials = spec.password_rotation_magic.map(|magic| CredentialsRunJob {
+                command: workspace.credentials_cleanup_command(magic),
+            });
             let staged_path = store
                 .host_exec_dir(plan.target.ip)
                 .join(&workspace.staged_local_name);
@@ -500,6 +517,7 @@ fn plan_collector_job(
                     inventory_endpoint: workspace.inventory_endpoint,
                     log_endpoint: workspace.log_endpoint,
                 },
+                credentials,
                 cleanup: CollectorCleanupJob::RemoteExec {
                     command: cleanup_command,
                     capture_path: store
@@ -587,6 +605,7 @@ async fn host_artifacts_exist(store: &ArtifactStore, ip: std::net::IpAddr) -> bo
 }
 
 async fn load_resume_checkpoint(
+    spec: &MissionSpec,
     store: &ArtifactStore,
     plan: &HostPlan,
 ) -> Result<ResumeCheckpoint> {
@@ -614,6 +633,11 @@ async fn load_resume_checkpoint(
     let artifacts_exist = host_artifacts_exist(store, plan.target.ip).await;
 
     let mode = if final_state == HostState::Complete && artifacts_exist {
+        ResumeMode::SkipCompleted
+    } else if spec.password_rotation_magic.is_some()
+        && completed_phases.contains(&super::scheduler::FailurePhase::Credentials)
+        && artifacts_exist
+    {
         ResumeMode::SkipCompleted
     } else if completed_phases.contains(&super::scheduler::FailurePhase::Collect) && artifacts_exist
     {
@@ -804,6 +828,7 @@ async fn cleanup_host_workspace_with_live_session<F>(
     cleanup: &CollectorCleanupJob,
     report: HostExecutionReport,
     session: &mut BoxedHostSession,
+    allow_reconnect_retry: bool,
 ) -> HostExecutionReport
 where
     F: SessionFactory + 'static,
@@ -826,7 +851,7 @@ where
         .with_completed_phases(report.completed_phases.clone())
         .with_attempt_count(base_attempt_count.max(1));
 
-    if !next_report.should_retry(max_attempts) {
+    if !allow_reconnect_retry || !next_report.should_retry(max_attempts) {
         return if next_report.final_state == HostState::Complete {
             next_report.mark_phase_completed(super::scheduler::FailurePhase::Cleanup)
         } else {
@@ -871,6 +896,42 @@ where
     unreachable!("cleanup_host_workspace_with_live_session should always return")
 }
 
+async fn run_credentials_with_fresh_session<F>(
+    credentials_executor: &SessionExecutor<F>,
+    plan: &HostPlan,
+    report: HostExecutionReport,
+) -> HostExecutionReport
+where
+    F: SessionFactory + 'static,
+{
+    if report.final_state != HostState::Complete {
+        return report;
+    }
+
+    let mut session = match credentials_executor.connect_session(plan).await {
+        Ok(session) => session,
+        Err(connect_report) => {
+            return connect_report
+                .with_completed_phases(report.completed_phases.clone())
+                .with_attempt_count(report.attempt_count);
+        }
+    };
+
+    let next_report = credentials_executor
+        .run_connected_session(plan.force_state(HostState::Connecting), &mut *session, false)
+        .await
+        .with_completed_phases(report.completed_phases.clone())
+        .with_attempt_count(report.attempt_count);
+
+    if next_report.final_state == HostState::Complete {
+        next_report
+            .mark_phase_completed(super::scheduler::FailurePhase::Credentials)
+            .mark_phase_completed(super::scheduler::FailurePhase::Cleanup)
+    } else {
+        next_report
+    }
+}
+
 async fn execute_host_with_persistent_session_with_retry<F>(
     spec: &MissionSpec,
     store: &ArtifactStore,
@@ -882,7 +943,7 @@ async fn execute_host_with_persistent_session_with_retry<F>(
 where
     F: SessionFactory + 'static,
 {
-    let checkpoint = load_resume_checkpoint(store, &plan).await?;
+    let checkpoint = load_resume_checkpoint(spec, store, &plan).await?;
     if checkpoint.mode == ResumeMode::SkipCompleted {
         let report = skipped_resume_report(&plan, &checkpoint);
         write_checkpoint(store, &report).await?;
@@ -897,6 +958,11 @@ where
     );
     let run_executor =
         SessionExecutor::new(Arc::clone(&factory), policy, collector_job.run_operations());
+    let credentials_executor = SessionExecutor::new(
+        Arc::clone(&factory),
+        policy,
+        collector_job.credentials_operations(),
+    );
     let cleanup_executor = SessionExecutor::new(
         factory,
         policy,
@@ -1057,12 +1123,42 @@ where
             progress_report(&plan, HostState::Collecting, &completed_phases, attempt);
         write_checkpoint(store, &collect_progress).await?;
 
+        let credentials_enabled = collector_job.credentials.is_some();
+        let credentials_report = if credentials_enabled
+            && !completed_phases.contains(&super::scheduler::FailurePhase::Credentials)
+        {
+            let _ = session.cleanup().await;
+            let credentials_report =
+                run_credentials_with_fresh_session(&credentials_executor, &plan, collect_report).await;
+            if credentials_report.final_state != HostState::Complete {
+                write_checkpoint(store, &credentials_report).await?;
+                return Ok(credentials_report);
+            }
+
+            let credentials_progress = progress_report(
+                &plan,
+                HostState::Executing,
+                &credentials_report.completed_phases,
+                attempt,
+            );
+            write_checkpoint(store, &credentials_progress).await?;
+            credentials_report
+        } else {
+            collect_report
+        };
+
+        if credentials_enabled {
+            write_checkpoint(store, &credentials_report).await?;
+            return Ok(credentials_report);
+        }
+
         let cleanup_report = cleanup_host_workspace_with_live_session(
             spec,
             &cleanup_executor,
             &collector_job.cleanup,
-            collect_report,
+            credentials_report,
             &mut session,
+            !credentials_enabled,
         )
         .await;
         if cleanup_report.final_state != HostState::Complete {
@@ -1207,9 +1303,10 @@ fn render_mission_manifest(spec: &MissionSpec) -> String {
             "  \"windows_username\": \"{}\",\n",
             "  \"ssh_port\": {},\n",
             "  \"discovery_ports\": [{}],\n",
-            "  \"collector_port\": {},\n",
-            "  \"chimera_unix_path\": \"{}\",\n",
-            "  \"chimera_windows_path\": \"{}\"\n",
+                "  \"collector_port\": {},\n",
+                "  \"password_rotation_magic\": {},\n",
+                "  \"chimera_unix_path\": \"{}\",\n",
+                "  \"chimera_windows_path\": \"{}\"\n",
             "}}\n"
         ),
         escape_json(&spec.mission_id),
@@ -1228,6 +1325,9 @@ fn render_mission_manifest(spec: &MissionSpec) -> String {
             .collect::<Vec<_>>()
             .join(", "),
         spec.collector_port,
+        spec.password_rotation_magic
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "null".to_string()),
         escape_json(&spec.chimera_unix_path.to_string_lossy()),
         escape_json(&spec.chimera_windows_path.to_string_lossy()),
     )
@@ -1298,8 +1398,9 @@ mod tests {
     use super::{
         collector_url, plan_collector_job, render_mission_manifest, render_summary_json,
         resolved_discovery_ports, CollectorCleanupJob, CollectorCollectJob, CollectorJobPlan,
-        CollectorRunJob, CollectorStageJob, IdentityCaptureJob, LocalSupportFilePlan,
-        PandorasBoxRunSummary, PandorasBoxRunner, PersistedHostStatus, StagedSupportFile,
+        CollectorRunJob, CollectorStageJob, CredentialsRunJob, IdentityCaptureJob,
+        LocalSupportFilePlan, PandorasBoxRunSummary, PandorasBoxRunner, PersistedHostStatus,
+        StagedSupportFile,
     };
     use crate::runtime::discovery::DiscoveryRecord;
     use crate::runtime::mission::{
@@ -2168,6 +2269,7 @@ mod tests {
                     inventory_endpoint: "inventory.json".to_string(),
                     log_endpoint: "application.log".to_string(),
                 },
+                credentials: None,
                 cleanup: CollectorCleanupJob::RemoteExec {
                     command: workspace.cleanup_command(),
                     capture_path: store.host_exec_dir(ip).join("collector_cleanup.txt"),
@@ -2227,11 +2329,44 @@ mod tests {
                     inventory_endpoint: "inventory.json".to_string(),
                     log_endpoint: "application.log".to_string(),
                 },
+                credentials: None,
                 cleanup: CollectorCleanupJob::RemoteExec {
                     command: workspace.cleanup_command(),
                     capture_path: store.host_exec_dir(ip).join("collector_cleanup.txt"),
                 },
             }
+        );
+    }
+
+    #[test]
+    fn collector_job_includes_credentials_when_password_rotation_is_enabled() {
+        let root = PathBuf::from("/tmp/pandoras-box-runner");
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let spec = MissionSpec {
+            artifact_root: root,
+            mission_id: "mission-123".to_string(),
+            identity_command: "whoami".to_string(),
+            password_rotation_magic: Some(17),
+            ..MissionSpec::default()
+        };
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 34));
+        let plan = HostPlan::queued(
+            HostTarget {
+                ip,
+                platform: PlatformHint::Unix,
+                open_ports: vec![22],
+            },
+            vec![TransportKind::UnixSsh],
+        );
+
+        let workspace = remote_workspace(&spec, &plan);
+        let job = plan_collector_job(&spec, &store, &plan);
+
+        assert_eq!(
+            job.credentials,
+            Some(CredentialsRunJob {
+                command: workspace.credentials_cleanup_command(17),
+            })
         );
     }
 
@@ -2277,6 +2412,7 @@ mod tests {
                     serve_capture_path: store.host_exec_dir(ip).join("serve_skip.txt"),
                 },
                 collect: CollectorCollectJob::None,
+                credentials: None,
                 cleanup: CollectorCleanupJob::SessionDisconnectOnly,
             }
         );
@@ -3383,6 +3519,91 @@ mod tests {
         assert_eq!(
             persisted.completed_phases,
             vec!["stage", "execute", "collect", "cleanup"]
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn runner_skips_rotated_host_when_resume_artifacts_exist() {
+        let root = temp_root("runner-resume-skip-rotated");
+        let chimera_path = root.join("fixtures/chimera");
+        write_fixture(&chimera_path, b"fake chimera binary").await;
+        let spec = MissionSpec {
+            artifact_root: root.clone(),
+            mission_id: "mission-123".to_string(),
+            chimera_unix_path: chimera_path,
+            password_rotation_magic: Some(17),
+            ..spec(root.clone())
+        };
+        let runner = PandorasBoxRunner::new(spec);
+        let record = record_for_host(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            PlatformHint::Unix,
+            vec![22],
+            Some(64),
+        );
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+
+        store
+            .ensure_layout(vec![record.host.ip])
+            .await
+            .expect("host layout should exist");
+        tokio::fs::write(
+            store.host_inventory_path(record.host.ip),
+            r#"{"hostname":"lab","os":"Ubuntu 24.04","ports":[],"connections":[],"services":[],"users":[],"shares":[],"containers":[]}"#,
+        )
+        .await
+        .expect("inventory fixture should exist");
+        tokio::fs::write(
+            store.host_application_log_path(record.host.ip),
+            "collector log\n",
+        )
+        .await
+        .expect("log fixture should exist");
+        let persisted = PersistedHostStatus {
+            ip: record.host.ip.to_string(),
+            final_state: HostState::Failed.as_str().to_string(),
+            error: Some("cleanup failed after password rotation".to_string()),
+            failure_phase: Some("cleanup".to_string()),
+            failure_disposition: Some("terminal".to_string()),
+            attempt_count: 2,
+            completed_phases: vec![
+                "stage".to_string(),
+                "execute".to_string(),
+                "collect".to_string(),
+                "credentials".to_string(),
+            ],
+        };
+        tokio::fs::write(
+            store.host_status_path(record.host.ip),
+            serde_json::to_string_pretty(&persisted).expect("status should serialize"),
+        )
+        .await
+        .expect("status fixture should exist");
+
+        let factory = Arc::new(FakeSessionFactory::new(vec![]));
+        let summary = runner
+            .run_with_stream_and_factory(stream::iter(vec![record.clone()]), Arc::clone(&factory))
+            .await
+            .expect("rotated host resume should succeed");
+
+        assert_eq!(summary.discovered_hosts, 1);
+        assert_eq!(summary.completed_hosts, 1);
+        assert_eq!(summary.failed_hosts, 0);
+        assert!(factory.connect_events().is_empty());
+
+        let persisted: PersistedHostStatus = serde_json::from_str(
+            &tokio::fs::read_to_string(store.host_status_path(record.host.ip))
+                .await
+                .expect("status artifact should exist"),
+        )
+        .expect("status should parse");
+        assert_eq!(persisted.final_state, "complete");
+        assert_eq!(persisted.attempt_count, 2);
+        assert_eq!(
+            persisted.completed_phases,
+            vec!["stage", "execute", "collect", "credentials"]
         );
 
         let _ = tokio::fs::remove_dir_all(root).await;

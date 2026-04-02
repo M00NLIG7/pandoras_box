@@ -79,6 +79,33 @@ impl RemoteWorkspace {
     }
 
     #[must_use]
+    pub fn credentials_command(&self, magic: u32) -> String {
+        match self.shell {
+            RemoteShell::Posix => {
+                format!("{} credentials --magic {}", self.remote_binary_path, magic)
+            }
+            RemoteShell::Cmd => format!(
+                r#"cmd.exe /C "{} credentials --magic {}""#,
+                self.remote_binary_path, magic,
+            ),
+        }
+    }
+
+    #[must_use]
+    pub fn credentials_cleanup_command(&self, magic: u32) -> String {
+        match self.shell {
+            RemoteShell::Posix => format!(
+                "sh -lc '\"{}\" credentials --magic {}; status=$?; rm -rf \"{}\"; exit $status'",
+                self.remote_binary_path, magic, self.remote_temp_dir,
+            ),
+            RemoteShell::Cmd => format!(
+                r#"cmd.exe /C ""{}" credentials --magic {} & set PB_STATUS=%ERRORLEVEL% & if exist "{}" rmdir /S /Q "{}" & exit /B %PB_STATUS%""#,
+                self.remote_binary_path, magic, self.remote_temp_dir, self.remote_temp_dir,
+            ),
+        }
+    }
+
+    #[must_use]
     pub fn preview_command(&self) -> String {
         match self.shell {
             RemoteShell::Posix => "sh -lc 'uname -a && printf \"\\n\" && id'".to_string(),
@@ -252,6 +279,14 @@ mod tests {
             "/tmp/pandoras_box/mission-123/chimera --output-root /tmp/pandoras_box/mission-123/output serve --port 44372"
         );
         assert_eq!(
+            workspace.credentials_command(17),
+            "/tmp/pandoras_box/mission-123/chimera credentials --magic 17"
+        );
+        assert_eq!(
+            workspace.credentials_cleanup_command(17),
+            r#"sh -lc '"/tmp/pandoras_box/mission-123/chimera" credentials --magic 17; status=$?; rm -rf "/tmp/pandoras_box/mission-123"; exit $status'"#
+        );
+        assert_eq!(
             workspace.ensure_directories_command(),
             "mkdir -p '/tmp/pandoras_box/mission-123' '/tmp/pandoras_box/mission-123/output'"
         );
@@ -297,6 +332,14 @@ mod tests {
         assert_eq!(
             workspace.serve_command(),
             r#"cmd.exe /C "C:\Windows\Temp\pandoras_box\mission-123\chimera.exe --output-root C:\Windows\Temp\pandoras_box\mission-123\output serve --port 44372""#
+        );
+        assert_eq!(
+            workspace.credentials_command(17),
+            r#"cmd.exe /C "C:\Windows\Temp\pandoras_box\mission-123\chimera.exe credentials --magic 17""#
+        );
+        assert_eq!(
+            workspace.credentials_cleanup_command(17),
+            r#"cmd.exe /C ""C:\Windows\Temp\pandoras_box\mission-123\chimera.exe" credentials --magic 17 & set PB_STATUS=%ERRORLEVEL% & if exist "C:\Windows\Temp\pandoras_box\mission-123" rmdir /S /Q "C:\Windows\Temp\pandoras_box\mission-123" & exit /B %PB_STATUS%""#
         );
         assert_eq!(
             workspace.ensure_directories_command(),

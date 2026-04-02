@@ -76,6 +76,7 @@ pub struct MissionSpec {
     pub unix_username: String,
     pub windows_username: String,
     pub password: String,
+    pub password_rotation_magic: Option<u32>,
     pub ssh_port: u16,
     pub discovery_ports: Vec<u16>,
     pub chimera_unix_path: PathBuf,
@@ -100,6 +101,7 @@ impl Default for MissionSpec {
             unix_username: "root".to_string(),
             windows_username: "Administrator".to_string(),
             password: String::new(),
+            password_rotation_magic: None,
             ssh_port: 22,
             discovery_ports: Vec::new(),
             chimera_unix_path: PathBuf::from("release/chimera"),
@@ -131,6 +133,7 @@ impl MissionSpec {
                 "identity={};",
                 "unix_user={};",
                 "windows_user={};",
+                "password_magic={};",
                 "ssh_port={};",
                 "discovery_ports={};",
                 "collector_port={};",
@@ -142,6 +145,9 @@ impl MissionSpec {
             self.identity_command,
             self.unix_username,
             self.windows_username,
+            self.password_rotation_magic
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
             self.ssh_port,
             discovery_ports
                 .iter()

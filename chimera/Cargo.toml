@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["credentials-mode"]
+credentials-mode = ["dep:include-crypt", "dep:zeroize"]
 legacy-modes = [
+    "credentials-mode",
     "dep:daemonize",
     "dep:ignore",
-    "dep:include-crypt",
     "dep:reqwest",
     "dep:regex",
-    "dep:zeroize",
     "dep:zip",
 ]
 full = ["legacy-modes"]

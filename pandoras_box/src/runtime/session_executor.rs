@@ -5,9 +5,7 @@ use async_trait::async_trait;
 
 use super::mission::{HostPlan, HostState};
 use super::policy::{ExecutionPolicy, OperationKind};
-use super::scheduler::{
-    FailureDisposition, FailurePhase, HostExecutionReport, HostExecutor,
-};
+use super::scheduler::{FailureDisposition, FailurePhase, HostExecutionReport, HostExecutor};
 use super::session_factory::{BoxedHostSession, SessionFactory};
 use super::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
 
@@ -19,6 +17,9 @@ pub enum SessionOperation {
     CaptureExec {
         request: ExecRequest,
         local_path: PathBuf,
+    },
+    CredentialsExec {
+        request: ExecRequest,
     },
     CleanupCaptureExec {
         request: ExecRequest,
@@ -58,6 +59,13 @@ impl SessionOperation {
         Self::CaptureExec {
             request: ExecRequest::new(command),
             local_path: local_path.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn credentials_exec(command: impl Into<String>) -> Self {
+        Self::CredentialsExec {
+            request: ExecRequest::new(command),
         }
     }
 
@@ -120,7 +128,10 @@ impl<F> SessionExecutor<F> {
         }
     }
 
-    pub(crate) async fn connect_session(&self, plan: &HostPlan) -> Result<BoxedHostSession, HostExecutionReport>
+    pub(crate) async fn connect_session(
+        &self,
+        plan: &HostPlan,
+    ) -> Result<BoxedHostSession, HostExecutionReport>
     where
         F: SessionFactory + 'static,
     {
@@ -181,38 +192,8 @@ impl<F> SessionExecutor<F> {
                 SessionOperation::CaptureExec {
                     request,
                     local_path,
-                } => match session.exec(request.clone()).await {
-                    Ok(response) => {
-                        if let Err(err) = write_exec_capture(local_path, request, &response).await {
-                            let _ = session.cleanup().await;
-                            return terminal_phase_failure(
-                                plan,
-                                phase,
-                                "capture_exec failed",
-                                err,
-                            );
-                        }
-                        if let Err(err) = validate_exec_response(request, &response) {
-                            let _ = session.cleanup().await;
-                            return terminal_phase_failure(
-                                plan,
-                                phase,
-                                "capture_exec failed",
-                                err,
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        let _ = session.cleanup().await;
-                        return operation_transport_failure(
-                            plan,
-                            phase,
-                            "capture_exec failed",
-                            err,
-                        );
-                    }
-                },
-                SessionOperation::CleanupCaptureExec {
+                }
+                | SessionOperation::CleanupCaptureExec {
                     request,
                     local_path,
                 } => match session.exec(request.clone()).await {
@@ -222,7 +203,7 @@ impl<F> SessionExecutor<F> {
                             return terminal_phase_failure(
                                 plan,
                                 phase,
-                                "cleanup_exec failed",
+                                capture_context(phase),
                                 err,
                             );
                         }
@@ -231,7 +212,7 @@ impl<F> SessionExecutor<F> {
                             return terminal_phase_failure(
                                 plan,
                                 phase,
-                                "cleanup_exec failed",
+                                capture_context(phase),
                                 err,
                             );
                         }
@@ -241,7 +222,30 @@ impl<F> SessionExecutor<F> {
                         return operation_transport_failure(
                             plan,
                             phase,
-                            "cleanup_exec failed",
+                            capture_context(phase),
+                            err,
+                        );
+                    }
+                },
+                SessionOperation::CredentialsExec { request } => match session.exec(request.clone()).await
+                {
+                    Ok(response) => {
+                        if let Err(err) = validate_exec_response(request, &response) {
+                            let _ = session.cleanup().await;
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                "credentials_exec failed",
+                                err,
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        let _ = session.cleanup().await;
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            "credentials_exec failed",
                             err,
                         );
                     }
@@ -292,12 +296,7 @@ impl<F> SessionExecutor<F> {
 
                     if let Err(err) = session.ensure_dir(remote_dir).await {
                         let _ = session.cleanup().await;
-                        return operation_transport_failure(
-                            plan,
-                            phase,
-                            "ensure_dir failed",
-                            err,
-                        );
+                        return operation_transport_failure(plan, phase, "ensure_dir failed", err);
                     }
                 }
                 SessionOperation::CleanupExec { request } => {
@@ -411,13 +410,25 @@ impl SessionOperation {
         match self {
             Self::PutFile { .. } | Self::EnsureDir { .. } => FailurePhase::Stage,
             Self::GetFile { .. } => FailurePhase::Collect,
+            Self::CredentialsExec { .. } => FailurePhase::Credentials,
             Self::CleanupExec { .. } | Self::CleanupCaptureExec { .. } => FailurePhase::Cleanup,
             Self::Exec { .. } | Self::CaptureExec { .. } => FailurePhase::Execute,
         }
     }
 }
 
-fn transition_failure(plan: HostPlan, phase: FailurePhase, err: impl std::fmt::Display) -> HostExecutionReport {
+fn capture_context(phase: FailurePhase) -> &'static str {
+    match phase {
+        FailurePhase::Cleanup => "cleanup_exec failed",
+        _ => "capture_exec failed",
+    }
+}
+
+fn transition_failure(
+    plan: HostPlan,
+    phase: FailurePhase,
+    err: impl std::fmt::Display,
+) -> HostExecutionReport {
     HostExecutionReport::terminal_failure(plan, phase, err.to_string())
 }
 
@@ -513,9 +524,7 @@ mod tests {
     use super::{SessionExecutor, SessionOperation};
     use crate::runtime::mission::{HostPlan, HostState, HostTarget, PlatformHint, TransportKind};
     use crate::runtime::policy::ExecutionPolicy;
-    use crate::runtime::scheduler::{
-        FailureDisposition, FailurePhase, HostExecutor, Scheduler,
-    };
+    use crate::runtime::scheduler::{FailureDisposition, FailurePhase, HostExecutor, Scheduler};
     use crate::runtime::session_factory::{BoxedHostSession, SessionFactory};
     use crate::runtime::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
     use crate::Error;
