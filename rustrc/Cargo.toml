@@ -2,10 +2,11 @@
 name = "rustrc"
 version = "1.1.0"
 edition = "2021"
+rust-version = "1.94.1"
 license = "MIT"
-readme = "README.md"
 repository = "https://github.com/M00NLIG7/pandoras_box"
 description = "SSH execution and SFTP transport primitives for Pandora's Box"
+publish = false
 
 [dependencies]
 russh = { version = "0.62.6", default-features = false, features = ["ring"] }

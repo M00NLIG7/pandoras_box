@@ -2,6 +2,11 @@
 name = "chimera"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.94.1"
+license = "MIT"
+repository = "https://github.com/M00NLIG7/pandoras_box"
+description = "Terminal inventory collector for authenticated Pandora sessions"
+publish = false
 
 [dependencies]
 chrono = {version = "0.4.38", features = ["serde"]}
