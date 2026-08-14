@@ -79,7 +79,7 @@ fn probe_ttl_blocking(_ip: IpAddr, _timeout: Duration) -> Option<u8> {
 
 #[cfg(unix)]
 fn probe_ipv4_ttl(ip: Ipv4Addr, timeout: Duration) -> io::Result<Option<u8>> {
-    let timeout = duration_to_timeval(timeout);
+    let timeout = duration_to_timeval(timeout)?;
     let identifier = std::process::id() as u16;
     let sequence = u16::from_be_bytes([ip.octets()[2], ip.octets()[3]]);
     let packet = build_icmp_echo_request(identifier, sequence);
@@ -166,11 +166,24 @@ fn probe_ipv4_ttl(ip: Ipv4Addr, timeout: Duration) -> io::Result<Option<u8>> {
 }
 
 #[cfg(unix)]
-fn duration_to_timeval(timeout: Duration) -> libc::timeval {
-    libc::timeval {
-        tv_sec: timeout.as_secs() as libc::time_t,
-        tv_usec: timeout.subsec_micros() as libc::suseconds_t,
-    }
+fn duration_to_timeval(timeout: Duration) -> io::Result<libc::timeval> {
+    let invalid_timeout = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "probe timeout exceeds the platform timeval range",
+        )
+    };
+
+    Ok(libc::timeval {
+        tv_sec: timeout
+            .as_secs()
+            .try_into()
+            .map_err(|_| invalid_timeout())?,
+        tv_usec: timeout
+            .subsec_micros()
+            .try_into()
+            .map_err(|_| invalid_timeout())?,
+    })
 }
 
 #[cfg(unix)]
@@ -299,14 +312,27 @@ impl Drop for SocketGuard {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::duration_to_timeval;
     use super::{build_icmp_echo_request, classify_ttl, icmp_checksum, parse_ipv4_icmp_echo_reply};
     use super::{EchoReply, TtlSignature};
+    #[cfg(unix)]
+    use std::time::Duration;
 
     #[test]
     fn classify_ttl_matches_expected_ranges() {
         assert_eq!(classify_ttl(64), TtlSignature::Unix);
         assert_eq!(classify_ttl(128), TtlSignature::Windows);
         assert_eq!(classify_ttl(42), TtlSignature::Unknown);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeval_conversion_is_checked_and_precise() {
+        let timeval = duration_to_timeval(Duration::from_micros(1_500_001)).unwrap();
+        assert_eq!(timeval.tv_sec, 1);
+        assert_eq!(timeval.tv_usec, 500_001);
+        assert!(duration_to_timeval(Duration::MAX).is_err());
     }
 
     #[test]
