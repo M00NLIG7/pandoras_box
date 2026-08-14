@@ -49,6 +49,7 @@ else
     printf 'pbx-%s' "$(od -An -N18 -tx1 /dev/urandom | tr -d ' \n')" > "$PASSWORD_FILE"
 fi
 PANDORAS_BOX_LIVE_UNIX_SSH_PASSWORD="$(<"$PASSWORD_FILE")"
+FIXTURE_CREDENTIAL_NONCE="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 export PANDORAS_BOX_LIVE_UNIX_SSH_PASSWORD
 
 if [[ -z "$CHIMERA_TARGET" ]]; then
@@ -70,7 +71,9 @@ case "$CHIMERA_TARGET" in
         ;;
 esac
 
-docker build --platform linux/amd64 --secret "id=root_password,src=$PASSWORD_FILE" \
+docker build --platform linux/amd64 \
+    --build-arg "FIXTURE_CREDENTIAL_NONCE=$FIXTURE_CREDENTIAL_NONCE" \
+    --secret "id=root_password,src=$PASSWORD_FILE" \
     -t "$IMAGE_NAME" "$DOCKERFILE_DIR"
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true

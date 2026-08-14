@@ -8,8 +8,10 @@ RUN --mount=type=secret,id=ca_certificate,required=false \
     && apk add --no-cache gcompat libgcc libstdc++ openssh-server shadow \
     && ssh-keygen -A
 
+ARG FIXTURE_CREDENTIAL_NONCE
 RUN --mount=type=secret,id=root_password,required=true \
-    ROOT_PASSWORD="$(cat /run/secrets/root_password)" \
+    test -n "$FIXTURE_CREDENTIAL_NONCE" \
+    && ROOT_PASSWORD="$(cat /run/secrets/root_password)" \
     && test -n "$ROOT_PASSWORD" \
     && printf 'root:%s\n' "$ROOT_PASSWORD" | chpasswd \
     && sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \

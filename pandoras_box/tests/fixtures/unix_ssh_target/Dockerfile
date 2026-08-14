@@ -7,8 +7,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends openssh-server iproute2 procps net-tools \
     && rm -rf /var/lib/apt/lists/*
 
+ARG FIXTURE_CREDENTIAL_NONCE
 RUN --mount=type=secret,id=root_password,required=true \
-    ROOT_PASSWORD="$(cat /run/secrets/root_password)" \
+    test -n "$FIXTURE_CREDENTIAL_NONCE" \
+    && ROOT_PASSWORD="$(cat /run/secrets/root_password)" \
     && test -n "$ROOT_PASSWORD" \
     && mkdir -p /run/sshd \
     && printf 'root:%s\n' "$ROOT_PASSWORD" | chpasswd \

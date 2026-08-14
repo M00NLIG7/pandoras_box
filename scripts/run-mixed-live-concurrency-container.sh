@@ -310,6 +310,7 @@ else
   printf 'pbx-%s' "$(od -An -N18 -tx1 /dev/urandom | tr -d ' \n')" > "$MIXED_PASSWORD_FILE"
 fi
 MIXED_PASSWORD="$(<"$MIXED_PASSWORD_FILE")"
+FIXTURE_CREDENTIAL_NONCE="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 
 if [[ -z "$WINDOWS_SSH_USER" || -z "$WINDOWS_SSH_PASSWORD" ]]; then
   printf 'PANDORAS_BOX_LIVE_WINDOWS_SSH_USERNAME/PASSWORD or SMOLDER_WINDOWS_USERNAME/PASSWORD must be set\n' >&2
@@ -365,6 +366,7 @@ fi
 
 docker build \
   --platform linux/amd64 \
+  --build-arg "FIXTURE_CREDENTIAL_NONCE=$FIXTURE_CREDENTIAL_NONCE" \
   --secret "id=root_password,src=$MIXED_PASSWORD_FILE" \
   -t "$UNIX_IMAGE_NAME" \
   "$UNIX_DOCKERFILE_DIR"
@@ -374,6 +376,7 @@ if [[ -n "${NODE_EXTRA_CA_CERTS:-}" && -f "$NODE_EXTRA_CA_CERTS" ]]; then
 fi
 docker build \
   --platform linux/amd64 \
+  --build-arg "FIXTURE_CREDENTIAL_NONCE=$FIXTURE_CREDENTIAL_NONCE" \
   "${ALPINE_BUILD_SECRETS[@]}" \
   -t "$ALPINE_IMAGE_NAME" \
   "$ALPINE_DOCKERFILE_DIR"
