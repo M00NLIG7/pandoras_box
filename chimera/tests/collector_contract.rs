@@ -53,6 +53,37 @@ async fn collector_command_writes_inventory_and_application_log() {
 }
 
 #[tokio::test]
+async fn first_release_cli_exposes_only_inventory_and_collector_modes() {
+    let output_root = tempdir().expect("tempdir should be created");
+    let help = run_chimera(&["--help"], output_root.path()).await;
+
+    assert!(help.status.success(), "Chimera help should render");
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    for supported_command in ["inventory", "collector"] {
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.trim_start().starts_with(supported_command)),
+            "{supported_command} should be advertised"
+        );
+    }
+    for removed_command in ["all", "update", "baseline", "serve", "serve-internal"] {
+        assert!(
+            !stdout
+                .lines()
+                .any(|line| line.trim_start().starts_with(removed_command)),
+            "{removed_command} must not be advertised"
+        );
+
+        let output = run_chimera(&[removed_command], output_root.path()).await;
+        assert!(
+            !output.status.success(),
+            "removed command {removed_command} unexpectedly succeeded"
+        );
+    }
+}
+
+#[tokio::test]
 async fn removed_http_surface_cannot_traverse_fetch_replay_or_delete_artifacts() {
     let root = tempdir().expect("tempdir should be created");
     let output_root = root.path().join("artifacts");

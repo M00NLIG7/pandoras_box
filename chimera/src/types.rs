@@ -14,14 +14,6 @@ use std::os::unix::fs::PermissionsExt;
 /// automation and configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExecutionMode {
-    /// Initial remote access configuration
-    ///
-    /// # Tasks
-    /// * Verify network connectivity
-    /// * Establish remote connections (RDP/SSH)
-    /// * Validate administrative access
-    Remote,
-
     /// System inventory and asset discovery
     ///
     /// # Tasks
@@ -33,29 +25,6 @@ pub enum ExecutionMode {
 
     /// Collect runtime artifacts for Pandora integration
     Collector,
-
-    /// System update and patch management
-    ///
-    /// # Tasks
-    /// * Configure update sources
-    /// * Install pending updates
-    /// * Validate system patch level
-    Update,
-
-    /// OS-specific configurations
-    ///
-    /// # Windows Tasks
-    /// * Disable SMBv1
-    /// * Mitigate Zerologon vulnerability
-    /// * Implement Kerberoasting protections
-    /// * Harden LSA against Mimikatz
-    /// * Enable Windows Defender
-    ///
-    /// # Linux Tasks
-    /// * Install and configure rsyslog
-    /// * Set up Auditd logging
-    /// * Configure fail2ban
-    Baseline,
 }
 
 /// Result of an execution operation
@@ -99,22 +68,16 @@ impl ExecutionMode {
     /// A static string describing the mode's purpose
     pub fn description(&self) -> &'static str {
         match self {
-            ExecutionMode::Remote => "Establishes initial system access and remote connections",
             ExecutionMode::Inventory => "Performs system inventory and asset discovery",
             ExecutionMode::Collector => "Collects runtime artifacts for Pandora integration",
-            ExecutionMode::Update => "Handles system updates and patch management",
-            ExecutionMode::Baseline => "Implements OS-specific security configurations",
         }
     }
 
     /// Gets a short string representation of the mode
     pub fn as_str(&self) -> &'static str {
         match self {
-            ExecutionMode::Remote => "REMOTE",
             ExecutionMode::Inventory => "INVEN",
             ExecutionMode::Collector => "COLLECT",
-            ExecutionMode::Update => "UPDATE",
-            ExecutionMode::Baseline => "BASELINE",
         }
     }
 }

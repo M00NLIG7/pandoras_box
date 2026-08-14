@@ -1,5 +1,3 @@
-#[cfg(feature = "legacy-modes")]
-pub mod baseline;
 pub mod collector;
 pub mod inventory;
 

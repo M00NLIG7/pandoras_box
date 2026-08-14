@@ -18,116 +18,6 @@ use std::path::PathBuf;
 use sysinfo::System;
 use sysinfo::SystemExt;
 
-#[cfg(feature = "legacy-modes")]
-use crate::modes::baseline::BaselineMode;
-#[cfg(feature = "legacy-modes")]
-pub async fn run_baseline() -> ExecutionResult {
-    let current_exe = std::env::current_exe().expect("Failed to get current executable path");
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{
-            CreateProcessW, CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
-            DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW,
-        };
-
-        // Prepare command line
-        let mut cmd = format!("\"{}\" baseline", current_exe.to_string_lossy(),);
-
-        // Convert to wide string for Windows API
-        let wide_cmd: Vec<u16> = cmd.encode_utf16().chain(std::iter::once(0)).collect();
-
-        let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
-        startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-
-        let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-
-        // Create fully independent process with combined flags
-        let creation_flags = DETACHED_PROCESS
-            | CREATE_NEW_PROCESS_GROUP
-            | CREATE_NO_WINDOW
-            | CREATE_BREAKAWAY_FROM_JOB;
-
-        let success = unsafe {
-            CreateProcessW(
-                std::ptr::null(),
-                wide_cmd.as_ptr() as *mut _,
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-                creation_flags,
-                std::ptr::null(),
-                std::ptr::null(),
-                &startup_info,
-                &mut process_info,
-            )
-        };
-
-        if success == 0 {
-            let error = std::io::Error::last_os_error();
-            error!("Failed to create background process: {}", error);
-            ExecutionResult::new(
-                ExecutionMode::Baseline,
-                false,
-                format!("Failed to create background process: {}", error),
-            )
-        } else {
-            // Close handles immediately since we don't need them
-            unsafe {
-                CloseHandle(process_info.hProcess);
-                CloseHandle(process_info.hThread);
-            }
-
-            ExecutionResult::new(
-                ExecutionMode::Baseline,
-                true,
-                "Baseline started in background".to_string(),
-            )
-        }
-    }
-
-    #[cfg(unix)]
-    {
-        use daemonize::Daemonize;
-        use std::ffi::CString;
-
-        // First daemonize the process
-        let daemonize = Daemonize::new()
-            .pid_file("/tmp/baseline.pid") // Optional: keep track of PID
-            .chown_pid_file(true)
-            .working_directory("/"); // No exit_action - it's not a valid method
-
-        match daemonize.start() {
-            Ok(_) => {
-                info!("Successfully daemonized"); // Log after daemonization
-
-                // Convert the executable path and arguments to CString
-                let exe = CString::new(current_exe.to_str().unwrap()).unwrap();
-                let arg0 = CString::new("baseline").unwrap();
-
-                // Replace the current process with baseline
-                match nix::unistd::execvp(&exe, &[&exe, &arg0]) {
-                    Ok(_) => unreachable!(), // execvp never returns on success
-                    Err(e) => {
-                        error!("Failed to exec baseline: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to daemonize: {}", e);
-                ExecutionResult::new(
-                    ExecutionMode::Baseline,
-                    false,
-                    format!("Failed to daemonize process: {}", e),
-                )
-            }
-        }
-    }
-}
-
 async fn run_inventory_mode(output_dir: &Path, use_hostname_for_output: bool) -> ExecutionResult {
     let mode = InventoryMode::new();
     info!("Starting inventory mode execution");
@@ -175,51 +65,8 @@ async fn run_collector_mode(output_dir: PathBuf) -> ExecutionResult {
     mode.execute(CollectorConfig { output_dir }).await
 }
 
-#[cfg(feature = "legacy-modes")]
-async fn run_baseline_mode() -> ExecutionResult {
-    let mode = BaselineMode;
-    info!("Starting baseline mode execution");
-
-    #[cfg(target_os = "windows")]
-    info!("Platform: Windows");
-    #[cfg(target_os = "linux")]
-    info!("Platform: Linux");
-
-    mode.execute(None).await
-}
-
-#[cfg(feature = "legacy-modes")]
-async fn run_update_mode() -> ExecutionResult {
-    info!("Starting update mode execution");
-    ExecutionResult::new(ExecutionMode::Update, true, "Update completed".to_string())
-}
-
-#[cfg(feature = "legacy-modes")]
-async fn run_all_modes(output_dir: &Path) {
-    info!("Starting execution of all modes");
-
-    let results = [
-        run_inventory_mode(output_dir, false).await,
-        run_update_mode().await,
-        run_baseline().await,
-    ];
-
-    let all_succeeded = results.iter().all(|r| r.success);
-    let failed_modes: Vec<_> = results
-        .iter()
-        .filter(|r| !r.success)
-        .map(|r| r.mode.as_str())
-        .collect();
-
-    if all_succeeded {
-        info!("All modes completed successfully");
-    } else {
-        error!("Failed modes: {}", failed_modes.join(", "));
-    }
-}
-
 fn build_cli() -> Command {
-    let cli = command!()
+    command!()
         .arg(
             arg!(--"output-root" <PATH> "Directory for collector artifacts")
                 .global(true)
@@ -236,17 +83,7 @@ fn build_cli() -> Command {
         .subcommand(
             Command::new("collector")
                 .about("Write Pandora runtime artifacts for authenticated retrieval"),
-        );
-
-    #[cfg(feature = "legacy-modes")]
-    {
-        return cli
-            .subcommand(Command::new("all").about("Run all legacy modes sequentially"))
-            .subcommand(Command::new("update").about("Perform system updates"))
-            .subcommand(Command::new("baseline").about("Perform OS-specific configurations"));
-    }
-
-    cli
+        )
 }
 
 fn logging_config_for(subcommand: Option<&str>) -> logging::LoggingConfig {
@@ -274,10 +111,6 @@ async fn main() {
     fs::create_dir_all(&output_dir).expect("Failed to create output directory");
 
     match matches.subcommand() {
-        #[cfg(feature = "legacy-modes")]
-        Some(("all", _)) => {
-            run_all_modes(&output_dir).await;
-        }
         Some(("collector", _)) => {
             let result = run_collector_mode(output_dir.clone()).await;
             if !result.success {
@@ -297,22 +130,6 @@ async fn main() {
             let result = run_inventory_mode(&output_dir, use_hostname_for_output).await;
             if !result.success {
                 error!("Inventory mode failed: {}", result.message);
-                std::process::exit(1);
-            }
-        }
-        #[cfg(feature = "legacy-modes")]
-        Some(("baseline", _)) => {
-            let result = run_baseline_mode().await;
-            if !result.success {
-                error!("Baseline mode failed: {}", result.message);
-                std::process::exit(1);
-            }
-        }
-        #[cfg(feature = "legacy-modes")]
-        Some(("update", _)) => {
-            let result = run_update_mode().await;
-            if !result.success {
-                error!("Update mode failed: {}", result.message);
                 std::process::exit(1);
             }
         }
