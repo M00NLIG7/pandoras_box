@@ -518,13 +518,13 @@ impl CollectorJobPlan {
     }
 
     fn stage_operations(&self) -> Vec<SessionOperation> {
-        let mut operations = vec![SessionOperation::capture_exec(
+        let mut operations = vec![SessionOperation::capture_read_only_exec(
             self.identity.command.clone(),
             self.identity.capture_path.clone(),
         )];
 
         if let Some(stage) = &self.stage {
-            operations.push(SessionOperation::exec(
+            operations.push(SessionOperation::idempotent_exec(
                 stage.ensure_remote_directories_command.clone(),
             ));
 
@@ -536,7 +536,7 @@ impl CollectorJobPlan {
             }
 
             for command in &stage.post_upload_commands {
-                operations.push(SessionOperation::exec(command.clone()));
+                operations.push(SessionOperation::idempotent_exec(command.clone()));
             }
         }
 
@@ -544,10 +544,19 @@ impl CollectorJobPlan {
     }
 
     fn run_operations(&self) -> Vec<SessionOperation> {
-        vec![SessionOperation::capture_exec(
-            self.run.collector_command.clone(),
-            self.run.collector_capture_path.clone(),
-        )]
+        let command = self.run.collector_command.clone();
+        let capture_path = self.run.collector_capture_path.clone();
+        if self.stage.is_none() {
+            vec![SessionOperation::capture_read_only_exec(
+                command,
+                capture_path,
+            )]
+        } else {
+            vec![SessionOperation::capture_idempotent_exec(
+                command,
+                capture_path,
+            )]
+        }
     }
 
     fn collect_operations(&self) -> Vec<SessionOperation> {

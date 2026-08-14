@@ -1,12 +1,9 @@
 use super::mission::TransportKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperationKind {
-    Exec,
-    Put,
-    Get,
-    EnsureDir,
-    Cleanup,
+pub enum OperationMutability {
+    ReadOnly,
+    Mutating,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,13 +54,8 @@ impl ExecutionPolicy {
         Ok(())
     }
 
-    pub fn allow_operation(&self, operation: OperationKind) -> Result<(), PolicyViolation> {
-        if self.dry_run
-            && matches!(
-                operation,
-                OperationKind::Put | OperationKind::EnsureDir | OperationKind::Cleanup
-            )
-        {
+    pub fn allow_operation(&self, mutability: OperationMutability) -> Result<(), PolicyViolation> {
+        if self.dry_run && mutability == OperationMutability::Mutating {
             return Err(PolicyViolation::new(
                 "dry-run blocks remote mutation operations",
             ));
@@ -75,7 +67,7 @@ impl ExecutionPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutionPolicy, OperationKind};
+    use super::{ExecutionPolicy, OperationMutability};
     use crate::runtime::mission::TransportKind;
 
     #[test]
@@ -85,10 +77,12 @@ mod tests {
             allow_smb_fallback: true,
         };
 
-        assert!(policy.allow_operation(OperationKind::EnsureDir).is_err());
-        assert!(policy.allow_operation(OperationKind::Put).is_err());
-        assert!(policy.allow_operation(OperationKind::Cleanup).is_err());
-        assert!(policy.allow_operation(OperationKind::Get).is_ok());
+        assert!(policy
+            .allow_operation(OperationMutability::Mutating)
+            .is_err());
+        assert!(policy
+            .allow_operation(OperationMutability::ReadOnly)
+            .is_ok());
     }
 
     #[test]

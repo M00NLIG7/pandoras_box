@@ -4,19 +4,29 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::mission::{HostPlan, HostState};
-use super::policy::{ExecutionPolicy, OperationKind};
+use super::policy::{ExecutionPolicy, OperationMutability};
 use super::scheduler::{FailureDisposition, FailurePhase, HostExecutionReport, HostExecutor};
 use super::session_factory::{BoxedHostSession, SessionFactory};
 use super::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationIdempotency {
+    Idempotent,
+    NonIdempotent,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionOperation {
     Exec {
         request: ExecRequest,
+        mutability: OperationMutability,
+        idempotency: OperationIdempotency,
     },
     CaptureExec {
         request: ExecRequest,
         local_path: PathBuf,
+        mutability: OperationMutability,
+        idempotency: OperationIdempotency,
     },
     CleanupCaptureExec {
         request: ExecRequest,
@@ -46,16 +56,90 @@ impl SessionOperation {
 
     #[must_use]
     pub fn exec(command: impl Into<String>) -> Self {
+        Self::exec_with_semantics(
+            command,
+            OperationMutability::Mutating,
+            OperationIdempotency::NonIdempotent,
+        )
+    }
+
+    #[must_use]
+    pub fn read_only_exec(command: impl Into<String>) -> Self {
+        Self::exec_with_semantics(
+            command,
+            OperationMutability::ReadOnly,
+            OperationIdempotency::Idempotent,
+        )
+    }
+
+    #[must_use]
+    pub fn idempotent_exec(command: impl Into<String>) -> Self {
+        Self::exec_with_semantics(
+            command,
+            OperationMutability::Mutating,
+            OperationIdempotency::Idempotent,
+        )
+    }
+
+    fn exec_with_semantics(
+        command: impl Into<String>,
+        mutability: OperationMutability,
+        idempotency: OperationIdempotency,
+    ) -> Self {
         Self::Exec {
             request: ExecRequest::new(command),
+            mutability,
+            idempotency,
         }
     }
 
     #[must_use]
     pub fn capture_exec(command: impl Into<String>, local_path: impl Into<PathBuf>) -> Self {
+        Self::capture_exec_with_semantics(
+            command,
+            local_path,
+            OperationMutability::Mutating,
+            OperationIdempotency::NonIdempotent,
+        )
+    }
+
+    #[must_use]
+    pub fn capture_read_only_exec(
+        command: impl Into<String>,
+        local_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self::capture_exec_with_semantics(
+            command,
+            local_path,
+            OperationMutability::ReadOnly,
+            OperationIdempotency::Idempotent,
+        )
+    }
+
+    #[must_use]
+    pub fn capture_idempotent_exec(
+        command: impl Into<String>,
+        local_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self::capture_exec_with_semantics(
+            command,
+            local_path,
+            OperationMutability::Mutating,
+            OperationIdempotency::Idempotent,
+        )
+    }
+
+    fn capture_exec_with_semantics(
+        command: impl Into<String>,
+        local_path: impl Into<PathBuf>,
+        mutability: OperationMutability,
+        idempotency: OperationIdempotency,
+    ) -> Self {
         Self::CaptureExec {
             request: ExecRequest::new(command),
             local_path: local_path.into(),
+            mutability,
+            idempotency,
         }
     }
 
@@ -94,6 +178,30 @@ impl SessionOperation {
     pub fn cleanup_exec(command: impl Into<String>) -> Self {
         Self::CleanupExec {
             request: ExecRequest::new(command),
+        }
+    }
+
+    #[must_use]
+    pub fn mutability(&self) -> OperationMutability {
+        match self {
+            Self::Exec { mutability, .. } | Self::CaptureExec { mutability, .. } => *mutability,
+            Self::GetFile { .. } => OperationMutability::ReadOnly,
+            Self::PutFile { .. }
+            | Self::EnsureDir { .. }
+            | Self::CleanupExec { .. }
+            | Self::CleanupCaptureExec { .. } => OperationMutability::Mutating,
+        }
+    }
+
+    #[must_use]
+    pub fn idempotency(&self) -> OperationIdempotency {
+        match self {
+            Self::Exec { idempotency, .. } | Self::CaptureExec { idempotency, .. } => *idempotency,
+            Self::PutFile { .. }
+            | Self::GetFile { .. }
+            | Self::EnsureDir { .. }
+            | Self::CleanupExec { .. }
+            | Self::CleanupCaptureExec { .. } => OperationIdempotency::Idempotent,
         }
     }
 }
@@ -160,6 +268,10 @@ impl<F> SessionExecutor<F> {
         let mut plan = plan.force_state(HostState::Connected);
 
         for operation in &self.operations {
+            if self.policy.allow_operation(operation.mutability()).is_err() {
+                continue;
+            }
+
             let phase = operation.phase();
             plan = match plan.transition(HostState::Executing) {
                 Ok(plan) => plan,
@@ -167,7 +279,8 @@ impl<F> SessionExecutor<F> {
             };
 
             match operation {
-                SessionOperation::Exec { request } => match session.exec(request.clone()).await {
+                SessionOperation::Exec { request, .. } => match session.exec(request.clone()).await
+                {
                     Ok(response) => {
                         if let Err(err) = validate_exec_response(request, &response) {
                             let _ = session.cleanup().await;
@@ -182,6 +295,7 @@ impl<F> SessionExecutor<F> {
                 SessionOperation::CaptureExec {
                     request,
                     local_path,
+                    ..
                 }
                 | SessionOperation::CleanupCaptureExec {
                     request,
@@ -218,10 +332,6 @@ impl<F> SessionExecutor<F> {
                     }
                 },
                 SessionOperation::PutFile { transfer } => {
-                    if self.policy.allow_operation(OperationKind::Put).is_err() {
-                        continue;
-                    }
-
                     if let Err(err) = validate_remote_path(&transfer.remote_path) {
                         let _ = session.cleanup().await;
                         return terminal_phase_failure(plan, phase, "put failed", err);
@@ -233,10 +343,6 @@ impl<F> SessionExecutor<F> {
                     }
                 }
                 SessionOperation::GetFile { transfer } => {
-                    if self.policy.allow_operation(OperationKind::Get).is_err() {
-                        continue;
-                    }
-
                     if let Err(err) = validate_remote_path(&transfer.remote_path) {
                         let _ = session.cleanup().await;
                         return terminal_phase_failure(plan, phase, "get failed", err);
@@ -248,14 +354,6 @@ impl<F> SessionExecutor<F> {
                     }
                 }
                 SessionOperation::EnsureDir { remote_dir } => {
-                    if self
-                        .policy
-                        .allow_operation(OperationKind::EnsureDir)
-                        .is_err()
-                    {
-                        continue;
-                    }
-
                     if let Err(err) = validate_remote_path(remote_dir) {
                         let _ = session.cleanup().await;
                         return terminal_phase_failure(plan, phase, "ensure_dir failed", err);
@@ -267,10 +365,6 @@ impl<F> SessionExecutor<F> {
                     }
                 }
                 SessionOperation::CleanupExec { request } => {
-                    if self.policy.allow_operation(OperationKind::Cleanup).is_err() {
-                        continue;
-                    }
-
                     match session.exec(request.clone()).await {
                         Ok(response) => {
                             if let Err(err) = validate_exec_response(request, &response) {
@@ -737,6 +831,100 @@ mod tests {
 
         assert_eq!(report.final_state, HostState::Complete);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn dry_run_enforces_mutability_for_every_operation_variant() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
+        let root = temp_dir("dry-run-operation-boundary");
+        let upload_source = root.join("local/chimera");
+        let read_capture = root.join("exec/read.txt");
+        let mutating_capture = root.join("exec/mutating.txt");
+        let idempotent_capture = root.join("exec/idempotent-mutating.txt");
+        let cleanup_capture = root.join("exec/cleanup.txt");
+        let download_path = root.join("files/inventory.json");
+        tokio::fs::create_dir_all(
+            upload_source
+                .parent()
+                .expect("upload source should have a parent"),
+        )
+        .await
+        .expect("fixture directory should exist");
+        tokio::fs::write(&upload_source, b"payload")
+            .await
+            .expect("upload fixture should exist");
+
+        let mut session_template = template(0, false);
+        let events = Arc::clone(&session_template.events);
+        let uploads = Arc::clone(&session_template.uploads);
+        let ensure_dir_calls = Arc::clone(&session_template.ensure_dir_calls);
+        session_template.downloads = Arc::new(HashMap::from([(
+            "/remote/inventory.json".to_string(),
+            b"{\"host\":\"lab\"}\n".to_vec(),
+        )]));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::UnixSsh),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy {
+                dry_run: true,
+                allow_smb_fallback: true,
+            },
+            vec![
+                SessionOperation::capture_read_only_exec("whoami", &read_capture),
+                SessionOperation::read_only_exec("hostname"),
+                SessionOperation::exec("non-idempotent mutation"),
+                SessionOperation::idempotent_exec("idempotent mutation"),
+                SessionOperation::capture_exec("captured mutation", &mutating_capture),
+                SessionOperation::capture_idempotent_exec(
+                    "captured idempotent mutation",
+                    &idempotent_capture,
+                ),
+                SessionOperation::put_file(&upload_source, "/remote/chimera"),
+                SessionOperation::get_file("/remote/inventory.json", &download_path),
+                SessionOperation::ensure_dir("/remote/workspace"),
+                SessionOperation::cleanup_capture_exec("cleanup mutation", &cleanup_capture),
+                SessionOperation::cleanup_exec("cleanup mutation without capture"),
+            ],
+        );
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Complete);
+        assert_eq!(
+            events
+                .lock()
+                .expect("events lock should be available")
+                .as_slice(),
+            [
+                "exec:whoami",
+                "exec:hostname",
+                "get:/remote/inventory.json",
+                "disconnect"
+            ]
+        );
+        assert!(read_capture.is_file());
+        assert_eq!(
+            tokio::fs::read(&download_path)
+                .await
+                .expect("read-only download should be collected"),
+            b"{\"host\":\"lab\"}\n"
+        );
+        assert!(!mutating_capture.exists());
+        assert!(!idempotent_capture.exists());
+        assert!(!cleanup_capture.exists());
+        assert!(uploads
+            .lock()
+            .expect("uploads lock should be available")
+            .is_empty());
+        assert_eq!(ensure_dir_calls.load(Ordering::SeqCst), 0);
+
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[tokio::test]

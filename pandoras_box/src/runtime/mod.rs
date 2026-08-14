@@ -19,11 +19,11 @@ pub use mission::{
     RetryPolicy, TransportKind, WindowsSmbExecMode,
 };
 pub use planner::Planner;
-pub use policy::{ExecutionPolicy, OperationKind, PolicyViolation};
+pub use policy::{ExecutionPolicy, OperationMutability, PolicyViolation};
 pub use reporting::{AssetInventoryBundle, AssetInventoryHost};
 pub use runner::{PandorasBoxRunSummary, PandorasBoxRunner};
 pub use scheduler::{HostExecutionReport, HostExecutor, Scheduler};
-pub use session_executor::{SessionExecutor, SessionOperation};
+pub use session_executor::{OperationIdempotency, SessionExecutor, SessionOperation};
 pub use session_factory::{BoxedHostSession, SessionFactory};
 pub use workspace::{
     collector_plan, remote_workspace, CollectorPlan, RemoteShell, RemoteWorkspace,
