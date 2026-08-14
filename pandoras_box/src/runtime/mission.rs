@@ -67,7 +67,7 @@ impl Default for RetryPolicy {
 pub struct MissionSpec {
     pub targets: Vec<IpAddr>,
     pub concurrency_limit: usize,
-    pub strict_mode: bool,
+    pub best_effort: bool,
     pub retry_policy: RetryPolicy,
     pub artifact_root: PathBuf,
     pub mission_id: String,
@@ -90,7 +90,7 @@ impl Default for MissionSpec {
         Self {
             targets: Vec::new(),
             concurrency_limit: 64,
-            strict_mode: false,
+            best_effort: false,
             retry_policy: RetryPolicy::default(),
             artifact_root: PathBuf::from("artifacts"),
             mission_id: "mission".to_string(),

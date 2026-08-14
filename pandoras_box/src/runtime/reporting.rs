@@ -16,6 +16,12 @@ use super::scheduler::HostExecutionReport;
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AssetInventoryBundle {
     pub mission_id: String,
+    pub requested_targets: usize,
+    pub reachable_targets: usize,
+    pub unreachable_targets: usize,
+    pub skipped_targets: usize,
+    pub attempted_targets: usize,
+    /// Backward-compatible alias for `reachable_targets`.
     pub discovered_hosts: usize,
     pub completed_hosts: usize,
     pub failed_hosts: usize,
@@ -213,9 +219,22 @@ struct InventoryContainer {}
 pub async fn write_asset_inventory_bundle(
     store: &ArtifactStore,
     reports: &[HostExecutionReport],
-    discovered_hosts: usize,
+    requested_targets: usize,
+    reachable_targets: usize,
+    unreachable_targets: usize,
+    skipped_targets: usize,
+    attempted_targets: usize,
 ) -> io::Result<()> {
-    let report = build_inventory_report(store, reports, discovered_hosts).await;
+    let report = build_inventory_report(
+        store,
+        reports,
+        requested_targets,
+        reachable_targets,
+        unreachable_targets,
+        skipped_targets,
+        attempted_targets,
+    )
+    .await;
     let topology_excalidraw =
         render_network_topology_excalidraw(&report.bundle.mission_id, &report.topology);
     let json = serde_json::to_string_pretty(&report.bundle)
@@ -253,7 +272,11 @@ pub async fn write_asset_inventory_bundle(
 async fn build_inventory_report(
     store: &ArtifactStore,
     reports: &[HostExecutionReport],
-    discovered_hosts: usize,
+    requested_targets: usize,
+    reachable_targets: usize,
+    unreachable_targets: usize,
+    skipped_targets: usize,
+    attempted_targets: usize,
 ) -> InventoryReport {
     let mut ordered_reports = reports.to_vec();
     ordered_reports.sort_by_key(|report| report.plan.target.ip.to_string());
@@ -271,7 +294,12 @@ async fn build_inventory_report(
             .and_then(|name| name.to_str())
             .unwrap_or_default()
             .to_string(),
-        discovered_hosts,
+        requested_targets,
+        reachable_targets,
+        unreachable_targets,
+        skipped_targets,
+        attempted_targets,
+        discovered_hosts: reachable_targets,
         completed_hosts: reports
             .iter()
             .filter(|report| report.final_state.as_str() == "complete")
@@ -432,8 +460,22 @@ fn render_asset_inventory_markdown(bundle: &AssetInventoryBundle) -> String {
     markdown.push_str("# Asset Inventory\n\n");
     markdown.push_str(&format!("Mission: `{}`\n\n", bundle.mission_id));
     markdown.push_str(&format!(
-        "Discovered hosts: {}  \nCompleted hosts: {}  \nFailed hosts: {}\n\n",
-        bundle.discovered_hosts, bundle.completed_hosts, bundle.failed_hosts
+        concat!(
+            "Requested targets: {}  \n",
+            "Reachable targets: {}  \n",
+            "Unreachable targets: {}  \n",
+            "Skipped targets: {}  \n",
+            "Attempted targets: {}  \n",
+            "Completed hosts: {}  \n",
+            "Failed hosts: {}\n\n"
+        ),
+        bundle.requested_targets,
+        bundle.reachable_targets,
+        bundle.unreachable_targets,
+        bundle.skipped_targets,
+        bundle.attempted_targets,
+        bundle.completed_hosts,
+        bundle.failed_hosts
     ));
     markdown.push_str(
         "| IP | State | Platform | Hostname | OS | Ports | Admin Users | Services | Shares | Error |\n",
@@ -602,8 +644,8 @@ fn render_pdf_summary_cards(page: &mut PdfPageBuilder, bundle: &AssetInventoryBu
     let card_gap = 12.0;
     let card_width = (PDF_PAGE_WIDTH - (PDF_MARGIN * 2.0) - (card_gap * 2.0)) / 3.0;
     let card_specs = [
-        ("Discovered", bundle.discovered_hosts, "#F4F6F8", "#10233C"),
-        ("Complete", bundle.completed_hosts, "#E8F6F1", "#18352D"),
+        ("Requested", bundle.requested_targets, "#F4F6F8", "#10233C"),
+        ("Attempted", bundle.attempted_targets, "#E8F6F1", "#18352D"),
         ("Failed", bundle.failed_hosts, "#FDEEE8", "#5E2B18"),
     ];
 
@@ -2576,6 +2618,11 @@ mod tests {
     fn asset_inventory_renderers_include_host_rows() {
         let bundle = AssetInventoryBundle {
             mission_id: "mission-123".to_string(),
+            requested_targets: 1,
+            reachable_targets: 1,
+            unreachable_targets: 0,
+            skipped_targets: 0,
+            attempted_targets: 1,
             discovered_hosts: 1,
             completed_hosts: 1,
             failed_hosts: 0,
@@ -2605,7 +2652,7 @@ mod tests {
         let pdf_text = String::from_utf8_lossy(&pdf);
         assert!(pdf_text.contains("Pandora's Box Asset Inventory"));
         assert!(pdf_text.contains("lab  \\(10.0.0.10\\)"));
-        assert!(pdf_text.contains("Discovered"));
+        assert!(pdf_text.contains("Requested"));
     }
 
     #[test]

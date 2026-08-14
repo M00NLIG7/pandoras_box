@@ -40,6 +40,9 @@ pub enum Error {
 
     #[error("Invalid Subnet: {0}")]
     InvalidSubnet(String),
+
+    #[error("Mission failed: {0}")]
+    MissionFailure(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

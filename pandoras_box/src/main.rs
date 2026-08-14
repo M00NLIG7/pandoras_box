@@ -92,7 +92,8 @@ mod tests {
             .expect("CLI should parse Pandora's Box arguments");
         let targets = Subnet::try_from("10.0.0.0/30")
             .expect("subnet should parse")
-            .hosts();
+            .hosts_bounded(crate::enumerator::DEFAULT_MAX_TARGETS)
+            .expect("small subnet should fit the target limit");
 
         let spec = mission_spec_from_matches(&matches, targets.clone(), "secret".to_string());
 
@@ -126,6 +127,39 @@ mod tests {
     }
 
     #[test]
+    fn mission_spec_from_matches_enables_only_explicit_best_effort_mode() {
+        let default_matches = build_cli()
+            .try_get_matches_from([
+                "pandoras_box",
+                "--range",
+                "192.0.2.10/32",
+                "--password",
+                "secret",
+            ])
+            .expect("default CLI arguments should parse");
+        let best_effort_matches = build_cli()
+            .try_get_matches_from([
+                "pandoras_box",
+                "--range",
+                "192.0.2.10/32",
+                "--password",
+                "secret",
+                "--best-effort",
+            ])
+            .expect("best-effort CLI arguments should parse");
+        let targets = vec!["192.0.2.10".parse().expect("target should parse")];
+
+        assert!(
+            !mission_spec_from_matches(&default_matches, targets.clone(), "secret".to_string())
+                .best_effort
+        );
+        assert!(
+            mission_spec_from_matches(&best_effort_matches, targets, "secret".to_string())
+                .best_effort
+        );
+    }
+
+    #[test]
     fn mission_spec_from_matches_marks_generated_mission_ids_as_auto_resumable() {
         let matches = build_cli()
             .try_get_matches_from([
@@ -138,7 +172,8 @@ mod tests {
             .expect("CLI should parse Pandora's Box arguments");
         let targets = Subnet::try_from("10.0.0.0/30")
             .expect("subnet should parse")
-            .hosts();
+            .hosts_bounded(crate::enumerator::DEFAULT_MAX_TARGETS)
+            .expect("small subnet should fit the target limit");
 
         let spec = mission_spec_from_matches(&matches, targets, "secret".to_string());
 
@@ -160,6 +195,13 @@ fn build_cli() -> ClapCommand {
                 .value_parser(value_parser!(String)),
         )
         .arg(carg!(--dry_run "Skip remote mutation operations"))
+        .arg(carg!(--"best-effort" "Return success after handled target failures, including zero attempted targets; unhandled mission errors still fail"))
+        .arg(
+            carg!(--"max-targets" <COUNT> "Reject a CIDR containing more usable targets than this bound")
+                .required(false)
+                .default_value("65536")
+                .value_parser(value_parser!(usize)),
+        )
         .arg(
             carg!(--artifact_root <DIR>)
                 .required(false)
@@ -225,6 +267,7 @@ fn mission_spec_from_matches(
             .expect("windows_user should have a default")
             .clone(),
         password,
+        best_effort: matches.get_flag("best-effort"),
         dry_run: matches.get_flag("dry_run"),
         ..runtime::MissionSpec::default()
     }
@@ -297,7 +340,7 @@ async fn main() -> Result<()> {
 
     info!("Starting application with range: {}", range);
 
-    let subnet = match enumerator::Subnet::try_from(range) {
+    let subnet = match enumerator::Subnet::try_from(range.as_str()) {
         Ok(s) => s,
         Err(e) => {
             error!("Failed to parse subnet: {}", e);
@@ -307,15 +350,39 @@ async fn main() -> Result<()> {
 
     info!("Created subnet: {}", range);
 
-    let spec = mission_spec_from_matches(&matches, subnet.hosts(), password.clone());
+    let max_targets = *matches
+        .get_one::<usize>("max-targets")
+        .expect("max-targets should have a default");
+    let targets = subnet.hosts_bounded(max_targets)?;
+    let spec = mission_spec_from_matches(&matches, targets, password.clone());
+    let best_effort = spec.best_effort;
 
     let summary = runtime::PandorasBoxRunner::new(spec).run().await?;
     info!(
-        "Pandora's Box completed: discovered={} complete={} failed={} mission_dir={}",
-        summary.discovered_hosts,
+        concat!(
+            "Pandora's Box completed: requested={} reachable={} unreachable={} skipped={} ",
+            "attempted={} complete={} failed={} mission_dir={}"
+        ),
+        summary.requested_targets,
+        summary.reachable_targets,
+        summary.unreachable_targets,
+        summary.skipped_targets,
+        summary.attempted_targets,
         summary.completed_hosts,
         summary.failed_hosts,
         summary.mission_dir.display()
     );
+
+    if summary.requires_failure_exit() && !best_effort {
+        return Err(Error::MissionFailure(format!(
+            "mission attempted {} of {} targets and recorded {} failures ({} unreachable, {} skipped)",
+            summary.attempted_targets,
+            summary.requested_targets,
+            summary.failed_hosts,
+            summary.unreachable_targets,
+            summary.skipped_targets
+        )));
+    }
+
     Ok(())
 }

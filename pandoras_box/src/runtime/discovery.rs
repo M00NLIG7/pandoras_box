@@ -38,6 +38,18 @@ pub struct DiscoveryRecord {
     pub ttl: Option<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveryOutcome {
+    Reachable(DiscoveryRecord),
+    Unreachable { ip: IpAddr },
+}
+
+impl From<DiscoveryRecord> for DiscoveryOutcome {
+    fn from(record: DiscoveryRecord) -> Self {
+        Self::Reachable(record)
+    }
+}
+
 #[derive(Clone)]
 pub struct TcpDiscovery {
     config: DiscoveryConfig,
@@ -55,13 +67,28 @@ impl TcpDiscovery {
         Self { config, ttl_probe }
     }
 
-    pub fn probe_ips_stream(&self, ips: Vec<IpAddr>) -> impl Stream<Item = DiscoveryRecord> + '_ {
+    pub fn probe_ips_outcomes_stream(
+        &self,
+        ips: Vec<IpAddr>,
+    ) -> impl Stream<Item = DiscoveryOutcome> + '_ {
         let concurrency_limit = self.config.concurrency_limit.max(1);
 
         stream::iter(ips)
-            .map(|ip| self.probe_ip(ip))
+            .map(move |ip| async move {
+                self.probe_ip(ip).await.map_or(
+                    DiscoveryOutcome::Unreachable { ip },
+                    DiscoveryOutcome::Reachable,
+                )
+            })
             .buffer_unordered(concurrency_limit)
-            .filter_map(async move |record| record)
+    }
+
+    pub fn probe_ips_stream(&self, ips: Vec<IpAddr>) -> impl Stream<Item = DiscoveryRecord> + '_ {
+        self.probe_ips_outcomes_stream(ips)
+            .filter_map(async move |outcome| match outcome {
+                DiscoveryOutcome::Reachable(record) => Some(record),
+                DiscoveryOutcome::Unreachable { .. } => None,
+            })
     }
 
     pub async fn probe_ips(&self, ips: Vec<IpAddr>) -> Vec<DiscoveryRecord> {
@@ -156,10 +183,11 @@ pub fn infer_platform(
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_platform, DiscoveryConfig, TcpDiscovery};
+    use super::{infer_platform, DiscoveryConfig, DiscoveryOutcome, TcpDiscovery};
     use crate::runtime::mission::PlatformHint;
     use crate::ttl::TtlProber;
     use async_trait::async_trait;
+    use futures::StreamExt;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
     use std::time::Duration;
@@ -355,6 +383,41 @@ mod tests {
                 &[1445],
             ),
             PlatformHint::Windows
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_outcomes_preserve_unreachable_targets() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("listener should bind");
+        let port = listener
+            .local_addr()
+            .expect("listener should have an address")
+            .port();
+        drop(listener);
+
+        let discovery = TcpDiscovery::with_ttl_probe(
+            DiscoveryConfig {
+                ports: vec![port],
+                ssh_port: port,
+                forwarded_smb_ports: Vec::new(),
+                connect_timeout: Duration::from_millis(100),
+                concurrency_limit: 1,
+            },
+            Arc::new(FakeTtlProber { ttl: None }),
+        );
+
+        let outcomes = discovery
+            .probe_ips_outcomes_stream(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)])
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            outcomes,
+            vec![DiscoveryOutcome::Unreachable {
+                ip: IpAddr::V4(Ipv4Addr::LOCALHOST)
+            }]
         );
     }
 

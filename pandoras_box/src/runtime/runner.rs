@@ -8,8 +8,12 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use super::artifact_store::{ActiveMissionRecord, ArtifactStore};
-use super::discovery::{DiscoveryConfig, DiscoveryRecord, TcpDiscovery};
-use super::mission::{HostPlan, HostState, MissionSpec, RetryPolicy, TransportKind};
+#[cfg(test)]
+use super::discovery::DiscoveryRecord;
+use super::discovery::{DiscoveryConfig, DiscoveryOutcome, TcpDiscovery};
+use super::mission::{
+    HostPlan, HostState, HostTarget, MissionSpec, PlatformHint, RetryPolicy, TransportKind,
+};
 use super::payloads::ensure_chimera_payload_for_plan;
 use super::planner::Planner;
 use super::policy::ExecutionPolicy;
@@ -29,9 +33,22 @@ const SMB_CONNECT_RETRY_COOLDOWN: Duration = Duration::from_secs(3);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PandorasBoxRunSummary {
     pub mission_dir: PathBuf,
+    pub requested_targets: usize,
+    pub reachable_targets: usize,
+    pub unreachable_targets: usize,
+    pub skipped_targets: usize,
+    pub attempted_targets: usize,
+    /// Backward-compatible alias for `reachable_targets`.
     pub discovered_hosts: usize,
     pub completed_hosts: usize,
     pub failed_hosts: usize,
+}
+
+impl PandorasBoxRunSummary {
+    #[must_use]
+    pub fn requires_failure_exit(&self) -> bool {
+        self.attempted_targets == 0 || self.failed_hosts > 0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -90,19 +107,20 @@ impl PandorasBoxRunner {
         ));
 
         self.run_with_stream_and_factory(
-            discovery.probe_ips_stream(self.spec.targets.clone()),
+            discovery.probe_ips_outcomes_stream(self.spec.targets.clone()),
             factory,
         )
         .await
     }
 
-    async fn run_with_stream_and_factory<S, F>(
+    async fn run_with_stream_and_factory<S, F, I>(
         &self,
-        records: S,
+        outcomes: S,
         factory: Arc<F>,
     ) -> Result<PandorasBoxRunSummary>
     where
-        S: Stream<Item = DiscoveryRecord>,
+        S: Stream<Item = I>,
+        I: Into<DiscoveryOutcome>,
         F: SessionFactory + 'static,
     {
         let (spec, store) = self.prepare_store().await?;
@@ -110,15 +128,49 @@ impl PandorasBoxRunner {
             dry_run: spec.dry_run,
             allow_smb_fallback: spec.allow_smb_fallback,
         };
-        let mut discovered_hosts = 0usize;
+        let mut observed_targets = 0usize;
+        let mut reachable_targets = 0usize;
+        let mut unreachable_targets = 0usize;
+        let mut skipped_targets = 0usize;
+        let mut attempted_targets = 0usize;
         let semaphore = Arc::new(Semaphore::new(spec.concurrency_limit.max(1)));
         let mut tasks = JoinSet::new();
         let mut reports = Vec::new();
 
-        futures::pin_mut!(records);
+        futures::pin_mut!(outcomes);
 
-        while let Some(record) = records.next().await {
-            discovered_hosts += 1;
+        while let Some(outcome) = outcomes.next().await {
+            observed_targets += 1;
+            let record = match outcome.into() {
+                DiscoveryOutcome::Reachable(record) => {
+                    reachable_targets += 1;
+                    record
+                }
+                DiscoveryOutcome::Unreachable { ip } => {
+                    unreachable_targets += 1;
+                    let plan = HostPlan::queued(
+                        HostTarget {
+                            ip,
+                            platform: PlatformHint::Unknown,
+                            open_ports: Vec::new(),
+                        },
+                        Vec::new(),
+                    );
+                    store.ensure_layout([ip]).await?;
+                    store.write_host_plan(ip, &render_plan_json(&plan)).await?;
+                    let report = HostExecutionReport::unattempted_failure(
+                        plan,
+                        super::scheduler::FailurePhase::Connect,
+                        "target was unreachable on every configured discovery port",
+                    );
+                    store
+                        .write_host_status(ip, &render_report_json(&report))
+                        .await?;
+                    reports.push(report);
+                    continue;
+                }
+            };
+
             let plan = Planner::plan_host(&spec, record.host);
             let host_spec = spec.clone();
             store.ensure_layout([plan.target.ip]).await?;
@@ -126,6 +178,21 @@ impl PandorasBoxRunner {
                 .write_host_plan(plan.target.ip, &render_plan_json(&plan))
                 .await?;
 
+            if plan.transport_chain.is_empty() {
+                skipped_targets += 1;
+                let report = HostExecutionReport::unattempted_failure(
+                    plan,
+                    super::scheduler::FailurePhase::Connect,
+                    "target was reachable but had no eligible authenticated transport",
+                );
+                store
+                    .write_host_status(report.plan.target.ip, &render_report_json(&report))
+                    .await?;
+                reports.push(report);
+                continue;
+            }
+
+            attempted_targets += 1;
             let collector_job = plan_collector_job(&host_spec, &store, &plan);
             let semaphore = Arc::clone(&semaphore);
             let store = store.clone();
@@ -156,8 +223,22 @@ impl PandorasBoxRunner {
             reports.push(report.expect("Pandora's Box task should not panic")?);
         }
 
-        self.finalize_summary(&spec, &store, discovered_hosts, reports)
-            .await
+        let requested_targets = if spec.targets.is_empty() {
+            observed_targets
+        } else {
+            spec.targets.len()
+        };
+        self.finalize_summary(
+            &spec,
+            &store,
+            requested_targets,
+            reachable_targets,
+            unreachable_targets,
+            skipped_targets,
+            attempted_targets,
+            reports,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -171,7 +252,9 @@ impl PandorasBoxRunner {
         E: HostExecutor + Send + Sync + 'static,
     {
         let (spec, store) = self.prepare_store().await?;
-        let mut discovered_hosts = 0usize;
+        let mut reachable_targets = 0usize;
+        let mut skipped_targets = 0usize;
+        let mut attempted_targets = 0usize;
         let semaphore = Arc::new(Semaphore::new(spec.concurrency_limit.max(1)));
         let mut tasks = JoinSet::new();
         let mut reports = Vec::new();
@@ -179,13 +262,28 @@ impl PandorasBoxRunner {
         futures::pin_mut!(records);
 
         while let Some(record) = records.next().await {
-            discovered_hosts += 1;
+            reachable_targets += 1;
             let plan = Planner::plan_host(&spec, record.host);
             store.ensure_layout([plan.target.ip]).await?;
             store
                 .write_host_plan(plan.target.ip, &render_plan_json(&plan))
                 .await?;
 
+            if plan.transport_chain.is_empty() {
+                skipped_targets += 1;
+                let report = HostExecutionReport::unattempted_failure(
+                    plan,
+                    super::scheduler::FailurePhase::Connect,
+                    "target was reachable but had no eligible authenticated transport",
+                );
+                store
+                    .write_host_status(report.plan.target.ip, &render_report_json(&report))
+                    .await?;
+                reports.push(report);
+                continue;
+            }
+
+            attempted_targets += 1;
             let executor = Arc::clone(&executor);
             let semaphore = Arc::clone(&semaphore);
             let store = store.clone();
@@ -208,8 +306,22 @@ impl PandorasBoxRunner {
             reports.push(report.expect("Pandora's Box task should not panic")?);
         }
 
-        self.finalize_summary(&spec, &store, discovered_hosts, reports)
-            .await
+        let requested_targets = if spec.targets.is_empty() {
+            reachable_targets
+        } else {
+            spec.targets.len()
+        };
+        self.finalize_summary(
+            &spec,
+            &store,
+            requested_targets,
+            reachable_targets,
+            0,
+            skipped_targets,
+            attempted_targets,
+            reports,
+        )
+        .await
     }
 
     async fn prepare_store(&self) -> Result<(MissionSpec, ArtifactStore)> {
@@ -262,12 +374,21 @@ impl PandorasBoxRunner {
         &self,
         spec: &MissionSpec,
         store: &ArtifactStore,
-        discovered_hosts: usize,
+        requested_targets: usize,
+        reachable_targets: usize,
+        unreachable_targets: usize,
+        skipped_targets: usize,
+        attempted_targets: usize,
         reports: Vec<HostExecutionReport>,
     ) -> Result<PandorasBoxRunSummary> {
         let summary = PandorasBoxRunSummary {
             mission_dir: store.mission_dir(),
-            discovered_hosts,
+            requested_targets,
+            reachable_targets,
+            unreachable_targets,
+            skipped_targets,
+            attempted_targets,
+            discovered_hosts: reachable_targets,
             completed_hosts: reports
                 .iter()
                 .filter(|report| report.final_state == HostState::Complete)
@@ -278,17 +399,19 @@ impl PandorasBoxRunner {
                 .count(),
         };
 
-        write_asset_inventory_bundle(store, &reports, discovered_hosts).await?;
+        write_asset_inventory_bundle(
+            store,
+            &reports,
+            requested_targets,
+            reachable_targets,
+            unreachable_targets,
+            skipped_targets,
+            attempted_targets,
+        )
+        .await?;
         store.write_summary(&render_summary_json(&summary)).await?;
         ArtifactStore::clear_active_mission_if_matches(&spec.artifact_root, &spec.mission_id)
             .await?;
-
-        if spec.strict_mode && summary.failed_hosts > 0 {
-            return Err(Error::CommunicatorError(format!(
-                "Pandora's Box finished with {} failed hosts in strict mode",
-                summary.failed_hosts
-            )));
-        }
 
         Ok(summary)
     }
@@ -541,7 +664,7 @@ fn persisted_status_from_report(report: &HostExecutionReport) -> PersistedHostSt
         failure_disposition: report
             .failure_disposition
             .map(|disposition| disposition.as_str().to_string()),
-        attempt_count: report.attempt_count.max(1),
+        attempt_count: report.attempt_count,
         completed_phases: phase_strings(&report.completed_phases),
     }
 }
@@ -1095,7 +1218,7 @@ fn render_mission_manifest(spec: &MissionSpec) -> String {
             "  \"mission_id\": \"{}\",\n",
             "  \"target_count\": {},\n",
             "  \"concurrency_limit\": {},\n",
-            "  \"strict_mode\": {},\n",
+            "  \"best_effort\": {},\n",
             "  \"dry_run\": {},\n",
             "  \"allow_smb_fallback\": {},\n",
             "  \"identity_command\": \"{}\",\n",
@@ -1110,7 +1233,7 @@ fn render_mission_manifest(spec: &MissionSpec) -> String {
         escape_json(&spec.mission_id),
         spec.targets.len(),
         spec.concurrency_limit,
-        spec.strict_mode,
+        spec.best_effort,
         spec.dry_run,
         spec.allow_smb_fallback,
         escape_json(&spec.identity_command),
@@ -1171,12 +1294,22 @@ fn render_summary_json(summary: &PandorasBoxRunSummary) -> String {
         concat!(
             "{{\n",
             "  \"mission_dir\": \"{}\",\n",
+            "  \"requested_targets\": {},\n",
+            "  \"reachable_targets\": {},\n",
+            "  \"unreachable_targets\": {},\n",
+            "  \"skipped_targets\": {},\n",
+            "  \"attempted_targets\": {},\n",
             "  \"discovered_hosts\": {},\n",
             "  \"completed_hosts\": {},\n",
             "  \"failed_hosts\": {}\n",
             "}}\n"
         ),
         escape_json(&summary.mission_dir.to_string_lossy()),
+        summary.requested_targets,
+        summary.reachable_targets,
+        summary.unreachable_targets,
+        summary.skipped_targets,
+        summary.attempted_targets,
         summary.discovered_hosts,
         summary.completed_hosts,
         summary.failed_hosts,
@@ -1195,7 +1328,7 @@ mod tests {
         CollectorRunJob, CollectorStageJob, IdentityCaptureJob, LocalSupportFilePlan,
         PandorasBoxRunSummary, PandorasBoxRunner, PersistedHostStatus, StagedSupportFile,
     };
-    use crate::runtime::discovery::DiscoveryRecord;
+    use crate::runtime::discovery::{DiscoveryOutcome, DiscoveryRecord};
     use crate::runtime::mission::{
         HostPlan, HostState, HostTarget, MissionSpec, PlatformHint, RetryPolicy, TransportKind,
     };
@@ -1684,14 +1817,22 @@ mod tests {
     fn summary_json_includes_host_counts() {
         let summary = PandorasBoxRunSummary {
             mission_dir: PathBuf::from("artifacts/mission-123"),
+            requested_targets: 5,
+            reachable_targets: 5,
+            unreachable_targets: 0,
+            skipped_targets: 0,
+            attempted_targets: 5,
             discovered_hosts: 5,
             completed_hosts: 4,
             failed_hosts: 1,
         };
         let json = render_summary_json(&summary);
 
+        assert!(json.contains("\"requested_targets\": 5"));
+        assert!(json.contains("\"attempted_targets\": 5"));
         assert!(json.contains("\"discovered_hosts\": 5"));
         assert!(json.contains("\"failed_hosts\": 1"));
+        assert!(summary.requires_failure_exit());
     }
 
     #[tokio::test]
@@ -1734,6 +1875,10 @@ mod tests {
             .finalize_summary(
                 &mission_spec,
                 &store,
+                1,
+                1,
+                0,
+                0,
                 1,
                 vec![HostExecutionReport::success(plan, HostState::Complete)],
             )
@@ -1816,6 +1961,10 @@ mod tests {
             .finalize_summary(
                 &mission_spec,
                 &store,
+                1,
+                1,
+                0,
+                0,
                 1,
                 vec![HostExecutionReport::failure(
                     plan,
@@ -1908,6 +2057,10 @@ mod tests {
             .finalize_summary(
                 &mission_spec,
                 &store,
+                2,
+                2,
+                0,
+                0,
                 2,
                 vec![
                     HostExecutionReport::success(plan_a, HostState::Complete),
@@ -2140,6 +2293,83 @@ mod tests {
                 command: r#"cmd.exe /C "ver & whoami""#.to_string(),
             },
         );
+    }
+
+    #[tokio::test]
+    async fn runner_accounts_for_unreachable_targets_without_attempting_transport() {
+        let root = temp_root("runner-unreachable-accounting");
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let spec = MissionSpec {
+            artifact_root: root.clone(),
+            mission_id: "mission-123".to_string(),
+            targets: vec![ip],
+            ..MissionSpec::default()
+        };
+        let runner = PandorasBoxRunner::new(spec);
+        let factory = Arc::new(FakeSessionFactory::new(vec![]));
+
+        let summary = runner
+            .run_with_stream_and_factory(
+                stream::iter(vec![DiscoveryOutcome::Unreachable { ip }]),
+                Arc::clone(&factory),
+            )
+            .await
+            .expect("unreachable targets should produce a completed mission report");
+
+        assert_eq!(summary.requested_targets, 1);
+        assert_eq!(summary.reachable_targets, 0);
+        assert_eq!(summary.unreachable_targets, 1);
+        assert_eq!(summary.skipped_targets, 0);
+        assert_eq!(summary.attempted_targets, 0);
+        assert_eq!(summary.failed_hosts, 1);
+        assert!(summary.requires_failure_exit());
+        assert!(factory.connect_events().is_empty());
+
+        let status =
+            tokio::fs::read_to_string(root.join("mission-123/hosts/192.0.2.10/status.json"))
+                .await
+                .expect("unreachable status should exist");
+        assert!(status.contains("\"attempt_count\": 0"));
+        assert!(status.contains("unreachable"));
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn runner_accounts_for_reachable_targets_without_eligible_transport() {
+        let root = temp_root("runner-skipped-accounting");
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 30));
+        let spec = MissionSpec {
+            artifact_root: root.clone(),
+            mission_id: "mission-123".to_string(),
+            targets: vec![ip],
+            ..MissionSpec::default()
+        };
+        let runner = PandorasBoxRunner::new(spec);
+        let factory = Arc::new(FakeSessionFactory::new(vec![]));
+        let record = DiscoveryRecord {
+            host: HostTarget {
+                ip,
+                platform: PlatformHint::Windows,
+                open_ports: vec![135],
+            },
+            ttl: Some(128),
+        };
+
+        let summary = runner
+            .run_with_stream_and_factory(stream::iter(vec![record]), Arc::clone(&factory))
+            .await
+            .expect("skipped targets should produce a completed mission report");
+
+        assert_eq!(summary.requested_targets, 1);
+        assert_eq!(summary.reachable_targets, 1);
+        assert_eq!(summary.unreachable_targets, 0);
+        assert_eq!(summary.skipped_targets, 1);
+        assert_eq!(summary.attempted_targets, 0);
+        assert_eq!(summary.failed_hosts, 1);
+        assert!(factory.connect_events().is_empty());
+
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[tokio::test]

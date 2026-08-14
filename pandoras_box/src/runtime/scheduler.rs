@@ -107,6 +107,23 @@ impl HostExecutionReport {
     }
 
     #[must_use]
+    pub fn unattempted_failure(
+        plan: HostPlan,
+        phase: FailurePhase,
+        error: impl Into<String>,
+    ) -> Self {
+        Self {
+            plan: plan.force_state(HostState::Failed),
+            final_state: HostState::Failed,
+            error: Some(error.into()),
+            failure_phase: Some(phase),
+            failure_disposition: Some(FailureDisposition::Terminal),
+            attempt_count: 0,
+            completed_phases: Vec::new(),
+        }
+    }
+
+    #[must_use]
     pub fn retryable_failure(
         plan: HostPlan,
         phase: FailurePhase,

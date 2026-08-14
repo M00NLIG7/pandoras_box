@@ -69,25 +69,15 @@ impl FromStr for Ipv4AddrExt {
     }
 }
 
-impl From<String> for Subnet {
-    fn from(value: String) -> Self {
-        Subnet::try_from(value.as_str()).unwrap_or_default()
-    }
-}
-
-impl From<&String> for Subnet {
-    fn from(value: &String) -> Self {
-        Subnet::try_from(value.as_str()).unwrap_or_default()
-    }
-}
-
 impl std::fmt::Display for Subnet {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}/{}", self.ip, self.mask)
     }
 }
 
-#[derive(Debug, Default)]
+pub const DEFAULT_MAX_TARGETS: usize = 65_536;
+
+#[derive(Debug, Default, Clone, Copy)]
 pub struct Subnet {
     ip: Ipv4AddrExt,
     mask: u8,
@@ -99,23 +89,48 @@ impl Subnet {
     }
 
     #[must_use]
-    pub fn hosts(&self) -> Vec<IpAddr> {
-        self.iter_hosts().map(IpAddr::from).collect()
+    pub fn host_count(&self) -> u64 {
+        let (first, end_exclusive) = self.host_bounds();
+        end_exclusive - first
+    }
+
+    pub fn hosts_bounded(&self, max_targets: usize) -> Result<Vec<IpAddr>> {
+        if max_targets == 0 {
+            return Err(crate::Error::ArgumentError(
+                "max_targets must be greater than zero".to_string(),
+            ));
+        }
+
+        let host_count = self.host_count();
+        if host_count > max_targets as u64 {
+            return Err(crate::Error::ArgumentError(format!(
+                "subnet {self} contains {host_count} usable targets, exceeding the configured limit of {max_targets}"
+            )));
+        }
+
+        Ok(self.iter_hosts().map(IpAddr::from).collect())
+    }
+
+    fn host_bounds(&self) -> (u64, u64) {
+        let host_bits = 32 - u32::from(self.mask);
+        let address_count = 1u64 << host_bits;
+        let network_mask = if self.mask == 0 {
+            0
+        } else {
+            u32::MAX << host_bits
+        };
+        let network = u64::from(u32::from(*self.ip) & network_mask);
+
+        if self.mask >= 31 {
+            (network, network + address_count)
+        } else {
+            (network + 1, network + address_count - 1)
+        }
     }
 
     fn iter_hosts(&self) -> Box<dyn Iterator<Item = Ipv4AddrExt> + '_> {
-        // Prevent overflow: when mask = 0, shift would be 32 which is undefined behavior
-        // For /0, iterate entire IPv4 space (impractical, but safe)
-        if self.mask == 0 {
-            warn!("Subnet mask /0 covers entire IPv4 space (4.3 billion addresses), limiting iteration");
-            // Return empty iterator for /0 to prevent DoS
-            return Box::new((0..0).map(|ip| Ipv4AddrExt(Ipv4Addr::from(ip))));
-        }
-
-        let shift_amount = 32 - self.mask;
-        let start = u32::from(*self.ip) & !((1u32 << shift_amount) - 1);
-        let end = start | ((1u32 << shift_amount) - 1);
-        Box::new((start + 1..end).map(|ip| Ipv4AddrExt(Ipv4Addr::from(ip))))
+        let (first, end_exclusive) = self.host_bounds();
+        Box::new((first..end_exclusive).map(|ip| Ipv4AddrExt(Ipv4Addr::from(ip as u32))))
     }
 }
 
@@ -160,6 +175,15 @@ impl Enumerator {
     }
 
     pub async fn sweep(&self) -> Result<Vec<Arc<Host>>> {
+        if self.subnet.host_count() > DEFAULT_MAX_TARGETS as u64 {
+            return Err(crate::Error::ArgumentError(format!(
+                "subnet {} contains {} usable targets, exceeding the enumerator limit of {}",
+                self.subnet,
+                self.subnet.host_count(),
+                DEFAULT_MAX_TARGETS
+            )));
+        }
+
         // First, perform TCP checks
         let tcp_handles: Vec<_> = self
             .subnet
@@ -256,7 +280,7 @@ impl Enumerator {
 
 #[cfg(test)]
 mod tests {
-    use super::{Enumerator, Subnet};
+    use super::{Enumerator, Subnet, DEFAULT_MAX_TARGETS};
     use crate::ttl::TtlProber;
     use crate::OS;
     use async_trait::async_trait;
@@ -293,11 +317,49 @@ mod tests {
     #[test]
     fn subnet_hosts_returns_ip_list() {
         let subnet = Subnet::new(Ipv4Addr::new(10, 0, 0, 0).into(), 30);
-        let hosts = subnet.hosts();
+        let hosts = subnet
+            .hosts_bounded(DEFAULT_MAX_TARGETS)
+            .expect("small subnet should fit the target bound");
 
         assert_eq!(hosts.len(), 2);
         assert!(hosts.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
         assert!(hosts.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+    }
+
+    #[test]
+    fn cidr_32_enumerates_the_requested_address() {
+        let subnet = Subnet::try_from("192.0.2.10/32").expect("/32 should parse");
+
+        assert_eq!(subnet.host_count(), 1);
+        assert_eq!(
+            subnet.hosts_bounded(1).expect("one host should fit"),
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]
+        );
+    }
+
+    #[test]
+    fn cidr_31_enumerates_both_point_to_point_addresses() {
+        let subnet = Subnet::try_from("192.0.2.10/31").expect("/31 should parse");
+
+        assert_eq!(subnet.host_count(), 2);
+        assert_eq!(
+            subnet.hosts_bounded(2).expect("two hosts should fit"),
+            vec![
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+            ]
+        );
+    }
+
+    #[test]
+    fn oversized_cidr_is_rejected_before_materialization() {
+        let subnet = Subnet::try_from("0.0.0.0/0").expect("/0 should parse");
+
+        assert_eq!(subnet.host_count(), 4_294_967_294);
+        let error = subnet
+            .hosts_bounded(DEFAULT_MAX_TARGETS)
+            .expect_err("/0 must exceed the bounded target count");
+        assert!(error.to_string().contains("exceeding the configured limit"));
     }
 
     #[tokio::test]
