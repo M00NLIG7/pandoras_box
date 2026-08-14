@@ -1,5 +1,4 @@
 use crate::Result;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Trait defining what a Session is.
@@ -163,30 +162,32 @@ pub struct Client<T: Config> {
     session: T::SessionType,
 }
 
-/// Example usage:
-/// ```rust
+/// Connect with a known SSH host key and execute one command.
+///
+/// ```no_run
 /// use rustrc::{
-///    client::Client,
-///   ssh::SSHConfig,
-///   winexe::WinexeConfig,
-///    cmd,
-///    };
+///     client::Client,
+///     cmd,
+///     ssh::{HostKeyPolicy, SSHConfig},
+/// };
 /// use std::time::Duration;
 ///
 /// #[tokio::main]
-/// async fn main() -> rustrc::Result<()> {
-///     /*
-///    let config = SSHConfig::password("root", "192.168.1.1:22", "password", Duration::from_secs(30)).await?;
-///    let mut client = Client::connect(config).await?;
-///
-///    let output = client.exec(cmd!("ls", "-la")).await?;
-///
-///    println!("stdout: {:?}", output.stdout);
-///
-///    client.disconnect().await?;
-///    */
-///
-///    Ok(())
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let password = std::env::var("RUSTRC_PASSWORD")?;
+///     let config = SSHConfig::password_with_policy(
+///         "root",
+///         password,
+///         "192.0.2.10:22",
+///         Duration::from_secs(30),
+///         HostKeyPolicy::RequireKnownHosts,
+///     )
+///     .await?;
+///     let mut client = Client::connect(config).await?;
+///     let output = client.exec(&cmd!("uname", "-a")).await?;
+///     println!("{}", String::from_utf8_lossy(&output.stdout));
+///     client.disconnect().await?;
+///     Ok(())
 /// }
 /// ```
 #[allow(unused)]

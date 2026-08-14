@@ -12,12 +12,8 @@ pub enum Error {
     ParseError(String),
     #[error("Authentication error: {0}")]
     AuthenticationError(String),
-    #[error("Request error: {0}")]
-    RequestError(#[from] reqwest::Error),
     #[error("Socket Error: {0}")]
     SocketError(#[from] std::io::Error),
-    #[error("JSON Error: {0}")]
-    JsonError(#[from] serde_json::Error),
     #[error("File Transfer Error: {0}")]
     FileTransferError(String),
     #[error("SFTP Error: {0}")]
@@ -26,17 +22,13 @@ pub enum Error {
 
 impl From<russh::Error> for Error {
     fn from(err: russh::Error) -> Self {
-        match err {
-            _ => Error::ConnectionError(err.to_string()),
-        }
+        Error::ConnectionError(err.to_string())
     }
 }
 
 impl From<russh_keys::Error> for Error {
     fn from(err: russh_keys::Error) -> Self {
-        match err {
-            _ => Error::ConnectionError(err.to_string()),
-        }
+        Error::ConnectionError(err.to_string())
     }
 }
 

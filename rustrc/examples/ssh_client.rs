@@ -1,29 +1,27 @@
 use rustrc::{
     client::Client,
     cmd,
-    //client::Config,
-    ssh::SSHConfig,
+    ssh::{HostKeyPolicy, SSHConfig},
 };
-
 use std::time::Duration;
 
 #[tokio::main]
-async fn main() -> rustrc::Result<()> {
-    let ssh_config = SSHConfig::password(
-        "m00nl1g7",
-        "127.0.0.1:22",
-        "password123",
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let username = std::env::var("RUSTRC_USERNAME").unwrap_or_else(|_| "root".to_string());
+    let password = std::env::var("RUSTRC_PASSWORD")?;
+    let socket = std::env::var("RUSTRC_SOCKET")?;
+    let ssh_config = SSHConfig::password_with_policy(
+        username,
+        password,
+        socket,
         Duration::from_secs(10),
+        HostKeyPolicy::RequireKnownHosts,
     )
     .await?;
 
     let mut client = Client::connect(ssh_config).await?;
-
-    let out = client.exec(&cmd!("ls -la")).await?;
-
-    println!("{:?}", out.stdout);
-
+    let output = client.exec(&cmd!("uname", "-a")).await?;
+    println!("{}", String::from_utf8_lossy(&output.stdout));
     client.disconnect().await?;
-
     Ok(())
 }

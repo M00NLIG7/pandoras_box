@@ -10,7 +10,7 @@ futures = "0.3.30"
 libc = "0.2.177"
 thiserror = "1.0.63"
 tokio = {version = "1.40.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"]}
-rustrc = { path = "../rustrc", default-features = false, features = ["ssh"] }
+rustrc = { path = "../rustrc" }
 log = "0.4.22"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 serde = { version = "1.0.228", features = ["derive"] }

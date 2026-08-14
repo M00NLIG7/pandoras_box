@@ -1,6 +1,5 @@
 use crate::client::{Command, CommandOutput, Config, Session};
 use async_trait::async_trait;
-use byteorder::{BigEndian, WriteBytesExt};
 use russh::client;
 use russh_keys::key::PrivateKeyWithHashAlg;
 use russh_keys::known_hosts::{
@@ -10,17 +9,16 @@ use russh_keys::load_secret_key;
 use russh_keys::ssh_key::public::PublicKey;
 use std::{
     borrow::Cow,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
-use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 use tokio::{
     io::AsyncWriteExt,
     net::{lookup_host, ToSocketAddrs},
 };
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace, warn};
 
 pub struct Connected;
 pub struct Disconnected;
@@ -57,13 +55,6 @@ pub enum SSHConfig {
 }
 
 impl SSHConfig {
-    fn ip(&self) -> IpAddr {
-        match self {
-            Self::Key { socket, .. } => socket.ip(),
-            Self::Password { socket, .. } => socket.ip(),
-        }
-    }
-
     async fn resolve_socket<S: ToSocketAddrs>(socket: S) -> crate::Result<SocketAddr> {
         lookup_host(&socket)
             .await?
@@ -155,7 +146,7 @@ impl Session for SSHSession {
                     russh::Error::Disconnect => "SSH connection closed by remote".to_string(),
                     russh::Error::SendError => {
                         error!("SSH connection closed - command: {:?}", cmd);
-                        format!("SSH connection closed (SendError) - session may have timed out or been closed by server")
+                        "SSH connection closed (SendError) - session may have timed out or been closed by server".to_string()
                     }
                     _ => format!("Failed to open SSH channel: {:?}", e),
                 };
@@ -249,33 +240,9 @@ impl Session for SSHSession {
         file_contents: Arc<Vec<u8>>,
         remote_dest: &str,
     ) -> crate::Result<()> {
-        self.transfer_file_with_timeout(file_contents, remote_dest).await
+        self.transfer_file_with_timeout(file_contents, remote_dest)
+            .await
     }
-}
-
-fn extract_disconnect_message(error_msg: &str) -> Option<String> {
-    // Common disconnect messages we might see from russh
-    if error_msg.contains("description:") {
-        if let Some(start) = error_msg.find("description:") {
-            let rest = &error_msg[start + "description:".len()..];
-            if let Some(end) = rest.find('"') {
-                return Some(rest[..end].trim().to_string());
-            }
-        }
-    }
-
-    // Try to find any message in quotes after "Disconnect"
-    if let Some(start) = error_msg.find("Disconnect") {
-        let rest = &error_msg[start..];
-        if let Some(quote_start) = rest.find('"') {
-            let after_quote = &rest[quote_start + 1..];
-            if let Some(quote_end) = after_quote.find('"') {
-                return Some(after_quote[..quote_end].to_string());
-            }
-        }
-    }
-
-    None
 }
 
 fn is_windows_remote_path(path: &str) -> bool {
@@ -294,7 +261,10 @@ fn normalized_sftp_path(remote_dest: &str) -> Cow<'_, str> {
 }
 
 fn push_unique_path(paths: &mut Vec<String>, candidate: String) {
-    if !paths.iter().any(|existing| existing.eq_ignore_ascii_case(&candidate)) {
+    if !paths
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(&candidate))
+    {
         paths.push(candidate);
     }
 }
@@ -598,34 +568,6 @@ impl SSHSession {
         file_contents: Arc<Vec<u8>>,
         remote_dest: &str,
     ) -> crate::Result<()> {
-        let is_windows = is_windows_remote_path(remote_dest);
-
-        // For Windows paths, try SFTP once and then immediately try batch transfer
-        if is_windows {
-            match self
-                .try_sftp_transfer(file_contents.clone(), remote_dest)
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(sftp_err) => {
-                    debug!("SFTP failed for Windows path, attempting batch transfer");
-                    match self
-                        .try_batch_transfer(file_contents.clone(), remote_dest)
-                        .await
-                    {
-                        Ok(()) => return Ok(()),
-                        Err(batch_err) => {
-                            return Err(crate::Error::FileTransferError(
-                            format!("All transfer methods failed. SFTP error: {}. Batch transfer error: {}", 
-                                sftp_err, batch_err)
-                        ));
-                        }
-                    }
-                }
-            }
-        }
-
-        // For non-Windows paths, use existing retry logic with SFTP only
         let mut last_error = None;
         for attempt in 0..2 {
             match self
@@ -633,9 +575,9 @@ impl SSHSession {
                 .await
             {
                 Ok(()) => return Ok(()),
-                Err(e) => {
-                    last_error = Some(e);
-                    if attempt < 1 {
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt == 0 {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 }
@@ -643,10 +585,7 @@ impl SSHSession {
         }
 
         Err(last_error.unwrap_or_else(|| {
-            crate::Error::FileTransferError(format!(
-                "File transfer failed for path: {}",
-                remote_dest
-            ))
+            crate::Error::FileTransferError(format!("SFTP transfer failed for path: {remote_dest}"))
         }))
     }
 
@@ -662,18 +601,18 @@ impl SSHSession {
                 return Err(match e {
                     crate::Error::FileTransferError(msg) if msg.contains("Disconnect") => {
                         crate::Error::FileTransferError(
-                            format!("Remote host terminated the SSH connection. This might indicate system resource issues or connection problems.")
+                            "Remote host terminated the SSH connection. This might indicate system resource issues or connection problems.".to_string()
                         )
                     },
                     crate::Error::FileTransferError(msg) if msg.contains("Send") => {
                         crate::Error::FileTransferError(
-                            format!("Lost connection to remote host while trying to establish SFTP session. This might indicate network issues or system resource constraints.")
+                            "Lost connection to remote host while trying to establish SFTP session. This might indicate network issues or system resource constraints.".to_string()
                         )
                     },
                     _ => e
                 });
             }
-        }; 
+        };
 
         if is_windows_remote_path(remote_dest) {
             let mut failures = Vec::new();
@@ -706,63 +645,6 @@ impl SSHSession {
                 let _ = sftp.remove_file(sftp_dest.as_ref()).await;
                 Err(e)
             }
-        }
-    }
-
-    async fn try_batch_transfer(
-        &self,
-        file_contents: Arc<Vec<u8>>,
-        remote_dest: &str,
-    ) -> crate::Result<()> {
-        let sftp = self.create_sftp_session_with_retry().await.map_err(|e| {
-            crate::Error::FileTransferError(format!(
-                "Failed to create SFTP session for batch transfer: {}",
-                e
-            ))
-        })?;
-
-        self.ensure_transfer_helper(&sftp).await.map_err(|e| {
-            crate::Error::FileTransferError(format!("Failed to ensure transfer helper: {}", e))
-        })?;
-
-        self.batch_transfer_file(file_contents, remote_dest)
-            .await
-            .map_err(|e| {
-                crate::Error::FileTransferError(format!("Batch transfer failed: {}", e))
-            })?;
-
-        // Verify file exists after transfer
-        match self.verify_file_exists(remote_dest).await {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(crate::Error::FileTransferError(
-                "Failed to verify batch file transfer - file not found".into(),
-            )),
-            Err(e) => Err(crate::Error::FileTransferError(format!(
-                "Failed to verify batch file transfer: {}",
-                e
-            ))),
-        }
-    }
-
-    async fn verify_file_exists(&self, path: &str) -> crate::Result<bool> {
-        // Windows paths need special handling
-        let cmd = if is_windows_remote_path(path) {
-            format!("cmd.exe /c if exist {} echo TRUE", path)
-        } else {
-            format!("cmd.exe /c if exist \"{}\" echo TRUE", path)
-        };
-
-        match self.exec(&crate::cmd!(cmd)).await {
-            Ok(output) => {
-                // Windows command will output "1" if file exists
-                let output_str = String::from_utf8_lossy(&output.stdout);
-                if output_str.contains("TRUE") {
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-            Err(_) => Ok(false),
         }
     }
 
@@ -890,383 +772,6 @@ impl SSHSession {
             }
         }
         Ok(())
-    }
-
-    async fn verify_file_readiness(
-        &self,
-        sftp: &russh_sftp::client::SftpSession,
-        path: &str,
-    ) -> crate::Result<()> {
-        const MAX_ATTEMPTS: u32 = 5;
-        const RETRY_DELAY: Duration = Duration::from_millis(100);
-
-        for attempt in 0..MAX_ATTEMPTS {
-            // Check if file exists
-            if !sftp.try_exists(path).await.unwrap_or(false) {
-                if attempt == MAX_ATTEMPTS - 1 {
-                    return Err(crate::Error::FileTransferError(
-                        "File not found after retries".into(),
-                    ));
-                }
-                tokio::time::sleep(RETRY_DELAY).await;
-                continue;
-            }
-
-            // Try to open file to verify it's not locked
-            match sftp.open(path).await {
-                Ok(_) => return Ok(()),
-                Err(e) if attempt < MAX_ATTEMPTS - 1 => {
-                    warn!("File not ready on attempt {}: {}", attempt + 1, e);
-                    tokio::time::sleep(RETRY_DELAY).await;
-                }
-                Err(e) => {
-                    return Err(crate::Error::FileTransferError(format!(
-                        "File not ready after retries: {}",
-                        e
-                    )))
-                }
-            }
-        }
-
-        Err(crate::Error::FileTransferError(
-            "File verification failed".into(),
-        ))
-    }
-
-    async fn verify_transfer_helper_exists(&self) -> crate::Result<bool> {
-        let output = self
-            .exec(&crate::cmd!(
-                "cmd.exe /c if exist C:\\Temp\\transfer_file.bat echo EXISTS"
-            ))
-            .await?;
-        Ok(String::from_utf8_lossy(&output.stdout).contains("EXISTS"))
-    }
-
-    async fn verify_transfer_file(&self) -> crate::Result<(bool, bool)> {
-        const EXPECTED_SIZE: u64 = 2544; // Expected size of transfer_file.bat
-
-        let output = self
-            .exec(&crate::cmd!(
-                "cmd.exe /c dir C:\\Temp\\transfer_file.bat /a-d"
-            ))
-            .await?;
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        debug!("Dir output: {}", output_str);
-
-        // Check file existence
-        let exists = !output_str.is_empty()
-            && !output_str.contains("File Not Found")
-            && !output_str.contains("cannot find");
-
-        // Parse size handling commas in the number
-        let correct_size = if exists {
-            output_str
-                .lines()
-                .filter(|line| line.contains("transfer_file.bat"))
-                .find_map(|line| {
-                    line.split_whitespace()
-                        .find(|&part| part.contains(',') || part.chars().all(|c| c.is_digit(10)))
-                        .map(|size| size.replace(",", ""))
-                        .and_then(|size| size.parse::<u64>().ok())
-                })
-                .map(|size| {
-                    debug!("Found file size: {}", size);
-                    size == EXPECTED_SIZE
-                })
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
-        debug!("File exists: {}, correct size: {}", exists, correct_size);
-
-        Ok((exists, correct_size))
-    }
-
-    async fn ensure_transfer_helper(
-        &self,
-        sftp: &russh_sftp::client::SftpSession,
-    ) -> crate::Result<()> {
-        const MAX_RETRIES: u32 = 3;
-        const RETRY_DELAY: Duration = Duration::from_millis(100);
-
-        for attempt in 0..MAX_RETRIES {
-            // Check if file exists and has correct size
-            let (exists, correct_size) = self.verify_transfer_file().await?;
-
-            if exists && correct_size {
-                debug!("transfer_file.bat exists and has correct size");
-                return Ok(());
-            }
-
-            if exists && !correct_size {
-                debug!("transfer_file.bat exists but has wrong size, recreating");
-                let _ = sftp.remove_file("C:\\Temp\\transfer_file.bat").await;
-            }
-
-            // Create directory if needed
-            if !sftp.try_exists("C:\\Temp").await.unwrap_or(false) {
-                sftp.create_dir("C:\\Temp").await?;
-            }
-
-            // Create and write the file
-            let mut helper = match sftp.create("C:\\Temp\\transfer_file.bat").await {
-                Ok(file) => file,
-                Err(e) => {
-                    if attempt < MAX_RETRIES - 1 {
-                        tokio::time::sleep(RETRY_DELAY).await;
-                        continue;
-                    }
-                    return Err(e.into());
-                }
-            };
-
-            helper.write_all(crate::TRANSFER_HELPER.as_bytes()).await?;
-            helper.sync_all().await?;
-
-            // Verify the newly created file
-            let (exists, correct_size) = self.verify_transfer_file().await?;
-            if exists && correct_size {
-                return Ok(());
-            }
-
-            if attempt < MAX_RETRIES - 1 {
-                tokio::time::sleep(RETRY_DELAY).await;
-                continue;
-            }
-        }
-
-        Err(crate::Error::FileTransferError(
-            "Failed to ensure transfer_file.bat after retries".into(),
-        ))
-    }
-
-    async fn verify_process_creation(&self, cmd: &str) -> crate::Result<()> {
-        const MAX_RETRIES: u32 = 3;
-        const RETRY_DELAY: Duration = Duration::from_millis(100);
-
-        for attempt in 0..MAX_RETRIES {
-            let output = self.exec(&crate::cmd!(cmd)).await?;
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-
-            // Check for specific error conditions
-            if stderr.contains("not found") || stderr.contains("cannot find") {
-                if attempt < MAX_RETRIES - 1 {
-                    tokio::time::sleep(RETRY_DELAY).await;
-                    continue;
-                }
-                return Err(crate::Error::FileTransferError("Process not found".into()));
-            }
-
-            if stderr.contains("being used by another process") {
-                if attempt < MAX_RETRIES - 1 {
-                    tokio::time::sleep(RETRY_DELAY).await;
-                    continue;
-                }
-                return Err(crate::Error::FileTransferError("Resource busy".into()));
-            }
-
-            // For wmic process creation
-            if stdout.contains("ReturnValue = 0") {
-                return Ok(());
-            }
-
-            if attempt < MAX_RETRIES - 1 {
-                tokio::time::sleep(RETRY_DELAY).await;
-                continue;
-            }
-        }
-
-        Err(crate::Error::FileTransferError(
-            "Process creation verification failed after retries".into(),
-        ))
-    }
-
-    async fn batch_transfer_file(
-        &self,
-        file_contents: Arc<Vec<u8>>,
-        remote_destination: &str,
-    ) -> crate::Result<()> {
-        let port_number = 49152 + rand::random::<u16>() % 16384;
-
-        // Add firewall rule
-        let rule = format!(
-            "cmd.exe /c netsh advfirewall firewall add rule name=\"Allow Port {}\" dir=in action=allow protocol=TCP localport={}",
-            port_number, port_number
-        );
-
-        self.exec(&crate::cmd!(rule)).await?;
-
-        // Start helper with process creation verification
-        let start_helper = format!(
-            "cmd.exe /c wmic process call create 'C:\\Temp\\transfer_file.bat {} 0.0.0.0 {} receive'",
-            port_number, remote_destination
-        );
-
-        // Verify process creation
-        self.verify_process_creation(&start_helper).await?;
-
-        // Connect and transfer
-        let result = match self.connect_with_retry(port_number).await {
-            Ok(stream) => self.send_file_data(stream, &file_contents).await,
-            Err(e) => {
-                self.cleanup_firewall_rule(port_number).await;
-                Err(e)
-            }
-        };
-
-        // Always cleanup
-        self.cleanup_firewall_rule(port_number).await;
-        result
-    }
-
-    async fn cleanup_firewall_rule(&self, port_number: u16) {
-        let cleanup_cmd = format!(
-            "cmd.exe /c netsh advfirewall firewall delete rule name=\"Allow Port {}\"",
-            port_number
-        );
-        if let Err(e) = self.exec(&crate::cmd!(cleanup_cmd)).await {
-            eprintln!("Warning: Failed to cleanup firewall rule: {:?}", e);
-        }
-    }
-
-    async fn connect_with_retry(&self, port_number: u16) -> crate::Result<TcpStream> {
-        let socket = format!("{}:{}", self.config.ip(), port_number);
-
-        tokio::time::sleep(Duration::from_secs(10)).await;
-
-        // Reduce number of attempts and delay
-        for attempt in 0..5 {
-            match TcpStream::connect(&socket).await {
-                Ok(stream) => return Ok(stream),
-                Err(_) if attempt < 4 => {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-                Err(_) => break,
-            }
-        }
-
-        Err(crate::Error::FileTransferError(
-            "Failed to connect after 5 attempts".to_string(),
-        ))
-    }
-
-    async fn send_file_data(
-        &self,
-        mut stream: TcpStream,
-        file_contents: &[u8],
-    ) -> crate::Result<()> {
-        let file_size = file_contents.len() as u64;
-        let mut size_buffer = vec![];
-
-        match WriteBytesExt::write_u64::<BigEndian>(&mut size_buffer, file_size) {
-            Ok(_) => {}
-            Err(e) => {
-                return Err(crate::Error::FileTransferError(format!(
-                    "Failed to write file size header: {:?}",
-                    e
-                )))
-            }
-        }
-
-        if let Err(e) = stream.write_all(&size_buffer).await {
-            return Err(crate::Error::FileTransferError(format!(
-                "Failed to send file size header: {:?}",
-                e
-            )));
-        }
-
-        if let Err(e) = stream.write_all(file_contents).await {
-            return Err(crate::Error::FileTransferError(format!(
-                "Failed to send file contents: {:?} (sent {}/{})",
-                e,
-                size_buffer.len(),
-                file_contents.len()
-            )));
-        }
-
-        Ok(())
-    }
-
-    #[instrument(skip(self, remote_path, local_path))]
-    async fn download_file(&self, remote_path: &str, local_path: &str) -> crate::Result<()> {
-        info!(
-            remote_path = %remote_path,
-            local_path = %local_path,
-            "Starting file download"
-        );
-
-        if let Some(parent) = Path::new(local_path).parent() {
-            debug!(path = ?parent, "Creating parent directories");
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
-        let sftp = match self.create_sftp_session_with_retry().await {
-            Ok(session) => session,
-            Err(e) => {
-                error!(error = ?e, "Failed to create SFTP session for download");
-                return Err(e);
-            }
-        };
-
-        let temp_path = format!("{}.tmp", local_path);
-        debug!(temp_path = %temp_path, "Creating temporary file");
-
-        let mut local_file = match tokio::fs::File::create(&temp_path).await {
-            Ok(file) => file,
-            Err(e) => {
-                error!(error = ?e, "Failed to create local file");
-                return Err(crate::Error::FileTransferError(format!(
-                    "Failed to create local file: {}",
-                    e
-                )));
-            }
-        };
-
-        debug!(remote_path = %remote_path, "Opening remote file");
-        let mut remote_file = match sftp.open(remote_path).await {
-            Ok(file) => file,
-            Err(e) => {
-                error!(error = ?e, "Failed to open remote file");
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(crate::Error::FileTransferError(format!(
-                    "Failed to open remote file: {}",
-                    e
-                )));
-            }
-        };
-
-        debug!("Starting file copy operation");
-        match tokio::time::timeout(
-            Duration::from_secs(300), // 5 minute timeout
-            tokio::io::copy(&mut remote_file, &mut local_file),
-        )
-        .await
-        {
-            Ok(Ok(bytes)) => {
-                debug!(bytes_copied = bytes, "File copy completed");
-                local_file.sync_all().await?;
-                debug!("Renaming temporary file to target");
-                tokio::fs::rename(temp_path, local_path).await?;
-                info!("File download completed successfully");
-                Ok(())
-            }
-            Ok(Err(e)) => {
-                error!(error = ?e, "Copy operation failed");
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                Err(crate::Error::FileTransferError(format!(
-                    "Copy failed: {}",
-                    e
-                )))
-            }
-            Err(_) => {
-                error!("Download operation timed out");
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                Err(crate::Error::FileTransferError("Download timed out".into()))
-            }
-        }
     }
 }
 
