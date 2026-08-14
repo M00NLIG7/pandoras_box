@@ -3013,6 +3013,7 @@ checksum = "3c5e1a9a646d36c3599cd173a41282daf47c44583ad367b8e6837255952e5c67"
 [[package]]
 name = "smolder"
 version = "0.3.0"
+source = "git+https://github.com/M00NLIG7/smolder.git?rev=05cad6854d6044a1af659693ba202c3de5285d57#05cad6854d6044a1af659693ba202c3de5285d57"
 dependencies = [
  "bytes",
  "crossterm",
@@ -3025,6 +3026,7 @@ dependencies = [
 [[package]]
 name = "smolder-proto"
 version = "0.3.0"
+source = "git+https://github.com/M00NLIG7/smolder.git?rev=05cad6854d6044a1af659693ba202c3de5285d57#05cad6854d6044a1af659693ba202c3de5285d57"
 dependencies = [
  "bitflags 2.6.0",
  "bytes",
@@ -3034,6 +3036,7 @@ dependencies = [
 [[package]]
 name = "smolder-smb-core"
 version = "0.3.0"
+source = "git+https://github.com/M00NLIG7/smolder.git?rev=05cad6854d6044a1af659693ba202c3de5285d57#05cad6854d6044a1af659693ba202c3de5285d57"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm",
