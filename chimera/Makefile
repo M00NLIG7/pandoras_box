@@ -1,22 +1,15 @@
-WINDOWS_TARGET = x86_64-pc-windows-gnu
-UNIX_TARGET = i686-unknown-linux-musl
+RELEASE_TARGET := x86_64-unknown-linux-musl
 
-windows:
-	cross build --locked --release --target $(WINDOWS_TARGET)
+.PHONY: all check test release-linux
 
-unix:
-	cross build --locked --release --target $(UNIX_TARGET)
+all: check test release-linux
 
-.PHONY: all
-all: windows unix
+check:
+	cargo fmt --all -- --check
+	cargo clippy --locked --offline -p chimera --all-targets -- -D warnings
 
-test-windows:
-	cross test --locked --target $(WINDOWS_TARGET)
+test:
+	cargo test --locked --offline -p chimera
 
-test-unix:
-	cross test --locked --target $(UNIX_TARGET)
-
-test-all: test-windows test-unix
-
-clean:
-	cargo clean
+release-linux:
+	cross build --locked --release -p chimera --bin chimera --target $(RELEASE_TARGET)

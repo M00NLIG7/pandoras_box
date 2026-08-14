@@ -1,22 +1,23 @@
-```
-All:
-1. Remote into all of the machines
-2. Change default password
-3. Conduct asset inventory
-4. Run system update
-5. OS Specific task
+# Chimera collector contract
 
-Windows:
-1. Setup SSH
-1. Disable SMBv1
-2. Mitigate Zerologon
-3. Mitigate kerbroasting
-4. Harden LSA and other mimikatz attack vectors
-5. Enable Windows Defender
+Chimera is the terminal inventory collector staged by Pandora. It is not a host-hardening agent and does not rotate credentials, install security services, change operating-system policy, download tools, or open an artifact-transfer listener.
 
-Linux:
-1. Install rsyslog
-2. Setup Auditd
-3. Configure fail2ban
-4. SSH Config
+## Release integration
+
+```sh
+chimera --output-root <directory> collector
 ```
+
+Collector mode:
+
+1. creates the selected local output directory;
+2. gathers read-only inventory with bounded external probes;
+3. writes valid Serde JSON to `inventory.json`;
+4. writes diagnostic output to `application.log`; and
+5. exits nonzero if the collector contract itself cannot complete.
+
+An unavailable inventory subsection is represented in the JSON `sectionErrors` array rather than silently becoming complete data. Pandora retrieves both terminal files through its existing authenticated SFTP or SMB session and then records cleanup separately.
+
+The standalone `inventory` subcommand is retained for local collector development. The first-release evidence and packaging path use `collector` mode only.
+
+See the repository-local [`README.md`](../README.md), [`docs/THREAT_MODEL.md`](../docs/THREAT_MODEL.md), and [`docs/BUILDING.md`](../docs/BUILDING.md) for the current product boundary. Historical hardening and credential-rotation descriptions are not part of this release.
