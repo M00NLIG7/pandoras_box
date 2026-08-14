@@ -98,15 +98,18 @@ impl PandorasBoxRunner {
             connect_timeout: self.spec.retry_policy.connect_timeout,
             concurrency_limit: self.spec.concurrency_limit,
         });
-        let factory = Arc::new(PasswordSessionFactory::new(
-            self.spec.unix_username.clone(),
-            self.spec.windows_username.clone(),
-            self.spec.password.clone(),
-            self.spec.ssh_port,
-            forwarded_smb_ports(&self.spec),
-            self.spec.retry_policy.connect_timeout,
-            self.spec.windows_smb_exec_mode,
-        ));
+        let factory = Arc::new(
+            PasswordSessionFactory::new(
+                self.spec.unix_username.clone(),
+                self.spec.windows_username.clone(),
+                self.spec.password.clone(),
+                self.spec.ssh_port,
+                forwarded_smb_ports(&self.spec),
+                self.spec.retry_policy.connect_timeout,
+                self.spec.windows_smb_exec_mode,
+            )
+            .with_ssh_host_key_policy(self.spec.ssh_host_key_policy),
+        );
 
         self.run_with_stream_and_factory(
             discovery.probe_ips_outcomes_stream(self.spec.targets.clone()),
@@ -1273,6 +1276,7 @@ struct MissionManifest<'a> {
     unix_username: &'a str,
     windows_username: &'a str,
     ssh_port: u16,
+    ssh_host_key_policy: &'static str,
     discovery_ports: &'a [u16],
     chimera_unix_path: String,
     chimera_windows_path: String,
@@ -1298,6 +1302,7 @@ fn render_mission_manifest(spec: &MissionSpec) -> String {
             unix_username: &spec.unix_username,
             windows_username: &spec.windows_username,
             ssh_port: spec.ssh_port,
+            ssh_host_key_policy: spec.ssh_host_key_policy.as_str(),
             discovery_ports: &spec.discovery_ports,
             chimera_unix_path: spec.chimera_unix_path.to_string_lossy().into_owned(),
             chimera_windows_path: spec.chimera_windows_path.to_string_lossy().into_owned(),
@@ -1799,7 +1804,7 @@ mod tests {
     #[test]
     fn mission_manifest_omits_password_and_serializes_control_characters() {
         let spec = MissionSpec {
-            password: "super-secret".to_string(),
+            password: "super-secret".into(),
             discovery_ports: vec![2222],
             identity_command: "printf '\n\u{1}'".to_string(),
             unix_username: "operator\\\"quoted".to_string(),
@@ -1811,6 +1816,7 @@ mod tests {
 
         assert_eq!(parsed["engine"], "pandoras_box");
         assert_eq!(parsed["ssh_port"], 22);
+        assert_eq!(parsed["ssh_host_key_policy"], "require_known");
         assert_eq!(parsed["discovery_ports"], serde_json::json!([2222]));
         assert_eq!(parsed["identity_command"], "printf '\n\u{1}'");
         assert_eq!(parsed["unix_username"], "operator\\\"quoted");

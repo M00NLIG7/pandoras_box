@@ -712,6 +712,8 @@ fn is_terminal_error(error: &str) -> bool {
         "access is denied",
         "host key verification failed",
         "host key for",
+        "unknown server key",
+        "unknown host key",
         "no ssh port",
         "smb fallback is disabled",
         "not valid for unix targets",

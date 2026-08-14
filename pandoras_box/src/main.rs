@@ -1,7 +1,8 @@
-use clap::{arg as carg, command, value_parser, ArgMatches, Command as ClapCommand};
+use clap::{arg as carg, command, value_parser, ArgGroup, ArgMatches, Command as ClapCommand};
 use log::{error, info};
 use pandoras_box::*;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, Read};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::Command;
@@ -11,6 +12,7 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
 static INIT: Once = Once::new();
+const MAX_LOGIN_SECRET_BYTES: u64 = 4096;
 
 fn current_timestamp_string() -> String {
     SystemTime::now()
@@ -24,6 +26,64 @@ fn mission_id_value(value: &str) -> std::result::Result<String, String> {
     runtime::validate_mission_id(value)
         .map(|()| value.to_string())
         .map_err(|err| err.to_string())
+}
+
+fn normalize_login_secret(mut value: String) -> Result<runtime::SecretString> {
+    if value.ends_with("\r\n") {
+        value.truncate(value.len() - 2);
+    } else if value.ends_with('\n') {
+        value.pop();
+    }
+
+    if value.is_empty() {
+        return Err(Error::ArgumentError(
+            "login secret cannot be empty".to_string(),
+        ));
+    }
+    if value.len() > MAX_LOGIN_SECRET_BYTES as usize {
+        return Err(Error::ArgumentError(format!(
+            "login secret exceeds {MAX_LOGIN_SECRET_BYTES} bytes"
+        )));
+    }
+    if value.contains('\r') || value.contains('\n') {
+        return Err(Error::ArgumentError(
+            "login secret input must contain exactly one line".to_string(),
+        ));
+    }
+
+    Ok(runtime::SecretString::new(value))
+}
+
+fn read_login_secret(
+    matches: &ArgMatches,
+    stdin: &mut impl BufRead,
+) -> Result<runtime::SecretString> {
+    let mut value = String::new();
+    if matches.get_flag("password-stdin") {
+        (&mut *stdin)
+            .take(MAX_LOGIN_SECRET_BYTES + 2)
+            .read_to_string(&mut value)?;
+    } else {
+        let path = matches
+            .get_one::<PathBuf>("password-file")
+            .ok_or_else(|| Error::ArgumentError("a login secret source is required".to_string()))?;
+        let file = File::open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = file.metadata()?;
+            if metadata.is_file() && metadata.permissions().mode() & 0o077 != 0 {
+                return Err(Error::ArgumentError(format!(
+                    "password file {} must not be accessible by group or other users",
+                    path.display()
+                )));
+            }
+        }
+        file.take(MAX_LOGIN_SECRET_BYTES + 2)
+            .read_to_string(&mut value)?;
+    }
+
+    normalize_login_secret(value)
 }
 
 struct MemoryReport;
@@ -45,8 +105,9 @@ impl Drop for MemoryReport {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_cli, mission_spec_from_matches};
+    use super::{build_cli, mission_spec_from_matches, read_login_secret};
     use crate::enumerator::Subnet;
+    use std::io::Cursor;
     use std::path::PathBuf;
 
     #[test]
@@ -56,8 +117,7 @@ mod tests {
                 "pandoras_box",
                 "--range",
                 "10.0.0.0/30",
-                "--password",
-                "secret",
+                "--password-stdin",
                 "--collector_port",
                 "45555",
             ])
@@ -73,8 +133,7 @@ mod tests {
                 "pandoras_box",
                 "--range",
                 "10.0.0.0/30",
-                "--password",
-                "secret",
+                "--password-stdin",
                 "--engine",
                 "legacy",
             ])
@@ -90,8 +149,7 @@ mod tests {
                 "pandoras_box",
                 "--range",
                 "10.0.0.0/30",
-                "--password",
-                "secret",
+                "--password-stdin",
                 "--mission_id",
                 "mission-override",
             ])
@@ -101,7 +159,7 @@ mod tests {
             .hosts_bounded(crate::enumerator::DEFAULT_MAX_TARGETS)
             .expect("small subnet should fit the target limit");
 
-        let spec = mission_spec_from_matches(&matches, targets.clone(), "secret".to_string());
+        let spec = mission_spec_from_matches(&matches, targets.clone(), "secret".into());
 
         assert_eq!(spec.targets, targets);
         assert_eq!(spec.mission_id, "mission-override");
@@ -111,7 +169,11 @@ mod tests {
             spec.chimera_windows_path,
             PathBuf::from("release/chimera.exe")
         );
-        assert_eq!(spec.password, "secret");
+        assert_eq!(spec.password.expose_secret(), "secret");
+        assert_eq!(
+            spec.ssh_host_key_policy,
+            crate::runtime::SshHostKeyPolicy::RequireKnown
+        );
         assert!(spec.allow_smb_fallback);
     }
 
@@ -123,8 +185,7 @@ mod tests {
                     "pandoras_box",
                     "--range",
                     "10.0.0.0/30",
-                    "--password",
-                    "secret",
+                    "--password-stdin",
                     "--mission_id",
                     mission_id,
                 ])
@@ -135,14 +196,117 @@ mod tests {
     }
 
     #[test]
-    fn cli_rejects_removed_password_rotation_flag() {
+    fn cli_rejects_password_in_process_arguments() {
         let error = build_cli()
             .try_get_matches_from([
                 "pandoras_box",
                 "--range",
                 "10.0.0.0/30",
                 "--password",
-                "secret",
+                "must-not-be-an-argv-secret",
+            ])
+            .expect_err("login secrets in process arguments must not be supported");
+
+        assert!(error.to_string().contains("--password"));
+    }
+
+    #[test]
+    fn cli_requires_exactly_one_non_argv_secret_source() {
+        let missing = build_cli()
+            .try_get_matches_from(["pandoras_box", "--range", "10.0.0.0/30"])
+            .expect_err("a secret source should be required");
+        assert!(missing.to_string().contains("--password-stdin"));
+
+        let duplicate = build_cli()
+            .try_get_matches_from([
+                "pandoras_box",
+                "--range",
+                "10.0.0.0/30",
+                "--password-stdin",
+                "--password-file",
+                "/dev/null",
+            ])
+            .expect_err("secret sources should be mutually exclusive");
+        assert!(duplicate.to_string().contains("cannot be used with"));
+    }
+
+    #[test]
+    fn password_stdin_reads_one_redacted_line() {
+        let matches = build_cli()
+            .try_get_matches_from(["pandoras_box", "--range", "10.0.0.0/30", "--password-stdin"])
+            .expect("stdin secret source should parse");
+        let mut input = Cursor::new(b"stdin-only-secret\n".to_vec());
+
+        let secret = read_login_secret(&matches, &mut input)
+            .expect("one newline-terminated secret should be accepted");
+        assert_eq!(secret.expose_secret(), "stdin-only-secret");
+        assert!(!format!("{secret:?}").contains("stdin-only-secret"));
+    }
+
+    #[test]
+    fn dangerous_unknown_host_policy_requires_conspicuous_flag() {
+        let matches = build_cli()
+            .try_get_matches_from([
+                "pandoras_box",
+                "--range",
+                "10.0.0.0/30",
+                "--password-stdin",
+                "--dangerously-accept-unknown-host-keys",
+            ])
+            .expect("explicit dangerous host-key policy should parse");
+        let spec = mission_spec_from_matches(&matches, Vec::new(), "secret".into());
+
+        assert_eq!(
+            spec.ssh_host_key_policy,
+            crate::runtime::SshHostKeyPolicy::DangerouslyAcceptUnknown
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn password_file_requires_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("pandora-password-{unique}"));
+        std::fs::write(&path, "file-only-secret\n").expect("secret fixture should be written");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("secret fixture should be private");
+        let path_value = path.to_string_lossy().into_owned();
+        let matches = build_cli()
+            .try_get_matches_from([
+                "pandoras_box",
+                "--range",
+                "10.0.0.0/30",
+                "--password-file",
+                &path_value,
+            ])
+            .expect("password file source should parse");
+
+        let secret = read_login_secret(&matches, &mut Cursor::new(Vec::<u8>::new()))
+            .expect("private password file should be accepted");
+        assert_eq!(secret.expose_secret(), "file-only-secret");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("fixture permissions should change");
+        let error = read_login_secret(&matches, &mut Cursor::new(Vec::<u8>::new()))
+            .expect_err("group-readable password file should be rejected");
+        assert!(error.to_string().contains("must not be accessible"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cli_rejects_removed_password_rotation_flag() {
+        let error = build_cli()
+            .try_get_matches_from([
+                "pandoras_box",
+                "--range",
+                "10.0.0.0/30",
+                "--password-stdin",
                 "--magic",
                 "17",
             ])
@@ -158,8 +322,7 @@ mod tests {
                 "pandoras_box",
                 "--range",
                 "192.0.2.10/32",
-                "--password",
-                "secret",
+                "--password-stdin",
             ])
             .expect("default CLI arguments should parse");
         let best_effort_matches = build_cli()
@@ -167,40 +330,32 @@ mod tests {
                 "pandoras_box",
                 "--range",
                 "192.0.2.10/32",
-                "--password",
-                "secret",
+                "--password-stdin",
                 "--best-effort",
             ])
             .expect("best-effort CLI arguments should parse");
         let targets = vec!["192.0.2.10".parse().expect("target should parse")];
 
         assert!(
-            !mission_spec_from_matches(&default_matches, targets.clone(), "secret".to_string())
+            !mission_spec_from_matches(&default_matches, targets.clone(), "secret".into())
                 .best_effort
         );
         assert!(
-            mission_spec_from_matches(&best_effort_matches, targets, "secret".to_string())
-                .best_effort
+            mission_spec_from_matches(&best_effort_matches, targets, "secret".into()).best_effort
         );
     }
 
     #[test]
     fn mission_spec_from_matches_marks_generated_mission_ids_as_auto_resumable() {
         let matches = build_cli()
-            .try_get_matches_from([
-                "pandoras_box",
-                "--range",
-                "10.0.0.0/30",
-                "--password",
-                "secret",
-            ])
+            .try_get_matches_from(["pandoras_box", "--range", "10.0.0.0/30", "--password-stdin"])
             .expect("CLI should parse Pandora's Box arguments");
         let targets = Subnet::try_from("10.0.0.0/30")
             .expect("subnet should parse")
             .hosts_bounded(crate::enumerator::DEFAULT_MAX_TARGETS)
             .expect("small subnet should fit the target limit");
 
-        let spec = mission_spec_from_matches(&matches, targets, "secret".to_string());
+        let spec = mission_spec_from_matches(&matches, targets, "secret".into());
 
         assert!(!spec.mission_id_explicit);
         assert!(!spec.mission_id.is_empty());
@@ -215,11 +370,22 @@ fn build_cli() -> ClapCommand {
                 .value_parser(value_parser!(String)),
         )
         .arg(
-            carg!(-p --password <PASSWORD>)
+            carg!(--"password-stdin" "Read the login secret from standard input")
+                .required(false),
+        )
+        .arg(
+            carg!(--"password-file" <PATH> "Read the login secret from a protected file or file descriptor")
+                .required(false)
+                .value_parser(value_parser!(PathBuf)),
+        )
+        .group(
+            ArgGroup::new("password-source")
                 .required(true)
-                .value_parser(value_parser!(String)),
+                .multiple(false)
+                .args(["password-stdin", "password-file"]),
         )
         .arg(carg!(--dry_run "Skip remote mutation operations"))
+        .arg(carg!(--"dangerously-accept-unknown-host-keys" "DANGER: permit first contact with an unknown SSH host key; changed enrolled keys are still rejected"))
         .arg(carg!(--"best-effort" "Return success after handled target failures, including zero attempted targets; unhandled mission errors still fail"))
         .arg(
             carg!(--"max-targets" <COUNT> "Reject a CIDR containing more usable targets than this bound")
@@ -261,7 +427,7 @@ fn build_cli() -> ClapCommand {
 fn mission_spec_from_matches(
     matches: &ArgMatches,
     targets: Vec<IpAddr>,
-    password: String,
+    password: runtime::SecretString,
 ) -> runtime::MissionSpec {
     let mission_id_explicit =
         matches.contains_id("mission_id") && matches.get_one::<String>("mission_id").is_some();
@@ -292,6 +458,11 @@ fn mission_spec_from_matches(
             .expect("windows_user should have a default")
             .clone(),
         password,
+        ssh_host_key_policy: if matches.get_flag("dangerously-accept-unknown-host-keys") {
+            runtime::SshHostKeyPolicy::DangerouslyAcceptUnknown
+        } else {
+            runtime::SshHostKeyPolicy::RequireKnown
+        },
         best_effort: matches.get_flag("best-effort"),
         dry_run: matches.get_flag("dry_run"),
         ..runtime::MissionSpec::default()
@@ -361,7 +532,11 @@ async fn main() -> Result<()> {
     let matches = build_cli().get_matches();
 
     let range = matches.get_one::<String>("range").unwrap();
-    let password = matches.get_one::<String>("password").unwrap();
+    let password = {
+        let stdin = std::io::stdin();
+        let mut stdin = stdin.lock();
+        read_login_secret(&matches, &mut stdin)?
+    };
 
     info!("Starting application with range: {}", range);
 
@@ -379,7 +554,7 @@ async fn main() -> Result<()> {
         .get_one::<usize>("max-targets")
         .expect("max-targets should have a default");
     let targets = subnet.hosts_bounded(max_targets)?;
-    let spec = mission_spec_from_matches(&matches, targets, password.clone());
+    let spec = mission_spec_from_matches(&matches, targets, password);
     let best_effort = spec.best_effort;
 
     let summary = runtime::PandorasBoxRunner::new(spec).run().await?;

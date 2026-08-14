@@ -253,7 +253,7 @@ async fn live_mixed_concurrency_keeps_hosts_moving_until_end_reconciliation() {
         mission_id: mission_id.clone(),
         unix_username: "root".to_string(),
         windows_username,
-        password,
+        password: password.into(),
         ssh_port,
         discovery_ports: vec![ssh_port, smb_port],
         chimera_unix_path,

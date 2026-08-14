@@ -2,6 +2,8 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use super::secret::SecretString;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlatformHint {
     Unix,
@@ -20,6 +22,22 @@ pub enum TransportKind {
 pub enum WindowsSmbExecMode {
     SmbExec,
     PsExec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SshHostKeyPolicy {
+    RequireKnown,
+    DangerouslyAcceptUnknown,
+}
+
+impl SshHostKeyPolicy {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RequireKnown => "require_known",
+            Self::DangerouslyAcceptUnknown => "dangerously_accept_unknown",
+        }
+    }
 }
 
 impl WindowsSmbExecMode {
@@ -75,8 +93,9 @@ pub struct MissionSpec {
     pub identity_command: String,
     pub unix_username: String,
     pub windows_username: String,
-    pub password: String,
+    pub password: SecretString,
     pub ssh_port: u16,
+    pub ssh_host_key_policy: SshHostKeyPolicy,
     pub discovery_ports: Vec<u16>,
     pub chimera_unix_path: PathBuf,
     pub chimera_windows_path: PathBuf,
@@ -98,8 +117,9 @@ impl Default for MissionSpec {
             identity_command: "whoami".to_string(),
             unix_username: "root".to_string(),
             windows_username: "Administrator".to_string(),
-            password: String::new(),
+            password: SecretString::default(),
             ssh_port: 22,
+            ssh_host_key_policy: SshHostKeyPolicy::RequireKnown,
             discovery_ports: Vec::new(),
             chimera_unix_path: PathBuf::from("release/chimera"),
             chimera_windows_path: PathBuf::from("release/chimera.exe"),
@@ -130,6 +150,7 @@ impl MissionSpec {
                 "unix_user={};",
                 "windows_user={};",
                 "ssh_port={};",
+                "ssh_host_key_policy={};",
                 "discovery_ports={};",
                 "dry_run={};",
                 "allow_smb_fallback={};",
@@ -140,6 +161,7 @@ impl MissionSpec {
             self.unix_username,
             self.windows_username,
             self.ssh_port,
+            self.ssh_host_key_policy.as_str(),
             discovery_ports
                 .iter()
                 .map(std::string::ToString::to_string)
@@ -340,6 +362,18 @@ mod tests {
 
         assert_eq!(complete.state, HostState::Complete);
         assert!(complete.state.is_terminal());
+    }
+
+    #[test]
+    fn mission_debug_redacts_login_secret() {
+        let spec = super::MissionSpec {
+            password: "mission-debug-must-not-leak".into(),
+            ..super::MissionSpec::default()
+        };
+        let rendered = format!("{spec:?}");
+
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(!rendered.contains("mission-debug-must-not-leak"));
     }
 
     #[test]

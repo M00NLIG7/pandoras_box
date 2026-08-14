@@ -19,6 +19,7 @@ use tokio::{
     net::{lookup_host, ToSocketAddrs},
 };
 use tracing::{debug, error, instrument, trace, warn};
+use zeroize::Zeroize;
 
 pub struct Connected;
 pub struct Disconnected;
@@ -31,9 +32,42 @@ pub struct SSHSession {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostKeyPolicy {
-    AcceptAny,
-    MatchKnownHostsIfPresent,
     RequireKnownHosts,
+    DangerouslyAcceptUnknown,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretString(String);
+
+impl SecretString {
+    #[must_use]
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SecretString {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for SecretString {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SecretString([REDACTED])")
+    }
+}
+
+impl Drop for SecretString {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,7 +82,7 @@ pub enum SSHConfig {
     Password {
         username: String,
         socket: SocketAddr,
-        password: String,
+        password: SecretString,
         inactivity_timeout: Duration,
         host_key_policy: HostKeyPolicy,
     },
@@ -73,7 +107,7 @@ impl SSHConfig {
             socket,
             key_path,
             inactivity_timeout,
-            HostKeyPolicy::AcceptAny,
+            HostKeyPolicy::RequireKnownHosts,
         )
         .await
     }
@@ -94,7 +128,7 @@ impl SSHConfig {
         })
     }
 
-    pub async fn password<U: Into<String>, S: ToSocketAddrs, P: Into<String>>(
+    pub async fn password<U: Into<String>, S: ToSocketAddrs, P: Into<SecretString>>(
         username: U,
         password: P,
         socket: S,
@@ -105,12 +139,12 @@ impl SSHConfig {
             password,
             socket,
             inactivity_timeout,
-            HostKeyPolicy::AcceptAny,
+            HostKeyPolicy::RequireKnownHosts,
         )
         .await
     }
 
-    pub async fn password_with_policy<U: Into<String>, S: ToSocketAddrs, P: Into<String>>(
+    pub async fn password_with_policy<U: Into<String>, S: ToSocketAddrs, P: Into<SecretString>>(
         username: U,
         password: P,
         socket: S,
@@ -818,7 +852,9 @@ impl Config for SSHConfig {
             } => {
                 let mut session =
                     get_handle(*socket, *inactivity_timeout, *host_key_policy).await?;
-                let auth_res = session.authenticate_password(username, password).await?;
+                let auth_res = session
+                    .authenticate_password(username, password.expose_secret())
+                    .await?;
 
                 if !auth_res {
                     return Err(crate::Error::AuthenticationError(
@@ -868,8 +904,7 @@ fn verify_server_key(
     let port = socket.port();
 
     match host_key_policy {
-        HostKeyPolicy::AcceptAny => Ok(()),
-        HostKeyPolicy::MatchKnownHostsIfPresent => {
+        HostKeyPolicy::DangerouslyAcceptUnknown => {
             let known_entries =
                 lookup_known_hosts(&host, port, known_hosts_path).map_err(|err| {
                     crate::Error::ConnectionError(format!(
@@ -964,7 +999,7 @@ mod tests {
     use russh_keys::ssh_key::PublicKey;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const RSA_3072_PUBLIC_KEY: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCmjkeMm8k3JkNrf16eb5pG4bc77B6Mt3VN4saltsRV8vASpyWa/PlBgdaeldOaNJ5NK0gqU3KyiUNzHbdcc8572e7IUBDJS/rlaWARiSL4aos2VbNX0k56Z5zYp9m/bq5m9/mlb+PQkNBjIhimgpYNiq2TwBiYeA6tLb79cPtHA0cX5BLk/a5oUpLsiR4kI/f+Q98vVDKasKXXVh5YLkLobrruDB6er2A9fOcIUF0O4JCRLh/Dc161gE3fQrYTMQenbppZzfxrZfQ8YwLPvKjnqm+XRX+pbTtaJuj0EgTSzUK+EZxoSw8CNwiZpxrjwecTMVQ8w/srQmh4ABGuTqk0wP8HcI7hg+fpBv7kiejh5X/Oehxt+Puu85u9GVXb1a0av/vhJvUCBcuISvCA/z1wVJ0xdLhb1/ZiTDdTzyNbZQ0OQijzK+e1SlkNhp+3eGVZu3pNZvnTppwIXv3wg6kV1HodkWGgh1ayY7Buc52Z8okDYqvJat5CzOj5OaQNr/k= user@example.com";
     const RSA_4096_PUBLIC_KEY: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC0WRHtxuxefSJhpIxGq4ibGFgwYnESPm8C3JFM88A1JJLoprenklrd7VJ+VH3Ov/bQwZwLyRU5dRmfR/SWTtIPWs7tToJVayKKDB+/qoXmM5ui/0CU2U4rCdQ6PdaCJdC7yFgpPL8WexjWN06+eSIKYz1AAXbx9rRv1iasslK/KUqtsqzVliagI6jl7FPO2GhRZMcso6LsZGgSxuYf/Lp0D/FcBU8GkeOo1Sx5xEt8H8bJcErtCe4Blb8JxcW6EXO3sReb4z+zcR07gumPgFITZ6hDA8sSNuvo/AlWg0IKTeZSwHHVknWdQqDJ0uczE837caBxyTZllDNIGkBjCIIOFzuTT76HfYc/7CTTGk07uaNkUFXKN79xDiFOX8JQ1ZZMZvGOTwWjuT9CqgdTvQRORbRWwOYv3MH8re9ykw3Ip6lrPifY7s6hOaAKry/nkGPMt40m1TdiW98MTIpooE7W+WXu96ax2l2OJvxX8QR7l+LFlKnkIEEJd/ItF1G22UmOjkVwNASTwza/hlY+8DoVvEmwum/nMgH2TwQT3bTQzF9s9DOJkH4d8p4Mw4gEDjNx0EgUFA91ysCAeUMQQyIvuR8HXXa+VcvhOOO5mmBcVhxJ3qUOJTyDBsT0932Zb4mNtkxdigoVxu+iiwk0vwtvKwGVDYdyMP5EAQeEIP1t0w== user@example.com";
@@ -978,7 +1013,12 @@ mod tests {
     }
 
     fn key(value: &str) -> PublicKey {
-        PublicKey::from_openssh(value).expect("test public key should parse")
+        let without_comment = value
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        PublicKey::from_openssh(&without_comment).expect("test public key should parse")
     }
 
     #[test]
@@ -1026,21 +1066,21 @@ mod tests {
     }
 
     #[test]
-    fn match_known_hosts_if_present_accepts_unknown_host() {
+    fn dangerously_accept_unknown_allows_explicit_first_contact() {
         let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 22);
         let path = temp_known_hosts_path("unknown-host");
 
         verify_server_key(
             socket,
-            HostKeyPolicy::MatchKnownHostsIfPresent,
+            HostKeyPolicy::DangerouslyAcceptUnknown,
             &key(RSA_3072_PUBLIC_KEY),
             Some(&path),
         )
-        .expect("unknown hosts should be accepted by match-if-present policy");
+        .expect("explicit dangerous policy should accept an unknown host");
     }
 
     #[test]
-    fn match_known_hosts_if_present_rejects_changed_key() {
+    fn dangerously_accept_unknown_still_rejects_changed_key() {
         let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 22);
         let path = temp_known_hosts_path("key-change");
         std::fs::write(&path, format!("10.0.0.8 {RSA_3072_PUBLIC_KEY}\n"))
@@ -1048,13 +1088,48 @@ mod tests {
 
         let error = verify_server_key(
             socket,
-            HostKeyPolicy::MatchKnownHostsIfPresent,
+            HostKeyPolicy::DangerouslyAcceptUnknown,
             &key(RSA_4096_PUBLIC_KEY),
             Some(&path),
         )
         .expect_err("changed keys should be rejected");
 
         assert!(error.to_string().contains("host key verification failed"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn convenience_config_requires_known_hosts_and_redacts_password() {
+        let config = super::SSHConfig::password(
+            "operator",
+            "debug-must-not-leak-this",
+            "127.0.0.1:22",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("loopback socket should resolve");
+        let rendered = format!("{config:?}");
+
+        assert!(rendered.contains("RequireKnownHosts"));
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(!rendered.contains("debug-must-not-leak-this"));
+    }
+
+    #[test]
+    fn require_known_hosts_accepts_enrolled_key() {
+        let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 22);
+        let path = temp_known_hosts_path("enrolled-host");
+        std::fs::write(&path, format!("10.0.0.8 {RSA_3072_PUBLIC_KEY}\n"))
+            .expect("known_hosts fixture should be written");
+
+        verify_server_key(
+            socket,
+            HostKeyPolicy::RequireKnownHosts,
+            &key(RSA_3072_PUBLIC_KEY),
+            Some(&path),
+        )
+        .expect("enrolled key should be accepted");
+
         let _ = std::fs::remove_file(path);
     }
 

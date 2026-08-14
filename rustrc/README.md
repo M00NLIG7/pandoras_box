@@ -6,7 +6,8 @@ RustRC is the SSH execution and SFTP transport adapter used by Pandora's Box. Th
 
 - Command execution and file transfer stay inside one authenticated SSH session.
 - File upload and download use SFTP. A failed Windows SFTP operation is returned to the caller so Pandora can apply its authenticated SMB fallback policy.
-- Use `SSHConfig::{key,password}_with_policy` with `HostKeyPolicy::RequireKnownHosts` for normal operation.
+- `SSHConfig::key` and `SSHConfig::password` require an enrolled `known_hosts` key by default.
+- `HostKeyPolicy::DangerouslyAcceptUnknown` is an explicit first-contact escape hatch. It does not enroll or persist the key, and it still rejects a changed enrolled key.
 - RustRC does not download tools or payloads during compilation.
 
 ## Example

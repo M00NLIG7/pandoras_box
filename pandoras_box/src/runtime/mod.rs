@@ -7,6 +7,7 @@ pub mod policy;
 pub mod reporting;
 pub mod runner;
 pub mod scheduler;
+pub mod secret;
 pub mod session_executor;
 pub mod session_factory;
 pub mod transport;
@@ -16,13 +17,14 @@ pub use artifact_store::{validate_mission_id, ArtifactStore};
 pub use discovery::{DiscoveryConfig, DiscoveryOutcome, DiscoveryRecord, TcpDiscovery};
 pub use mission::{
     HostPlan, HostState, HostStateTransitionError, HostTarget, MissionSpec, PlatformHint,
-    RetryPolicy, TransportKind, WindowsSmbExecMode,
+    RetryPolicy, SshHostKeyPolicy, TransportKind, WindowsSmbExecMode,
 };
 pub use planner::Planner;
 pub use policy::{ExecutionPolicy, OperationMutability, PolicyViolation};
 pub use reporting::{AssetInventoryBundle, AssetInventoryHost};
 pub use runner::{PandorasBoxRunSummary, PandorasBoxRunner};
 pub use scheduler::{HostExecutionReport, HostExecutor, Scheduler};
+pub use secret::SecretString;
 pub use session_executor::{OperationIdempotency, SessionExecutor, SessionOperation};
 pub use session_factory::{BoxedHostSession, SessionFactory};
 pub use workspace::{

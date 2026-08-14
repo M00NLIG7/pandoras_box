@@ -11,10 +11,12 @@ CHIMERA_TARGET="$ROOT_DIR/target/x86_64-unknown-linux-gnu/debug/chimera"
 DOCKERFILE_DIR="$ROOT_DIR/pandoras_box/tests/fixtures/unix_ssh_target"
 HOST_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 LIVE_ARTIFACT_DIR="/workspace/target/live-unix-ssh-artifacts/$(date +%s%N)"
+KNOWN_HOSTS_DIR="$ROOT_DIR/target/live-unix-known-hosts-$$"
 
 cleanup() {
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
     docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+    rm -rf "$KNOWN_HOSTS_DIR"
 }
 
 show_logs_on_failure() {
@@ -42,6 +44,12 @@ docker run -d --rm \
     "$IMAGE_NAME" >/dev/null
 
 TARGET_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CONTAINER_NAME")"
+mkdir -p "$KNOWN_HOSTS_DIR"
+docker exec "$CONTAINER_NAME" cat /etc/ssh/ssh_host_ed25519_key.pub \
+    | awk -v host="$TARGET_IP" '{print host " " $1 " " $2}' \
+    > "$KNOWN_HOSTS_DIR/known_hosts"
+chmod 700 "$KNOWN_HOSTS_DIR"
+chmod 600 "$KNOWN_HOSTS_DIR/known_hosts"
 
 docker run --rm \
     --network "$NETWORK_NAME" \
@@ -49,6 +57,7 @@ docker run --rm \
     -v "$HOST_CARGO_HOME/registry:/usr/local/cargo/registry:ro" \
     -v "$HOST_CARGO_HOME/git:/usr/local/cargo/git:ro" \
     -v "$RUNNER_TARGET_VOLUME:/tmp/pandoras-box-target" \
+    -v "$KNOWN_HOSTS_DIR:/tmp/pandoras-box-home/.ssh:ro" \
     -w /workspace \
     -e HOME=/tmp/pandoras-box-home \
     -e CARGO_BUILD_JOBS=1 \
@@ -62,4 +71,4 @@ docker run --rm \
     -e PANDORAS_BOX_LIVE_UNIX_SSH_PORT="22" \
     -e PANDORAS_BOX_LIVE_UNIX_SSH_PASSWORD="secret" \
     "$RUNNER_IMAGE" \
-    bash -lc 'mkdir -p "$HOME/.ssh" && touch "$HOME/.ssh/known_hosts" && /usr/local/cargo/bin/cargo test -j 1 --locked --offline -p pandoras_box --test live_unix_ssh -- --ignored --nocapture'
+    bash -lc '/usr/local/cargo/bin/cargo test -j 1 --locked --offline -p pandoras_box --test live_unix_ssh live_unix_ssh_target_collects_inventory_and_cleans_up -- --ignored --nocapture'

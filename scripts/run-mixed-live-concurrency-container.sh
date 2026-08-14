@@ -38,6 +38,7 @@ PROXY_BINARY="$ROOT_DIR/target/live-harness/tcp-port-proxy"
 PROXY_SOURCE="$ROOT_DIR/scripts/tcp-port-proxy.rs"
 SLOW_TARGET_BINARY="$ROOT_DIR/target/live-harness/slow-ssh-target-linux-amd64"
 SLOW_TARGET_SOURCE="$ROOT_DIR/scripts/slow-ssh-target.rs"
+KNOWN_HOSTS_DIR="$ROOT_DIR/target/live-mixed-known-hosts-$$"
 PROXY_PIDS=()
 
 cleanup() {
@@ -48,6 +49,7 @@ cleanup() {
   docker rm -f "$ALPINE_CONTAINER_NAME" >/dev/null 2>&1 || true
   docker rm -f "$SLOW_CONTAINER_NAME" >/dev/null 2>&1 || true
   docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+  rm -rf "$KNOWN_HOSTS_DIR"
 }
 
 show_logs_on_failure() {
@@ -291,6 +293,7 @@ cd "$ROOT_DIR"
 require_command docker
 require_command cross
 require_command cargo
+require_command ssh-keyscan
 require_command VBoxManage
 require_command rustup
 build_proxy_binary
@@ -416,6 +419,19 @@ bash "$ROOT_DIR/scripts/ensure-tiny11-openssh.sh"
 start_proxy "0.0.0.0" "$SSH_PORT" "127.0.0.1" "$WINDOWS_LOCAL_SSH_PORT"
 start_proxy "0.0.0.0" "$SMB_PORT" "127.0.0.1" "$WINDOWS_LOCAL_SMB_PORT"
 
+mkdir -p "$KNOWN_HOSTS_DIR"
+docker exec "$UNIX_CONTAINER_NAME" cat /etc/ssh/ssh_host_ed25519_key.pub \
+  | awk -v host="[$UNIX_HOST]:$SSH_PORT" '{print host " " $1 " " $2}' \
+  > "$KNOWN_HOSTS_DIR/known_hosts"
+docker exec "$ALPINE_CONTAINER_NAME" cat /etc/ssh/ssh_host_ed25519_key.pub \
+  | awk -v host="[$ALPINE_HOST]:$SSH_PORT" '{print host " " $1 " " $2}' \
+  >> "$KNOWN_HOSTS_DIR/known_hosts"
+ssh-keyscan -p "$WINDOWS_LOCAL_SSH_PORT" 127.0.0.1 2>/dev/null \
+  | awk -v host="[$WINDOWS_HOST]:$SSH_PORT" '{print host " " $2 " " $3}' \
+  >> "$KNOWN_HOSTS_DIR/known_hosts"
+chmod 700 "$KNOWN_HOSTS_DIR"
+chmod 600 "$KNOWN_HOSTS_DIR/known_hosts"
+
 export PANDORAS_BOX_LIVE_MIXED_PASSWORD="$MIXED_PASSWORD"
 export PANDORAS_BOX_LIVE_MIXED_SSH_PORT="$SSH_PORT"
 export PANDORAS_BOX_LIVE_MIXED_SMB_PORT="$SMB_PORT"
@@ -436,6 +452,7 @@ docker run --rm \
   --platform "$(runner_platform)" \
   --network "$NETWORK_NAME" \
   -v "$ROOT_DIR:/work" \
+  -v "$KNOWN_HOSTS_DIR:/root/.ssh:ro" \
   -w /work \
   -e PANDORAS_BOX_LIVE_MIXED_PASSWORD \
   -e PANDORAS_BOX_LIVE_MIXED_SSH_PORT \

@@ -8,6 +8,7 @@ use smolder_tools::prelude::{
 };
 
 use crate::runtime::mission::WindowsSmbExecMode;
+use crate::runtime::secret::SecretString;
 use crate::runtime::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
 use crate::{Error, Result};
 
@@ -18,7 +19,7 @@ const ADMIN_SHARE_NAME: &str = "ADMIN$";
 pub struct SmbSessionConfig {
     pub socket: SocketAddr,
     pub username: String,
-    pub password: String,
+    pub password: SecretString,
     pub staging_directory: String,
     pub exec_mode: WindowsSmbExecMode,
 }
@@ -172,7 +173,7 @@ impl SmbSession<SmolderExecHandle, SmolderAdminShareHandle> {
             .mode(smolder_exec_mode(config.exec_mode))
             .credentials(NtlmCredentials::new(
                 config.username.clone(),
-                config.password.clone(),
+                config.password.expose_secret().to_string(),
             ))
             .staging_directory(config.staging_directory.clone())
             .connect()
@@ -339,7 +340,7 @@ async fn connect_admin_share(config: &SmbSessionConfig) -> Result<Share> {
         .port(config.socket.port())
         .credentials(NtlmCredentials::new(
             config.username.clone(),
-            config.password.clone(),
+            config.password.expose_secret().to_string(),
         ))
         .connect()
         .await

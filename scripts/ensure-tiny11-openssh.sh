@@ -13,6 +13,12 @@ OPENSSH_MSI_URL="${PANDORAS_BOX_OPENSSH_MSI_URL:-https://github.com/PowerShell/W
 OPENSSH_MSI_SHA256="${PANDORAS_BOX_OPENSSH_MSI_SHA256:-ddec9c53864280759cf9f74791cefd387100e3946aa849a1c138a4ed1b96b7d9}"
 OPENSSH_MSI_PATH='C:\Windows\Temp\OpenSSH-Win64-v10.0.0.0.msi'
 OPENSSH_LOG_PATH='C:\Windows\Temp\OpenSSH-install.log'
+PASSWORD_FILE="${TMPDIR:-/tmp}/pandoras-box-tiny11-password-$$"
+
+cleanup() {
+  rm -f "$PASSWORD_FILE"
+}
+trap cleanup EXIT
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -34,7 +40,7 @@ run_guestcontrol() {
   VBoxManage guestcontrol "$VM_NAME" run \
     --exe "C:\\Windows\\System32\\cmd.exe" \
     --username "$WINDOWS_USER" \
-    --password "$WINDOWS_PASSWORD" \
+    --passwordfile "$PASSWORD_FILE" \
     -- cmd.exe /c "$remote_command"
 }
 
@@ -55,7 +61,7 @@ run_remote() {
     --command "$remote_command" \
     --timeout "$timeout" \
     --username "$WINDOWS_USER" \
-    --password "$WINDOWS_PASSWORD"
+    --password-file "$PASSWORD_FILE"
 }
 
 capture_remote() {
@@ -86,9 +92,16 @@ wait_for_ssh() {
 require_command ssh-keyscan
 require_non_empty PANDORAS_BOX_LIVE_WINDOWS_SSH_USERNAME "$WINDOWS_USER"
 require_non_empty PANDORAS_BOX_LIVE_WINDOWS_SSH_PASSWORD "$WINDOWS_PASSWORD"
+printf '%s' "$WINDOWS_PASSWORD" > "$PASSWORD_FILE"
+chmod 600 "$PASSWORD_FILE"
 
 if [[ ! -x "$PSEXEC_BIN" ]]; then
   printf 'Smolder psexec binary not found at %s\n' "$PSEXEC_BIN" >&2
+  exit 1
+fi
+if ! command -v VBoxManage >/dev/null 2>&1 \
+  && ! "$PSEXEC_BIN" --help 2>&1 | grep -Fq -- '--password-file'; then
+  printf 'Smolder psexec must support --password-file; refusing to expose the credential in process arguments\n' >&2
   exit 1
 fi
 

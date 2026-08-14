@@ -69,7 +69,7 @@ async fn run_live_unix_case(case: LiveUnixCase) {
         artifact_root: artifact_root.clone(),
         mission_id: mission_id.clone(),
         unix_username: username,
-        password,
+        password: password.into(),
         ssh_port,
         discovery_ports: vec![ssh_port],
         chimera_unix_path: chimera_path,

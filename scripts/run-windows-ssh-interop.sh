@@ -15,6 +15,16 @@ WINDOWS_PASSWORD="${PANDORAS_BOX_LIVE_WINDOWS_SSH_PASSWORD:-${SMOLDER_WINDOWS_PA
 ARTIFACT_ROOT="${PANDORAS_BOX_LIVE_WINDOWS_SSH_ARTIFACT_ROOT:-$ROOT_DIR/target/live-windows-ssh-artifacts}"
 CHIMERA_PATH="${PANDORAS_BOX_LIVE_CHIMERA_WINDOWS_PATH:-}"
 WINDOWS_BUILD_TARGET_DIR="${PANDORAS_BOX_WINDOWS_BUILD_TARGET_DIR:-$ROOT_DIR/target/chimera-windows}"
+KNOWN_HOSTS_HOME="$ROOT_DIR/target/live-windows-ssh-home-$$"
+VBOX_PASSWORD_FILE="$ROOT_DIR/target/live-windows-ssh-password-$$"
+ORIGINAL_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+ORIGINAL_RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+
+cleanup() {
+  rm -rf "$KNOWN_HOSTS_HOME"
+  rm -f "$VBOX_PASSWORD_FILE"
+}
+trap cleanup EXIT
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -76,6 +86,9 @@ require_command ssh-keyscan
 
 require_non_empty PANDORAS_BOX_LIVE_WINDOWS_SSH_USERNAME "$WINDOWS_USER"
 require_non_empty PANDORAS_BOX_LIVE_WINDOWS_SSH_PASSWORD "$WINDOWS_PASSWORD"
+mkdir -p "$(dirname "$VBOX_PASSWORD_FILE")"
+printf '%s' "$WINDOWS_PASSWORD" > "$VBOX_PASSWORD_FILE"
+chmod 600 "$VBOX_PASSWORD_FILE"
 
 vm_state="$(VBoxManage showvminfo "$VM_NAME" --machinereadable | sed -n 's/^VMState=\"\([^\"]*\)\"$/\1/p')"
 if [[ "$vm_state" != "running" ]]; then
@@ -95,7 +108,7 @@ if ! ssh-keyscan -p "$SSH_PORT" "$WINDOWS_HOST" >/dev/null 2>&1; then
     VBoxManage guestcontrol "$VM_NAME" run \
       --exe "C:\\Windows\\System32\\cmd.exe" \
       --username "$WINDOWS_USER" \
-      --password "$WINDOWS_PASSWORD" \
+      --passwordfile "$VBOX_PASSWORD_FILE" \
       -- cmd.exe /c sc query sshd 2>&1 || true
   )"
   if printf '%s\n' "$service_probe" | grep -Fq 'FAILED 1060'; then
@@ -141,7 +154,10 @@ if [[ ! -f "$CHIMERA_PATH" ]]; then
   exit 1
 fi
 
-mkdir -p "$ARTIFACT_ROOT"
+mkdir -p "$ARTIFACT_ROOT" "$KNOWN_HOSTS_HOME/.ssh"
+ssh-keyscan -p "$SSH_PORT" "$WINDOWS_HOST" > "$KNOWN_HOSTS_HOME/.ssh/known_hosts"
+chmod 700 "$KNOWN_HOSTS_HOME/.ssh"
+chmod 600 "$KNOWN_HOSTS_HOME/.ssh/known_hosts"
 
 export PANDORAS_BOX_LIVE_WINDOWS_SSH_HOST="$WINDOWS_HOST"
 export PANDORAS_BOX_LIVE_WINDOWS_SSH_PORT="$SSH_PORT"
@@ -150,7 +166,10 @@ export PANDORAS_BOX_LIVE_WINDOWS_SSH_USERNAME="$WINDOWS_USER"
 export PANDORAS_BOX_LIVE_WINDOWS_SSH_PASSWORD="$WINDOWS_PASSWORD"
 export PANDORAS_BOX_LIVE_WINDOWS_SSH_ARTIFACT_ROOT="$ARTIFACT_ROOT"
 export PANDORAS_BOX_LIVE_CHIMERA_WINDOWS_PATH="$CHIMERA_PATH"
-cargo test -p pandoras_box \
+HOME="$KNOWN_HOSTS_HOME" \
+CARGO_HOME="$ORIGINAL_CARGO_HOME" \
+RUSTUP_HOME="$ORIGINAL_RUSTUP_HOME" \
+cargo test --locked -p pandoras_box \
   --test live_windows_ssh \
   live_windows_ssh_target_collects_inventory_and_cleans_up \
   -- --ignored --nocapture

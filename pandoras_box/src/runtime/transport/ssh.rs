@@ -7,16 +7,21 @@ use async_trait::async_trait;
 use rustrc::client::{Client, Command};
 use rustrc::ssh::{HostKeyPolicy, SSHConfig};
 
-use crate::runtime::mission::{HostPlan, TransportKind};
-use crate::runtime::session_factory::{BoxedHostSession, SessionFactory};
+use crate::runtime::secret::SecretString;
 use crate::runtime::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
 use crate::runtime::workspace::RemoteShell;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SshAuth {
-    Password { username: String, password: String },
-    Key { username: String, key_path: PathBuf },
+    Password {
+        username: String,
+        password: SecretString,
+    },
+    Key {
+        username: String,
+        key_path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +84,7 @@ impl SshSession<RustrcSshClient> {
             SshAuth::Password { username, password } => {
                 SSHConfig::password_with_policy(
                     username.clone(),
-                    password.clone(),
+                    password.expose_secret().to_string(),
                     config.socket,
                     config.inactivity_timeout,
                     config.host_key_policy,
@@ -202,75 +207,6 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PasswordSshSessionFactory {
-    unix_username: String,
-    windows_username: String,
-    password: String,
-    ssh_port: u16,
-    inactivity_timeout: Duration,
-}
-
-impl PasswordSshSessionFactory {
-    #[must_use]
-    pub fn new(
-        unix_username: impl Into<String>,
-        windows_username: impl Into<String>,
-        password: impl Into<String>,
-        ssh_port: u16,
-        inactivity_timeout: Duration,
-    ) -> Self {
-        Self {
-            unix_username: unix_username.into(),
-            windows_username: windows_username.into(),
-            password: password.into(),
-            ssh_port,
-            inactivity_timeout,
-        }
-    }
-
-    fn config_for_plan(
-        &self,
-        plan: &HostPlan,
-        transport: TransportKind,
-    ) -> Result<SshSessionConfig> {
-        let (username, shell) = match transport {
-            TransportKind::UnixSsh => (self.unix_username.clone(), RemoteShell::Posix),
-            TransportKind::WindowsSsh => (self.windows_username.clone(), RemoteShell::Cmd),
-            TransportKind::WindowsSmb => {
-                return Err(Error::CommunicatorError(
-                    "SMB is not wired into Pandora's Box yet".to_string(),
-                ))
-            }
-        };
-
-        if !plan.target.has_port(self.ssh_port) {
-            return Err(Error::NoSSHPort);
-        }
-
-        Ok(SshSessionConfig {
-            socket: SocketAddr::new(plan.target.ip, self.ssh_port),
-            auth: SshAuth::Password {
-                username,
-                password: self.password.clone(),
-            },
-            inactivity_timeout: self.inactivity_timeout,
-            shell,
-            host_key_policy: HostKeyPolicy::MatchKnownHostsIfPresent,
-        })
-    }
-}
-
-#[async_trait]
-impl SessionFactory for PasswordSshSessionFactory {
-    async fn connect(&self, plan: &HostPlan, transport: TransportKind) -> Result<BoxedHostSession> {
-        let config = self.config_for_plan(plan, transport)?;
-        let session = SshSession::connect(&config).await?;
-
-        Ok(Box::new(session))
-    }
-}
-
 fn quote_for_shell(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -325,30 +261,15 @@ fn require_success_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{PasswordSshSessionFactory, SshAuth, SshClientHandle, SshSession};
-    use crate::runtime::mission::{HostPlan, HostState, HostTarget, PlatformHint, TransportKind};
+    use super::{SshClientHandle, SshSession};
     use crate::runtime::transport::{ExecResponse, FileTransfer, HostSession};
     use crate::runtime::workspace::RemoteShell;
     use crate::Error;
     use async_trait::async_trait;
-    use rustrc::ssh::HostKeyPolicy;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn plan(platform: PlatformHint, open_ports: &[u16]) -> HostPlan {
-        HostPlan {
-            target: HostTarget {
-                ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)),
-                platform,
-                open_ports: open_ports.to_vec(),
-            },
-            state: HostState::Queued,
-            transport_chain: vec![],
-        }
-    }
 
     fn temp_path(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -430,130 +351,6 @@ mod tests {
                 .clone()
                 .map_err(Error::CommunicatorError)
         }
-    }
-
-    #[test]
-    fn config_for_plan_uses_unix_credentials_for_unix_ssh() {
-        let factory = PasswordSshSessionFactory::new(
-            "root",
-            "Administrator",
-            "secret",
-            22,
-            Duration::from_secs(5),
-        );
-
-        let config = factory
-            .config_for_plan(&plan(PlatformHint::Unix, &[22]), TransportKind::UnixSsh)
-            .expect("unix ssh should build config");
-
-        assert_eq!(
-            config.socket,
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 22)
-        );
-        assert_eq!(config.inactivity_timeout, Duration::from_secs(5));
-        assert_eq!(config.shell, RemoteShell::Posix);
-        assert_eq!(
-            config.host_key_policy,
-            HostKeyPolicy::MatchKnownHostsIfPresent
-        );
-        assert_eq!(
-            config.auth,
-            SshAuth::Password {
-                username: "root".to_string(),
-                password: "secret".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn config_for_plan_uses_windows_credentials_for_windows_ssh() {
-        let factory = PasswordSshSessionFactory::new(
-            "root",
-            "Administrator",
-            "secret",
-            22,
-            Duration::from_secs(5),
-        );
-
-        let config = factory
-            .config_for_plan(
-                &plan(PlatformHint::Windows, &[22, 445]),
-                TransportKind::WindowsSsh,
-            )
-            .expect("windows ssh should build config");
-
-        assert_eq!(
-            config.auth,
-            SshAuth::Password {
-                username: "Administrator".to_string(),
-                password: "secret".to_string(),
-            }
-        );
-        assert_eq!(config.shell, RemoteShell::Cmd);
-        assert_eq!(
-            config.host_key_policy,
-            HostKeyPolicy::MatchKnownHostsIfPresent
-        );
-    }
-
-    #[test]
-    fn config_for_plan_rejects_hosts_without_ssh() {
-        let factory = PasswordSshSessionFactory::new(
-            "root",
-            "Administrator",
-            "secret",
-            22,
-            Duration::from_secs(5),
-        );
-
-        let error = factory
-            .config_for_plan(
-                &plan(PlatformHint::Windows, &[445]),
-                TransportKind::WindowsSsh,
-            )
-            .expect_err("missing port 22 should fail");
-
-        assert!(matches!(error, Error::NoSSHPort));
-    }
-
-    #[test]
-    fn config_for_plan_rejects_smb_until_fallback_is_implemented() {
-        let factory = PasswordSshSessionFactory::new(
-            "root",
-            "Administrator",
-            "secret",
-            22,
-            Duration::from_secs(5),
-        );
-
-        let error = factory
-            .config_for_plan(
-                &plan(PlatformHint::Windows, &[22, 445]),
-                TransportKind::WindowsSmb,
-            )
-            .expect_err("smb should stay disabled here");
-
-        assert!(matches!(error, Error::CommunicatorError(_)));
-    }
-
-    #[test]
-    fn config_for_plan_uses_configured_ssh_port() {
-        let factory = PasswordSshSessionFactory::new(
-            "root",
-            "Administrator",
-            "secret",
-            2222,
-            Duration::from_secs(5),
-        );
-
-        let config = factory
-            .config_for_plan(&plan(PlatformHint::Unix, &[2222]), TransportKind::UnixSsh)
-            .expect("custom ssh port should build config");
-
-        assert_eq!(
-            config.socket,
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 2222)
-        );
     }
 
     #[tokio::test]

@@ -77,7 +77,7 @@ async fn live_windows_smb_target_collects_inventory_and_cleans_up() {
         artifact_root: artifact_root.clone(),
         mission_id: mission_id.clone(),
         windows_username: username,
-        password,
+        password: password.into(),
         ssh_port: ssh_probe_port,
         discovery_ports: vec![ssh_probe_port, smb_port],
         chimera_windows_path: chimera_path,

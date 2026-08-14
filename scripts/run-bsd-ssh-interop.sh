@@ -39,6 +39,7 @@ absolute_path() {
 require_command cargo
 require_command nc
 require_command ssh-keyscan
+require_command ssh-keygen
 
 require_non_empty PANDORAS_BOX_LIVE_BSD_SSH_HOST "$BSD_HOST"
 require_non_empty PANDORAS_BOX_LIVE_BSD_SSH_PASSWORD "$BSD_PASSWORD"
@@ -64,6 +65,16 @@ if ! ssh-keyscan -p "$BSD_PORT" "$BSD_HOST" >/dev/null 2>&1; then
   exit 1
 fi
 
+known_hosts_path="$HOME/.ssh/known_hosts"
+known_host_query="$BSD_HOST"
+if [[ "$BSD_PORT" != "22" ]]; then
+  known_host_query="[$BSD_HOST]:$BSD_PORT"
+fi
+if [[ ! -f "$known_hosts_path" ]] || ! ssh-keygen -F "$known_host_query" -f "$known_hosts_path" >/dev/null; then
+  printf 'BSD SSH host key is not enrolled in %s for %s; verify it out of band before running this gate\n' "$known_hosts_path" "$known_host_query" >&2
+  exit 1
+fi
+
 mkdir -p "$ARTIFACT_ROOT"
 
 export PANDORAS_BOX_LIVE_BSD_SSH_HOST="$BSD_HOST"
@@ -73,7 +84,7 @@ export PANDORAS_BOX_LIVE_BSD_SSH_PASSWORD="$BSD_PASSWORD"
 export PANDORAS_BOX_LIVE_BSD_SSH_ARTIFACT_ROOT="$ARTIFACT_ROOT"
 export PANDORAS_BOX_LIVE_CHIMERA_BSD_PATH="$CHIMERA_PATH"
 
-cargo test -p pandoras_box \
+cargo test --locked -p pandoras_box \
   --test live_unix_ssh \
   live_bsd_ssh_target_collects_inventory_and_cleans_up \
   -- --ignored --nocapture
