@@ -1,106 +1,304 @@
-name: Build Chimera Binary
+name: Validate and package first release
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version number (e.g. v1.0.0)'
+        description: "Existing product version to package (for example v0.1.0)"
         required: true
-        default: 'v1.0.0'
+        default: "v0.1.0"
+        type: string
+      publish:
+        description: "Create a draft GitHub release after every gate passes"
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
-  CI: true
+  CARGO_INCREMENTAL: "0"
+  CI: "true"
+  LINUX_TARGET: x86_64-unknown-linux-musl
+  WINDOWS_CHECK_TARGET: i686-pc-windows-gnu
+  LINUX_CROSS_IMAGE: ghcr.io/cross-rs/x86_64-unknown-linux-musl@sha256:77db671d8356a64ae72a3e1415e63f547f26d374fbe3c4762c1cd36c7eac7b99
+  UBUNTU_TEST_IMAGE: ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+  ALPINE_TEST_IMAGE: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+  RUST_TOOLCHAIN: 1.94.1
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
-    name: Build and Release
-    runs-on: ubuntu-latest
-    
+  validate:
+    name: Build, test, audit, and package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-    
-    - name: Create Git Tag
-      run: |
-        git tag ${{ github.event.inputs.version }}
-        git push origin ${{ github.event.inputs.version }}
-    
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.event.inputs.version }}
-        release_name: Release ${{ github.event.inputs.version }}
-        draft: false
-        prerelease: false
-    
-    - name: Install Rust Toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: i686-unknown-linux-musl,x86_64-pc-windows-gnu
-    
-    - name: Install cross
-      run: cargo install cross --git https://github.com/cross-rs/cross
-    
-    # Linux Build
-    - name: Build Linux Target
-      env:
-        RUST_LOG: debug
-      run: |
-        cd chimera
-        cross build --locked --target i686-unknown-linux-musl --release
-        mkdir -p release-artifacts
-        cp ../target/i686-unknown-linux-musl/release/chimera release-artifacts/chimera
-    
-    - name: Verify Linux Build Output
-      run: |
-        ls -l chimera/release-artifacts
-        if [ ! -f chimera/release-artifacts/chimera ]; then
-          echo "Error: Linux build failed to produce binary"
-          exit 1
-        fi
-    
-    # Windows Build
-    - name: Build Windows Target
-      env:
-        RUST_LOG: debug
-      run: |
-        cd chimera
-        cross build --locked --target x86_64-pc-windows-gnu --release
-        mkdir -p release-artifacts
-        cp ../target/x86_64-pc-windows-gnu/release/chimera.exe release-artifacts/chimera.exe
-    
-    - name: Verify Windows Build Output
-      run: |
-        ls -l chimera/release-artifacts
-        if [ ! -f chimera/release-artifacts/chimera.exe ]; then
-          echo "Error: Windows build failed to produce binary"
-          exit 1
-        fi
-    
-    # Upload artifacts
-    - name: Upload Linux Binary
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: chimera/release-artifacts/chimera
-        asset_name: chimera
-        asset_content_type: application/octet-stream
-    
-    - name: Upload Windows Binary
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: chimera/release-artifacts/chimera.exe
-        asset_name: chimera.exe
-        asset_content_type: application/octet-stream
+      - name: Check out the requested source revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" \
+            --profile minimal \
+            --component clippy,rustfmt \
+            --target "$LINUX_TARGET,$WINDOWS_CHECK_TARGET"
+          rustup override set "$RUST_TOOLCHAIN"
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Validate release input and source versions
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "version must be a SemVer tag beginning with v" >&2
+            exit 1
+          fi
+
+          cargo metadata --locked --no-deps --format-version 1 > /tmp/metadata.json
+          expected="${RELEASE_VERSION#v}"
+          for package in pandoras_box chimera; do
+            actual="$(jq -r --arg package "$package" '.packages[] | select(.name == $package) | .version' /tmp/metadata.json)"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "$package version $actual does not match requested release $expected" >&2
+              exit 1
+            fi
+          done
+
+          existing_tag="$(git ls-remote --tags origin "refs/tags/$RELEASE_VERSION")"
+          if [[ -n "$existing_tag" ]]; then
+            echo "refusing to replace existing tag $RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Install pinned release tools
+        run: |
+          set -euo pipefail
+          cargo install cross --version 0.2.5 --locked
+          cargo install cargo-audit --version 0.22.1 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+          cross --version
+          cargo audit --version
+          cargo deny --version
+
+      - name: Resolve only locked dependencies
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo metadata --locked --offline --format-version 1 > /tmp/locked-metadata.json
+
+      - name: Format, lint, and test the workspace
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --locked --offline --workspace --all-targets -- -D warnings
+          cargo test --locked --offline --workspace
+          cargo test --locked --offline -p rustrc --doc
+
+      - name: Strict-lint the canonical musl source surface
+        run: |
+          set -euo pipefail
+          cross clippy --locked --offline --workspace --all-targets \
+            --target "$LINUX_TARGET" -- -D warnings
+
+      - name: Deny advisories and unknown dependency sources
+        run: |
+          set -euo pipefail
+          cargo audit -D warnings
+          cargo deny --locked check advisories sources
+
+      - name: Strict-lint the unreleased Windows source surface
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --offline --workspace --all-targets \
+            --target "$WINDOWS_CHECK_TARGET" -- -D warnings
+
+      - name: Build canonical Linux binaries
+        run: |
+          set -euo pipefail
+          grep -Fqx "image = \"$LINUX_CROSS_IMAGE\"" Cross.toml
+          cross build --locked --offline --release \
+            -p pandoras_box --bin pandoras_box --target "$LINUX_TARGET"
+          cross build --locked --offline --release \
+            -p chimera --bin chimera --target "$LINUX_TARGET"
+          for artifact in pandoras_box chimera; do
+            path="target/$LINUX_TARGET/release/$artifact"
+            file "$path"
+            if grep -Fq 'Requesting program interpreter' < <(readelf -l "$path") \
+              || grep -Fq '(NEEDED)' < <(readelf -d "$path"); then
+              echo "$path is dynamically linked" >&2
+              exit 1
+            fi
+          done
+
+      - name: Smoke-test the exact release binaries
+        run: |
+          set -euo pipefail
+          operator_path="/workspace/target/$LINUX_TARGET/release/pandoras_box"
+          collector_path="/workspace/target/$LINUX_TARGET/release/chimera"
+          for image in "$UBUNTU_TEST_IMAGE" "$ALPINE_TEST_IMAGE"; do
+            docker run --rm --platform linux/amd64 -v "$GITHUB_WORKSPACE:/workspace:ro" \
+              "$image" "$operator_path" --help >/dev/null
+            docker run --rm --platform linux/amd64 -v "$GITHUB_WORKSPACE:/workspace:ro" \
+              "$image" "$collector_path" --help >/dev/null
+          done
+
+          output_root="$(mktemp -d)"
+          trap 'rm -rf "$output_root"' EXIT
+          "target/$LINUX_TARGET/release/chimera" --output-root "$output_root" collector
+          jq -e '.sectionErrors | type == "array"' "$output_root/inventory.json" >/dev/null
+          test -s "$output_root/application.log"
+
+      - name: Run mandatory Ubuntu SSH gate with the release payload
+        env:
+          PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/chimera
+        run: scripts/run-unix-ssh-interop.sh
+
+      - name: Run mandatory Alpine SSH gate with the release payload
+        env:
+          PANDORAS_BOX_LIVE_ALPINE_CHIMERA_UNIX_PATH: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/chimera
+        run: scripts/run-alpine-ssh-interop.sh
+
+      - name: Create deterministic release bundle and provenance
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_VERSION#v}"
+          bundle_root="pandoras-box-$version-x86_64-linux-musl"
+          bundle_name="$bundle_root.tar.gz"
+          mkdir -p "dist/$bundle_root/bin" "dist/$bundle_root/release"
+
+          operator_path="target/$LINUX_TARGET/release/pandoras_box"
+          collector_path="target/$LINUX_TARGET/release/chimera"
+          install -m 0755 "$operator_path" "dist/$bundle_root/bin/pandoras_box"
+          install -m 0755 "$collector_path" "dist/$bundle_root/release/chimera"
+          install -m 0644 LICENSE "dist/$bundle_root/"
+
+          cargo metadata --locked --offline --format-version 1 > dist/cargo-metadata.json
+          smolder_source="$(jq -r '.packages[] | select(.name == "smolder") | .source' dist/cargo-metadata.json)"
+          operator_sha256="$(sha256sum "$operator_path" | awk '{print $1}')"
+          collector_sha256="$(sha256sum "$collector_path" | awk '{print $1}')"
+          jq -n \
+            --arg version "$RELEASE_VERSION" \
+            --arg source_revision "$GITHUB_SHA" \
+            --arg source_ref "$GITHUB_REF" \
+            --arg rustc "$(rustc --version)" \
+            --arg cargo "$(cargo --version)" \
+            --arg cross "$(cross --version 2>&1 | head -n 1)" \
+            --arg operator_target "$LINUX_TARGET" \
+            --arg operator_cross_image "$LINUX_CROSS_IMAGE" \
+            --arg operator_sha256 "$operator_sha256" \
+            --arg collector_target "$LINUX_TARGET" \
+            --arg collector_cross_image "$LINUX_CROSS_IMAGE" \
+            --arg collector_sha256 "$collector_sha256" \
+            --arg smolder_source "$smolder_source" \
+            --arg ubuntu_test_image "$UBUNTU_TEST_IMAGE" \
+            --arg alpine_test_image "$ALPINE_TEST_IMAGE" \
+            --argjson live_gates '["Ubuntu 24.04 SSH/SFTP", "Alpine 3.21 SSH/SFTP"]' \
+            '{
+              version: $version,
+              source_revision: $source_revision,
+              source_ref: $source_ref,
+              toolchain: {rustc: $rustc, cargo: $cargo, cross: $cross},
+              binaries: {
+                operator: {target: $operator_target, cross_image: $operator_cross_image, sha256: $operator_sha256},
+                collector: {target: $collector_target, cross_image: $collector_cross_image, sha256: $collector_sha256}
+              },
+              feature_set: "default",
+              credential_rotation: "disabled",
+              artifact_collection: "authenticated session only",
+              documentation_included: false,
+              smolder_source: $smolder_source,
+              smoke_test_images: {ubuntu: $ubuntu_test_image, alpine: $alpine_test_image},
+              live_gates: $live_gates,
+              windows_release: "not published; Windows SSH and SMB require separate mandatory live gates"
+            }' > dist/provenance.json
+          install -m 0644 dist/provenance.json "dist/$bundle_root/provenance.json"
+
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -C dist -cf - "$bundle_root" | gzip -n > "dist/$bundle_name"
+          rm -rf "dist/$bundle_root"
+          (
+            cd dist
+            sha256sum "$bundle_name" cargo-metadata.json provenance.json > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Upload validated package for review
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ inputs.version }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  attest:
+    name: Attest the validated package
+    if: ${{ inputs.publish }}
+    needs: validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download the validated package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-${{ inputs.version }}
+          path: dist
+
+      - name: Attest release inputs
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/provenance.json
+            dist/cargo-metadata.json
+
+  release:
+    name: Create draft release last
+    if: ${{ inputs.publish }}
+    needs: attest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download the validated package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-${{ inputs.version }}
+          path: dist
+
+      - name: Create a draft release without replacing history
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Pandora's Box ${{ inputs.version }}
+          draft: true
+          prerelease: false
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/provenance.json
+            dist/cargo-metadata.json
