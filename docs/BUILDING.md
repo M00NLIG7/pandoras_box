@@ -55,7 +55,7 @@ Refresh the advisory database over verified TLS, then run both dependency polici
 
 ```sh
 cargo audit -D warnings
-cargo deny check advisories sources
+cargo deny --locked check advisories sources
 ```
 
 For an offline repeat using an already-fetched, sufficiently fresh advisory database:
@@ -69,10 +69,10 @@ cargo audit --no-fetch --stale -D warnings
 ## Canonical first-release binaries
 
 ```sh
-cross build --locked --release \
+cross build --locked --offline --release \
   -p pandoras_box --bin pandoras_box \
-  --target x86_64-unknown-linux-gnu
-cross build --locked --release \
+  --target x86_64-unknown-linux-musl
+cross build --locked --offline --release \
   -p chimera --bin chimera \
   --target x86_64-unknown-linux-musl
 ```
@@ -80,25 +80,27 @@ cross build --locked --release \
 Expected paths:
 
 ```text
-target/x86_64-unknown-linux-gnu/release/pandoras_box
+target/x86_64-unknown-linux-musl/release/pandoras_box
 target/x86_64-unknown-linux-musl/release/chimera
 ```
 
 Inspect and smoke-test the exact files rather than a separately rebuilt copy:
 
 ```sh
-file target/x86_64-unknown-linux-gnu/release/pandoras_box \
+file target/x86_64-unknown-linux-musl/release/pandoras_box \
      target/x86_64-unknown-linux-musl/release/chimera
 
-docker run --rm --platform linux/amd64 \
-  -v "$PWD:/workspace:ro" \
+for image in \
   ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea \
-  /workspace/target/x86_64-unknown-linux-gnu/release/pandoras_box --help
-
-docker run --rm --platform linux/amd64 \
-  -v "$PWD:/workspace:ro" \
-  alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d \
-  /workspace/target/x86_64-unknown-linux-musl/release/chimera --help
+  alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+do
+  docker run --rm --platform linux/amd64 \
+    -v "$PWD:/workspace:ro" "$image" \
+    /workspace/target/x86_64-unknown-linux-musl/release/pandoras_box --help
+  docker run --rm --platform linux/amd64 \
+    -v "$PWD:/workspace:ro" "$image" \
+    /workspace/target/x86_64-unknown-linux-musl/release/chimera --help
+done
 ```
 
 ## Mandatory exact-artifact interoperability
@@ -117,6 +119,6 @@ The scripts create disposable local targets, generate ephemeral fixture credenti
 
 ## Packaging boundary
 
-`.github/workflows/build.yml` validates before packaging and creates one x86_64 Linux binary bundle with SHA-256 checksums, locked Cargo metadata, and machine-readable provenance. Draft publication is a separate explicit input and must remain after every mandatory gate.
+`.github/workflows/build.yml` validates before packaging and creates one `pandoras-box-<version>-x86_64-linux-musl.tar.gz` bundle with SHA-256 checksums, locked Cargo metadata, and machine-readable provenance. GNU/glibc binaries are not release inputs. Draft publication is a separate explicit input and must remain after every mandatory gate.
 
 Repository documentation and generated documentation are local-only. Packaging and release steps must not upload or attach `README.md`, `docs/`, rendered documentation, or documentation archives.

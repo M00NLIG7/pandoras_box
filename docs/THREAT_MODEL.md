@@ -1,6 +1,6 @@
 # First-release threat model
 
-This document defines the security boundary of the x86_64 Linux first-release candidate. It is not a claim that unreleased Windows/SMB or BSD paths passed live validation.
+This document defines the security boundary of the `x86_64-unknown-linux-musl` first-release candidate. It is not a claim that GNU/glibc, unreleased Windows/SMB, or BSD paths passed live validation.
 
 ## Authorized-use boundary
 

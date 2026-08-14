@@ -8,14 +8,14 @@ This tree is a first-release candidate, not evidence of support for every platfo
 
 ## First-release scope
 
-| Component | Published target | Mandatory evidence | Status |
+| Component | Distribution target | Mandatory evidence | Status |
 | --- | --- | --- | --- |
-| Pandora operator | x86_64 Linux | Locked build and artifact smoke test | Release candidate |
+| Pandora operator | `x86_64-unknown-linux-musl` | Locked build and exact-artifact smoke test | Release candidate |
 | Chimera payload | `x86_64-unknown-linux-musl` | Exact artifact over SSH/SFTP against Ubuntu 24.04 and Alpine 3.21 | Release candidate |
 | Windows SSH/SMB | None | Source compile-check only; no approved live gate | Not released or supported |
 | BSD and other architectures | None | No mandatory live gate | Not released or supported |
 
-A skipped, emulated-only, or unavailable gate is not support evidence. The workflow packages only the x86_64 Linux bundle after both Linux live gates pass.
+A skipped, emulated-only, or unavailable gate is not support evidence. The workflow packages only the x86_64 musl Linux bundle after both Linux live gates pass; no GNU/glibc artifact is a distribution target.
 
 The first release does **not** rotate passwords, harden hosts, download executables during compilation, ship Winexe, or expose an HTTP artifact server. Chimera writes terminal files locally; Pandora retrieves them with SFTP or, on the unreleased Windows path, through the already-authenticated SMB session.
 
