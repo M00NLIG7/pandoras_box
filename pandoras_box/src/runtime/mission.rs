@@ -220,6 +220,16 @@ impl TransportKind {
             Self::WindowsSmb => "windows_smb",
         }
     }
+
+    #[must_use]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "unix_ssh" => Some(Self::UnixSsh),
+            "windows_ssh" => Some(Self::WindowsSsh),
+            "windows_smb" => Some(Self::WindowsSmb),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

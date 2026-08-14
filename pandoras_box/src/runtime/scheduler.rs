@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Semaphore;
 
-use super::mission::{HostPlan, HostState};
+use super::mission::{HostPlan, HostState, TransportKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailurePhase {
@@ -78,6 +78,7 @@ pub struct HostExecutionReport {
     pub error: Option<String>,
     pub failure_phase: Option<FailurePhase>,
     pub failure_disposition: Option<FailureDisposition>,
+    pub selected_transport: Option<TransportKind>,
     pub attempt_count: u8,
     pub completed_phases: Vec<FailurePhase>,
 }
@@ -91,6 +92,7 @@ impl HostExecutionReport {
             error: None,
             failure_phase: None,
             failure_disposition: None,
+            selected_transport: None,
             attempt_count: 1,
             completed_phases: Vec::new(),
         }
@@ -118,6 +120,7 @@ impl HostExecutionReport {
             error: Some(error.into()),
             failure_phase: Some(phase),
             failure_disposition: Some(FailureDisposition::Terminal),
+            selected_transport: None,
             attempt_count: 0,
             completed_phases: Vec::new(),
         }
@@ -145,6 +148,7 @@ impl HostExecutionReport {
             error: Some(error.into()),
             failure_phase: Some(phase),
             failure_disposition: Some(disposition),
+            selected_transport: None,
             attempt_count: 1,
             completed_phases: Vec::new(),
         }
@@ -153,6 +157,12 @@ impl HostExecutionReport {
     #[must_use]
     pub fn with_attempt_count(mut self, attempt_count: u8) -> Self {
         self.attempt_count = attempt_count.max(1);
+        self
+    }
+
+    #[must_use]
+    pub fn with_selected_transport(mut self, transport: TransportKind) -> Self {
+        self.selected_transport = Some(transport);
         self
     }
 

@@ -19,8 +19,8 @@ use super::planner::Planner;
 use super::policy::ExecutionPolicy;
 use super::reporting::write_asset_inventory_bundle;
 use super::scheduler::HostExecutionReport;
-use super::session_executor::{SessionExecutor, SessionOperation};
-use super::session_factory::{BoxedHostSession, SessionFactory};
+use super::session_executor::{ConnectedSession, SessionExecutor, SessionOperation};
+use super::session_factory::SessionFactory;
 use super::transport::password::PasswordSessionFactory;
 use super::workspace::{collector_plan, CollectorPlan};
 use crate::{Error, Result};
@@ -59,6 +59,7 @@ struct PersistedHostStatus {
     error: Option<String>,
     failure_phase: Option<String>,
     failure_disposition: Option<String>,
+    selected_transport: Option<String>,
     attempt_count: u8,
     completed_phases: Vec<String>,
 }
@@ -76,6 +77,7 @@ struct ResumeCheckpoint {
     mode: ResumeMode,
     attempt_count: u8,
     completed_phases: Vec<super::scheduler::FailurePhase>,
+    selected_transport: Option<TransportKind>,
 }
 
 pub struct PandorasBoxRunner {
@@ -651,10 +653,12 @@ fn progress_report(
     state: HostState,
     completed_phases: &[super::scheduler::FailurePhase],
     attempt_count: u8,
+    selected_transport: TransportKind,
 ) -> HostExecutionReport {
     HostExecutionReport::success(plan.force_state(state), state)
         .with_completed_phases(completed_phases.to_vec())
         .with_attempt_count(attempt_count)
+        .with_selected_transport(selected_transport)
 }
 
 fn phase_strings(completed_phases: &[super::scheduler::FailurePhase]) -> Vec<String> {
@@ -673,6 +677,9 @@ fn persisted_status_from_report(report: &HostExecutionReport) -> PersistedHostSt
         failure_disposition: report
             .failure_disposition
             .map(|disposition| disposition.as_str().to_string()),
+        selected_transport: report
+            .selected_transport
+            .map(|transport| transport.as_str().to_string()),
         attempt_count: report.attempt_count,
         completed_phases: phase_strings(&report.completed_phases),
     }
@@ -732,6 +739,7 @@ async fn load_resume_checkpoint(
                 mode: ResumeMode::Fresh,
                 attempt_count: 0,
                 completed_phases: Vec::new(),
+                selected_transport: None,
             });
         }
         Err(err) => return Err(err.into()),
@@ -763,6 +771,10 @@ async fn load_resume_checkpoint(
         mode,
         attempt_count: status.attempt_count.max(1),
         completed_phases,
+        selected_transport: status
+            .selected_transport
+            .as_deref()
+            .and_then(TransportKind::from_str),
     })
 }
 
@@ -774,9 +786,13 @@ async fn write_checkpoint(store: &ArtifactStore, report: &HostExecutionReport) -
 }
 
 fn skipped_resume_report(plan: &HostPlan, checkpoint: &ResumeCheckpoint) -> HostExecutionReport {
-    HostExecutionReport::success(plan.clone(), HostState::Complete)
+    let report = HostExecutionReport::success(plan.clone(), HostState::Complete)
         .with_attempt_count(checkpoint.attempt_count.max(1))
-        .with_completed_phases(checkpoint.completed_phases.clone())
+        .with_completed_phases(checkpoint.completed_phases.clone());
+    match checkpoint.selected_transport {
+        Some(transport) => report.with_selected_transport(transport),
+        None => report,
+    }
 }
 
 async fn stage_support_files(files: &[LocalSupportFilePlan]) -> Result<()> {
@@ -795,7 +811,7 @@ async fn collect_host_artifacts_with_live_session<F>(
     collect_executor: &SessionExecutor<F>,
     artifact_collection: &CollectorCollectJob,
     report: HostExecutionReport,
-    session: &mut BoxedHostSession,
+    session: &mut ConnectedSession,
 ) -> HostExecutionReport
 where
     F: SessionFactory + 'static,
@@ -812,7 +828,7 @@ where
     let collect_plan = report.plan.force_state(HostState::Connecting);
 
     let mut next_report = collect_executor
-        .run_connected_session(collect_plan.clone(), &mut **session, false)
+        .run_connected_session_with_fallback(collect_plan.clone(), session, false)
         .await
         .with_completed_phases(completed_phases.clone())
         .with_attempt_count(base_attempt_count.max(1));
@@ -843,7 +859,7 @@ where
         };
 
         next_report = collect_executor
-            .run_connected_session(collect_plan.clone(), &mut *reconnected, false)
+            .run_connected_session_with_fallback(collect_plan.clone(), &mut reconnected, false)
             .await
             .with_completed_phases(completed_phases.clone())
             .with_attempt_count(base_attempt_count.max(attempt));
@@ -876,17 +892,19 @@ fn cleanup_session_operations(cleanup: &CollectorCleanupJob) -> Vec<SessionOpera
 
 async fn disconnect_host_session(
     report: HostExecutionReport,
-    session: &mut dyn crate::runtime::transport::HostSession,
+    session: &mut ConnectedSession,
 ) -> HostExecutionReport {
-    match session.cleanup().await {
-        Ok(()) => report,
+    let selected_transport = session.transport();
+    match session.session_mut().cleanup().await {
+        Ok(()) => report.with_selected_transport(selected_transport),
         Err(err) => HostExecutionReport::terminal_failure(
             report.plan,
             super::scheduler::FailurePhase::Cleanup,
             format!("cleanup failed: {err}"),
         )
         .with_completed_phases(report.completed_phases)
-        .with_attempt_count(report.attempt_count),
+        .with_attempt_count(report.attempt_count)
+        .with_selected_transport(selected_transport),
     }
 }
 
@@ -895,7 +913,7 @@ async fn cleanup_host_workspace_with_live_session<F>(
     cleanup_executor: &SessionExecutor<F>,
     cleanup: &CollectorCleanupJob,
     report: HostExecutionReport,
-    session: &mut BoxedHostSession,
+    session: &mut ConnectedSession,
     allow_reconnect_retry: bool,
 ) -> HostExecutionReport
 where
@@ -914,7 +932,7 @@ where
     let cleanup_plan = report.plan.force_state(HostState::Connecting);
 
     let mut next_report = cleanup_executor
-        .run_connected_session(cleanup_plan.clone(), &mut **session, false)
+        .run_connected_session_with_fallback(cleanup_plan.clone(), session, false)
         .await
         .with_completed_phases(report.completed_phases.clone())
         .with_attempt_count(base_attempt_count.max(1));
@@ -945,7 +963,7 @@ where
         };
 
         next_report = cleanup_executor
-            .run_connected_session(cleanup_plan.clone(), &mut *reconnected, false)
+            .run_connected_session_with_fallback(cleanup_plan.clone(), &mut reconnected, false)
             .await
             .with_completed_phases(report.completed_phases.clone())
             .with_attempt_count(base_attempt_count.max(attempt));
@@ -1044,14 +1062,15 @@ where
                     format!("stage file prep failed: {err}"),
                 )
                 .with_completed_phases(completed_phases.clone())
-                .with_attempt_count(attempt);
+                .with_attempt_count(attempt)
+                .with_selected_transport(session.transport());
                 write_checkpoint(store, &report).await?;
-                let _ = session.cleanup().await;
+                let _ = session.session_mut().cleanup().await;
                 return Ok(report);
             }
 
             let stage_report = stage_executor
-                .run_connected_session(connect_plan.clone(), &mut *session, false)
+                .run_connected_session_with_fallback(connect_plan.clone(), &mut session, false)
                 .await
                 .with_attempt_count(attempt)
                 .with_completed_phases(completed_phases.clone());
@@ -1065,8 +1084,13 @@ where
             }
 
             completed_phases.push(super::scheduler::FailurePhase::Stage);
-            let stage_progress =
-                progress_report(&plan, HostState::Executing, &completed_phases, attempt);
+            let stage_progress = progress_report(
+                &plan,
+                HostState::Executing,
+                &completed_phases,
+                attempt,
+                session.transport(),
+            );
             write_checkpoint(store, &stage_progress).await?;
         }
 
@@ -1077,6 +1101,7 @@ where
             )
             .with_completed_phases(completed_phases.clone())
             .with_attempt_count(attempt)
+            .with_selected_transport(session.transport())
         } else {
             let should_skip_execute = checkpoint.mode == ResumeMode::CollectOnly
                 && completed_phases.contains(&super::scheduler::FailurePhase::Execute);
@@ -1088,9 +1113,10 @@ where
                 )
                 .with_completed_phases(completed_phases.clone())
                 .with_attempt_count(attempt)
+                .with_selected_transport(session.transport())
             } else {
                 let run_report = run_executor
-                    .run_connected_session(connect_plan.clone(), &mut *session, false)
+                    .run_connected_session_with_fallback(connect_plan.clone(), &mut session, false)
                     .await
                     .with_attempt_count(attempt)
                     .with_completed_phases(completed_phases.clone());
@@ -1100,8 +1126,13 @@ where
                 }
 
                 completed_phases.push(super::scheduler::FailurePhase::Execute);
-                let execute_progress =
-                    progress_report(&plan, HostState::Collecting, &completed_phases, attempt);
+                let execute_progress = progress_report(
+                    &plan,
+                    HostState::Collecting,
+                    &completed_phases,
+                    attempt,
+                    session.transport(),
+                );
                 write_checkpoint(store, &execute_progress).await?;
                 run_report
                     .with_completed_phases(completed_phases.clone())
@@ -1129,8 +1160,13 @@ where
         }
 
         completed_phases = collect_report.completed_phases.clone();
-        let collect_progress =
-            progress_report(&plan, HostState::Collecting, &completed_phases, attempt);
+        let collect_progress = progress_report(
+            &plan,
+            HostState::Collecting,
+            &completed_phases,
+            attempt,
+            session.transport(),
+        );
         write_checkpoint(store, &collect_progress).await?;
 
         let cleanup_report = cleanup_host_workspace_with_live_session(
@@ -1147,7 +1183,7 @@ where
             return Ok(cleanup_report);
         }
 
-        let final_report = disconnect_host_session(cleanup_report, &mut *session).await;
+        let final_report = disconnect_host_session(cleanup_report, &mut session).await;
         write_checkpoint(store, &final_report).await?;
         return Ok(final_report);
     }
@@ -1889,7 +1925,8 @@ mod tests {
                 0,
                 0,
                 1,
-                vec![HostExecutionReport::success(plan, HostState::Complete)],
+                vec![HostExecutionReport::success(plan, HostState::Complete)
+                    .with_selected_transport(TransportKind::UnixSsh)],
             )
             .await
             .expect("summary finalization should succeed");
@@ -1906,14 +1943,14 @@ mod tests {
                 .await
                 .expect("asset inventory markdown should exist")
                 .contains(
-                    "| 10.0.0.41 | complete | unix | lab | Ubuntu 24.04 | 22 | root | sshd | - |"
+                    "| 10.0.0.41 | complete | unix | unix_ssh | - | lab | Ubuntu 24.04 | 22 | root | sshd | - |"
                 )
         );
         assert!(
             tokio::fs::read_to_string(root.join("mission-123/asset_inventory.csv"))
                 .await
                 .expect("asset inventory csv should exist")
-                .contains("10.0.0.41,complete,unix,lab,Ubuntu 24.04,22,root,sshd,-,")
+                .contains("10.0.0.41,complete,unix,unix_ssh,-,-,lab,Ubuntu 24.04,22,root,sshd,-,")
         );
         assert_eq!(
             tokio::fs::read(root.join("mission-123/asset_inventory.pdf"))
@@ -1994,7 +2031,7 @@ mod tests {
             tokio::fs::read_to_string(root.join("mission-123/asset_inventory.md"))
                 .await
                 .expect("asset inventory markdown should exist")
-                .contains("| 10.0.0.42 | failed | windows | - | - | 2222,445 | - | - | - | ssh connect failed: timeout waiting for banner |")
+                .contains("| 10.0.0.42 | failed | windows | - | terminal | - | - | 2222,445 | - | - | - | ssh connect failed: timeout waiting for banner |")
         );
 
         let _ = tokio::fs::remove_dir_all(root).await;
@@ -3341,6 +3378,7 @@ mod tests {
             error: None,
             failure_phase: None,
             failure_disposition: None,
+            selected_transport: Some("unix_ssh".to_string()),
             attempt_count: 3,
             completed_phases: vec![
                 "stage".to_string(),
@@ -3375,6 +3413,7 @@ mod tests {
         .expect("status should parse");
         assert_eq!(persisted.final_state, "complete");
         assert_eq!(persisted.attempt_count, 3);
+        assert_eq!(persisted.selected_transport.as_deref(), Some("unix_ssh"));
         assert_eq!(
             persisted.completed_phases,
             vec!["stage", "execute", "collect", "cleanup"]
@@ -3425,6 +3464,7 @@ mod tests {
             error: Some("cleanup failed after legacy credential change".to_string()),
             failure_phase: Some("cleanup".to_string()),
             failure_disposition: Some("terminal".to_string()),
+            selected_transport: Some("unix_ssh".to_string()),
             attempt_count: 2,
             completed_phases: vec![
                 "stage".to_string(),
@@ -3497,6 +3537,7 @@ mod tests {
             error: Some("artifact collection failed".to_string()),
             failure_phase: Some("collect".to_string()),
             failure_disposition: Some("retryable".to_string()),
+            selected_transport: Some("unix_ssh".to_string()),
             attempt_count: 1,
             completed_phases: vec!["stage".to_string(), "execute".to_string()],
         };
@@ -3618,6 +3659,7 @@ mod tests {
             error: None,
             failure_phase: None,
             failure_disposition: None,
+            selected_transport: Some("unix_ssh".to_string()),
             attempt_count: 2,
             completed_phases: vec![
                 "stage".to_string(),

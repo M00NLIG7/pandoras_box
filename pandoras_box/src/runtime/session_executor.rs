@@ -15,6 +15,22 @@ pub enum OperationIdempotency {
     NonIdempotent,
 }
 
+pub(crate) struct ConnectedSession {
+    transport: super::mission::TransportKind,
+    session: BoxedHostSession,
+}
+
+impl ConnectedSession {
+    #[must_use]
+    pub(crate) fn transport(&self) -> super::mission::TransportKind {
+        self.transport
+    }
+
+    pub(crate) fn session_mut(&mut self) -> &mut dyn HostSession {
+        &mut *self.session
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionOperation {
     Exec {
@@ -229,20 +245,31 @@ impl<F> SessionExecutor<F> {
     pub(crate) async fn connect_session(
         &self,
         plan: &HostPlan,
-    ) -> Result<BoxedHostSession, HostExecutionReport>
+    ) -> Result<ConnectedSession, HostExecutionReport>
+    where
+        F: SessionFactory + 'static,
+    {
+        self.connect_session_from(plan, 0).await
+    }
+
+    async fn connect_session_from(
+        &self,
+        plan: &HostPlan,
+        start_index: usize,
+    ) -> Result<ConnectedSession, HostExecutionReport>
     where
         F: SessionFactory + 'static,
     {
         let mut errors = Vec::new();
 
-        for transport in plan.transport_chain.clone() {
+        for transport in plan.transport_chain.iter().copied().skip(start_index) {
             if let Err(err) = self.policy.allow_transport(transport) {
                 errors.push(err.to_string());
                 continue;
             }
 
             match self.factory.connect(plan, transport).await {
-                Ok(session) => return Ok(session),
+                Ok(session) => return Ok(ConnectedSession { transport, session }),
                 Err(err) => errors.push(format!("{transport:?}: {err}")),
             }
         }
@@ -257,6 +284,32 @@ impl<F> SessionExecutor<F> {
             plan.force_state(HostState::Failed),
             error,
         ))
+    }
+
+    async fn connect_session_after(
+        &self,
+        plan: &HostPlan,
+        current: super::mission::TransportKind,
+    ) -> Option<Result<ConnectedSession, HostExecutionReport>>
+    where
+        F: SessionFactory + 'static,
+    {
+        let start_index = plan
+            .transport_chain
+            .iter()
+            .position(|transport| *transport == current)?
+            .saturating_add(1);
+        let has_allowed_transport = plan
+            .transport_chain
+            .iter()
+            .copied()
+            .skip(start_index)
+            .any(|transport| self.policy.allow_transport(transport).is_ok());
+        if !has_allowed_transport {
+            return None;
+        }
+
+        Some(self.connect_session_from(plan, start_index).await)
     }
 
     pub(crate) async fn run_connected_session(
@@ -279,8 +332,11 @@ impl<F> SessionExecutor<F> {
             };
 
             match operation {
-                SessionOperation::Exec { request, .. } => match session.exec(request.clone()).await
-                {
+                SessionOperation::Exec {
+                    request,
+                    idempotency,
+                    ..
+                } => match session.exec(request.clone()).await {
                     Ok(response) => {
                         if let Err(err) = validate_exec_response(request, &response) {
                             let _ = session.cleanup().await;
@@ -289,15 +345,53 @@ impl<F> SessionExecutor<F> {
                     }
                     Err(err) => {
                         let _ = session.cleanup().await;
-                        return operation_transport_failure(plan, phase, "exec failed", err);
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            *idempotency,
+                            "exec failed",
+                            err,
+                        );
                     }
                 },
                 SessionOperation::CaptureExec {
                     request,
                     local_path,
+                    idempotency,
                     ..
-                }
-                | SessionOperation::CleanupCaptureExec {
+                } => match session.exec(request.clone()).await {
+                    Ok(response) => {
+                        if let Err(err) = write_exec_capture(local_path, request, &response).await {
+                            let _ = session.cleanup().await;
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                capture_context(phase),
+                                err,
+                            );
+                        }
+                        if let Err(err) = validate_exec_response(request, &response) {
+                            let _ = session.cleanup().await;
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                capture_context(phase),
+                                err,
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        let _ = session.cleanup().await;
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            *idempotency,
+                            capture_context(phase),
+                            err,
+                        );
+                    }
+                },
+                SessionOperation::CleanupCaptureExec {
                     request,
                     local_path,
                 } => match session.exec(request.clone()).await {
@@ -326,6 +420,7 @@ impl<F> SessionExecutor<F> {
                         return operation_transport_failure(
                             plan,
                             phase,
+                            OperationIdempotency::Idempotent,
                             capture_context(phase),
                             err,
                         );
@@ -339,7 +434,13 @@ impl<F> SessionExecutor<F> {
 
                     if let Err(err) = session.put(transfer).await {
                         let _ = session.cleanup().await;
-                        return operation_transport_failure(plan, phase, "put failed", err);
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            OperationIdempotency::Idempotent,
+                            "put failed",
+                            err,
+                        );
                     }
                 }
                 SessionOperation::GetFile { transfer } => {
@@ -350,7 +451,13 @@ impl<F> SessionExecutor<F> {
 
                     if let Err(err) = session.get(transfer).await {
                         let _ = session.cleanup().await;
-                        return operation_transport_failure(plan, phase, "get failed", err);
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            OperationIdempotency::Idempotent,
+                            "get failed",
+                            err,
+                        );
                     }
                 }
                 SessionOperation::EnsureDir { remote_dir } => {
@@ -361,7 +468,13 @@ impl<F> SessionExecutor<F> {
 
                     if let Err(err) = session.ensure_dir(remote_dir).await {
                         let _ = session.cleanup().await;
-                        return operation_transport_failure(plan, phase, "ensure_dir failed", err);
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            OperationIdempotency::Idempotent,
+                            "ensure_dir failed",
+                            err,
+                        );
                     }
                 }
                 SessionOperation::CleanupExec { request } => {
@@ -382,6 +495,7 @@ impl<F> SessionExecutor<F> {
                             return operation_transport_failure(
                                 plan,
                                 phase,
+                                OperationIdempotency::Idempotent,
                                 "cleanup_exec failed",
                                 err,
                             );
@@ -408,6 +522,55 @@ impl<F> SessionExecutor<F> {
         }
 
         HostExecutionReport::success(complete_plan, HostState::Complete)
+    }
+
+    pub(crate) async fn run_connected_session_with_fallback(
+        &self,
+        plan: HostPlan,
+        connected: &mut ConnectedSession,
+        disconnect_on_success: bool,
+    ) -> HostExecutionReport
+    where
+        F: SessionFactory + 'static,
+    {
+        let phase_is_idempotent = self
+            .operations
+            .iter()
+            .filter(|operation| self.policy.allow_operation(operation.mutability()).is_ok())
+            .all(|operation| operation.idempotency() == OperationIdempotency::Idempotent);
+
+        loop {
+            let selected_transport = connected.transport();
+            let mut report = self
+                .run_connected_session(plan.clone(), connected.session_mut(), disconnect_on_success)
+                .await
+                .with_selected_transport(selected_transport);
+
+            if !phase_is_idempotent
+                || report.failure_disposition != Some(FailureDisposition::Retryable)
+            {
+                return report;
+            }
+
+            let Some(fallback) = self.connect_session_after(&plan, selected_transport).await else {
+                return report;
+            };
+
+            match fallback {
+                Ok(next_session) => *connected = next_session,
+                Err(fallback_report) => {
+                    let operation_error = report.error.take().unwrap_or_default();
+                    let fallback_error = fallback_report.error.unwrap_or_default();
+                    report.error = Some(format!(
+                        "{operation_error}; fallback connection failed: {fallback_error}"
+                    ));
+                    if fallback_report.failure_disposition == Some(FailureDisposition::Terminal) {
+                        report.failure_disposition = Some(FailureDisposition::Terminal);
+                    }
+                    return report;
+                }
+            }
+        }
     }
 }
 
@@ -504,16 +667,20 @@ fn terminal_phase_failure(
 fn operation_transport_failure(
     plan: HostPlan,
     phase: FailurePhase,
+    idempotency: OperationIdempotency,
     context: &str,
     err: impl std::fmt::Display,
 ) -> HostExecutionReport {
     let rendered = format!("{context}: {err}");
-    let disposition = phase_failure_disposition(phase, &rendered);
+    let disposition = operation_failure_disposition(idempotency, &rendered);
     HostExecutionReport::failure_with_disposition(plan, phase, disposition, rendered)
 }
 
-fn phase_failure_disposition(phase: FailurePhase, error: &str) -> FailureDisposition {
-    if phase == FailurePhase::Execute || is_terminal_error(error) {
+fn operation_failure_disposition(
+    idempotency: OperationIdempotency,
+    error: &str,
+) -> FailureDisposition {
+    if idempotency == OperationIdempotency::NonIdempotent || is_terminal_error(error) {
         FailureDisposition::Terminal
     } else {
         FailureDisposition::Retryable
@@ -575,7 +742,8 @@ where
             Err(report) => return report,
         };
 
-        self.run_connected_session(plan, &mut *session, true).await
+        self.run_connected_session_with_fallback(plan, &mut session, true)
+            .await
     }
 }
 
@@ -611,6 +779,8 @@ mod tests {
         ensure_dir_calls: Arc<AtomicUsize>,
         events: Arc<Mutex<Vec<String>>>,
         exec_outputs: Arc<HashMap<String, ExecResponse>>,
+        exec_errors: Arc<HashMap<String, String>>,
+        put_error: Option<String>,
         downloads: Arc<HashMap<String, Vec<u8>>>,
         uploads: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     }
@@ -623,6 +793,8 @@ mod tests {
                 ensure_dir_calls: self.ensure_dir_calls,
                 events: self.events,
                 exec_outputs: self.exec_outputs,
+                exec_errors: self.exec_errors,
+                put_error: self.put_error,
                 downloads: self.downloads,
                 uploads: self.uploads,
             }
@@ -635,6 +807,8 @@ mod tests {
         ensure_dir_calls: Arc<AtomicUsize>,
         events: Arc<Mutex<Vec<String>>>,
         exec_outputs: Arc<HashMap<String, ExecResponse>>,
+        exec_errors: Arc<HashMap<String, String>>,
+        put_error: Option<String>,
         downloads: Arc<HashMap<String, Vec<u8>>>,
         uploads: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     }
@@ -646,6 +820,9 @@ mod tests {
                 .lock()
                 .expect("events lock should be available")
                 .push(format!("exec:{}", request.command));
+            if let Some(error) = self.exec_errors.get(&request.command) {
+                return Err(Error::CommunicatorError(error.clone()));
+            }
 
             Ok(self
                 .exec_outputs
@@ -663,6 +840,9 @@ mod tests {
                 .lock()
                 .expect("events lock should be available")
                 .push(format!("put:{}", transfer.remote_path));
+            if let Some(error) = &self.put_error {
+                return Err(Error::FileTransferError(error.clone()));
+            }
             let contents = tokio::fs::read(&transfer.local_path).await?;
             self.uploads
                 .lock()
@@ -721,6 +901,7 @@ mod tests {
     struct FakeSessionFactory {
         behaviors: HashMap<(IpAddr, TransportKind), ConnectBehavior>,
         templates: Arc<Mutex<HashMap<(IpAddr, TransportKind), SessionTemplate>>>,
+        attempts: Arc<Mutex<Vec<(IpAddr, TransportKind)>>>,
     }
 
     impl FakeSessionFactory {
@@ -736,7 +917,15 @@ mod tests {
             Self {
                 behaviors,
                 templates: Arc::new(Mutex::new(templates)),
+                attempts: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        fn attempts(&self) -> Vec<(IpAddr, TransportKind)> {
+            self.attempts
+                .lock()
+                .expect("attempts lock should be available")
+                .clone()
         }
     }
 
@@ -748,6 +937,10 @@ mod tests {
             transport: TransportKind,
         ) -> Result<BoxedHostSession> {
             let key = (plan.target.ip, transport);
+            self.attempts
+                .lock()
+                .expect("attempts lock should be available")
+                .push(key);
             match self
                 .behaviors
                 .get(&key)
@@ -793,6 +986,8 @@ mod tests {
             ensure_dir_calls: Arc::new(AtomicUsize::new(0)),
             events: Arc::new(Mutex::new(Vec::new())),
             exec_outputs: Arc::new(HashMap::new()),
+            exec_errors: Arc::new(HashMap::new()),
+            put_error: None,
             downloads: Arc::new(HashMap::new()),
             uploads: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -1362,6 +1557,146 @@ mod tests {
         assert_eq!(
             report.failure_disposition,
             Some(FailureDisposition::Retryable)
+        );
+    }
+
+    #[tokio::test]
+    async fn session_executor_falls_back_after_ssh_stage_transfer_failure() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 32));
+        let root = temp_dir("post-connect-smb-fallback");
+        let payload = root.join("chimera.exe");
+        tokio::fs::create_dir_all(&root)
+            .await
+            .expect("fixture directory should exist");
+        tokio::fs::write(&payload, b"payload")
+            .await
+            .expect("payload fixture should exist");
+
+        let mut ssh_template = template(0, false);
+        let ssh_events = Arc::clone(&ssh_template.events);
+        ssh_template.put_error = Some("SFTP channel closed".to_string());
+        let smb_template = template(0, false);
+        let smb_events = Arc::clone(&smb_template.events);
+        let smb_uploads = Arc::clone(&smb_template.uploads);
+        let factory = Arc::new(FakeSessionFactory::new(vec![
+            (
+                (ip, TransportKind::WindowsSsh),
+                ConnectBehavior::Success,
+                ssh_template,
+            ),
+            (
+                (ip, TransportKind::WindowsSmb),
+                ConnectBehavior::Success,
+                smb_template,
+            ),
+        ]));
+        let executor = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy::default(),
+            vec![
+                SessionOperation::ensure_dir(r"C:\Temp\pandoras-box"),
+                SessionOperation::put_file(&payload, r"C:\Temp\pandoras-box\chimera.exe"),
+            ],
+        );
+
+        let report = executor
+            .run(host_plan(
+                ip,
+                vec![TransportKind::WindowsSsh, TransportKind::WindowsSmb],
+            ))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Complete);
+        assert_eq!(report.selected_transport, Some(TransportKind::WindowsSmb));
+        assert_eq!(report.failure_disposition, None);
+        assert_eq!(
+            factory.attempts(),
+            vec![
+                (ip, TransportKind::WindowsSsh),
+                (ip, TransportKind::WindowsSmb)
+            ]
+        );
+        assert_eq!(
+            ssh_events
+                .lock()
+                .expect("SSH events lock should be available")
+                .as_slice(),
+            [
+                r"ensure_dir:C:\Temp\pandoras-box",
+                r"put:C:\Temp\pandoras-box\chimera.exe",
+                "disconnect"
+            ]
+        );
+        assert_eq!(
+            smb_events
+                .lock()
+                .expect("SMB events lock should be available")
+                .as_slice(),
+            [
+                r"ensure_dir:C:\Temp\pandoras-box",
+                r"put:C:\Temp\pandoras-box\chimera.exe",
+                "disconnect"
+            ]
+        );
+        assert_eq!(
+            smb_uploads
+                .lock()
+                .expect("SMB uploads lock should be available")
+                .get(r"C:\Temp\pandoras-box\chimera.exe")
+                .cloned(),
+            Some(b"payload".to_vec())
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn session_executor_never_falls_back_non_idempotent_exec() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 33));
+        let mut ssh_template = template(0, false);
+        let ssh_events = Arc::clone(&ssh_template.events);
+        ssh_template.exec_errors = Arc::new(HashMap::from([(
+            "apply-once".to_string(),
+            "connection reset after command dispatch".to_string(),
+        )]));
+        let factory = Arc::new(FakeSessionFactory::new(vec![
+            (
+                (ip, TransportKind::WindowsSsh),
+                ConnectBehavior::Success,
+                ssh_template,
+            ),
+            (
+                (ip, TransportKind::WindowsSmb),
+                ConnectBehavior::Success,
+                template(0, false),
+            ),
+        ]));
+        let executor = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy::default(),
+            vec![SessionOperation::exec("apply-once")],
+        );
+
+        let report = executor
+            .run(host_plan(
+                ip,
+                vec![TransportKind::WindowsSsh, TransportKind::WindowsSmb],
+            ))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Failed);
+        assert_eq!(report.selected_transport, Some(TransportKind::WindowsSsh));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+        assert_eq!(factory.attempts(), vec![(ip, TransportKind::WindowsSsh)]);
+        assert_eq!(
+            ssh_events
+                .lock()
+                .expect("SSH events lock should be available")
+                .as_slice(),
+            ["exec:apply-once", "disconnect"]
         );
     }
 

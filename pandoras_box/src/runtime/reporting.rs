@@ -34,6 +34,9 @@ pub struct AssetInventoryHost {
     pub final_state: String,
     pub platform: String,
     pub transport_chain: Vec<String>,
+    pub selected_transport: Option<String>,
+    pub failure_phase: Option<String>,
+    pub failure_disposition: Option<String>,
     pub hostname: Option<String>,
     pub os: Option<String>,
     pub open_ports: Vec<u16>,
@@ -357,6 +360,13 @@ fn record_from_report(
                     .iter()
                     .map(|kind| kind.as_str().to_string())
                     .collect(),
+                selected_transport: report
+                    .selected_transport
+                    .map(|kind| kind.as_str().to_string()),
+                failure_phase: report.failure_phase.map(|phase| phase.as_str().to_string()),
+                failure_disposition: report
+                    .failure_disposition
+                    .map(|disposition| disposition.as_str().to_string()),
                 hostname: non_empty(inventory.hostname),
                 os: non_empty(inventory.os),
                 open_ports: if inventory.ports.is_empty() {
@@ -396,6 +406,13 @@ fn record_from_report(
                     .iter()
                     .map(|kind| kind.as_str().to_string())
                     .collect(),
+                selected_transport: report
+                    .selected_transport
+                    .map(|kind| kind.as_str().to_string()),
+                failure_phase: report.failure_phase.map(|phase| phase.as_str().to_string()),
+                failure_disposition: report
+                    .failure_disposition
+                    .map(|disposition| disposition.as_str().to_string()),
                 hostname: None,
                 os: None,
                 open_ports: fallback_ports,
@@ -478,16 +495,19 @@ fn render_asset_inventory_markdown(bundle: &AssetInventoryBundle) -> String {
         bundle.failed_hosts
     ));
     markdown.push_str(
-        "| IP | State | Platform | Hostname | OS | Ports | Admin Users | Services | Shares | Error |\n",
+        "| IP | State | Platform | Selected transport | Failure disposition | Hostname | OS | Ports | Admin Users | Services | Shares | Error |\n",
     );
-    markdown.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    markdown
+        .push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
 
     for host in &bundle.hosts {
         markdown.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             markdown_cell(&host.ip),
             markdown_cell(&host.final_state),
             markdown_cell(&host.platform),
+            markdown_cell(optional_display(host.selected_transport.as_deref())),
+            markdown_cell(optional_display(host.failure_disposition.as_deref())),
             markdown_cell(optional_display(host.hostname.as_deref())),
             markdown_cell(optional_display(host.os.as_deref())),
             markdown_cell(&join_ports(&host.open_ports)),
@@ -502,8 +522,9 @@ fn render_asset_inventory_markdown(bundle: &AssetInventoryBundle) -> String {
 }
 
 fn render_asset_inventory_csv(bundle: &AssetInventoryBundle) -> String {
-    let mut csv =
-        String::from("ip,state,platform,hostname,os,ports,admin_users,services,shares,error\n");
+    let mut csv = String::from(
+        "ip,state,platform,selected_transport,failure_phase,failure_disposition,hostname,os,ports,admin_users,services,shares,error\n",
+    );
 
     for host in &bundle.hosts {
         let ports = join_ports(&host.open_ports);
@@ -514,6 +535,9 @@ fn render_asset_inventory_csv(bundle: &AssetInventoryBundle) -> String {
             host.ip.as_str(),
             host.final_state.as_str(),
             host.platform.as_str(),
+            optional_display(host.selected_transport.as_deref()),
+            optional_display(host.failure_phase.as_deref()),
+            optional_display(host.failure_disposition.as_deref()),
             optional_display(host.hostname.as_deref()),
             optional_display(host.os.as_deref()),
             ports.as_str(),
@@ -2163,7 +2187,11 @@ fn host_card_lines(host: &AssetInventoryHost) -> Vec<PdfTextLine> {
 
     lines.extend(wrap_pdf_value_line(
         "Access",
-        &format!("{transports}; ports {}", join_ports(&host.open_ports)),
+        &format!(
+            "selected {}; chain {transports}; ports {}",
+            optional_display(host.selected_transport.as_deref()),
+            join_ports(&host.open_ports)
+        ),
         82,
         "#10233C",
     ));
@@ -2631,6 +2659,9 @@ mod tests {
                 final_state: "complete".to_string(),
                 platform: "unix".to_string(),
                 transport_chain: vec!["unix_ssh".to_string()],
+                selected_transport: Some("unix_ssh".to_string()),
+                failure_phase: None,
+                failure_disposition: None,
                 hostname: Some("lab".to_string()),
                 os: Some("Ubuntu".to_string()),
                 open_ports: vec![22, 80],
@@ -2643,10 +2674,10 @@ mod tests {
         };
 
         assert!(render_asset_inventory_markdown(&bundle).contains(
-            "| 10.0.0.10 | complete | unix | lab | Ubuntu | 22,80 | root | sshd | - |  |"
+            "| 10.0.0.10 | complete | unix | unix_ssh | - | lab | Ubuntu | 22,80 | root | sshd | - |  |"
         ));
         assert!(render_asset_inventory_csv(&bundle)
-            .contains("10.0.0.10,complete,unix,lab,Ubuntu,\"22,80\",root,sshd,-,"));
+            .contains("10.0.0.10,complete,unix,unix_ssh,-,-,lab,Ubuntu,\"22,80\",root,sshd,-,"));
         let pdf = render_asset_inventory_pdf(&bundle);
         assert!(pdf.starts_with(b"%PDF-1.4"));
         let pdf_text = String::from_utf8_lossy(&pdf);
