@@ -12,7 +12,7 @@ pub mod session_factory;
 pub mod transport;
 pub mod workspace;
 
-pub use artifact_store::ArtifactStore;
+pub use artifact_store::{validate_mission_id, ArtifactStore};
 pub use discovery::{DiscoveryConfig, DiscoveryOutcome, DiscoveryRecord, TcpDiscovery};
 pub use mission::{
     HostPlan, HostState, HostStateTransitionError, HostTarget, MissionSpec, PlatformHint,

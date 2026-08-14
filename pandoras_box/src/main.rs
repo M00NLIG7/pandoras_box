@@ -20,6 +20,12 @@ fn current_timestamp_string() -> String {
         .to_string()
 }
 
+fn mission_id_value(value: &str) -> std::result::Result<String, String> {
+    runtime::validate_mission_id(value)
+        .map(|()| value.to_string())
+        .map_err(|err| err.to_string())
+}
+
 struct MemoryReport;
 
 impl Drop for MemoryReport {
@@ -107,6 +113,25 @@ mod tests {
         );
         assert_eq!(spec.password, "secret");
         assert!(spec.allow_smb_fallback);
+    }
+
+    #[test]
+    fn cli_rejects_mission_ids_that_escape_one_path_component() {
+        for mission_id in ["../escape", "/tmp/escape", r"..\escape", "line\nbreak", "."] {
+            let error = build_cli()
+                .try_get_matches_from([
+                    "pandoras_box",
+                    "--range",
+                    "10.0.0.0/30",
+                    "--password",
+                    "secret",
+                    "--mission_id",
+                    mission_id,
+                ])
+                .expect_err("unsafe mission identifier should be rejected");
+
+            assert!(error.to_string().contains("portable path component"));
+        }
     }
 
     #[test]
@@ -211,7 +236,7 @@ fn build_cli() -> ClapCommand {
         .arg(
             carg!(--mission_id <MISSION_ID>)
                 .required(false)
-                .value_parser(value_parser!(String)),
+                .value_parser(clap::builder::ValueParser::new(mission_id_value)),
         )
         .arg(
             carg!(--identity_command <COMMAND>)

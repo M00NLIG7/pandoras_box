@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use super::artifact_store::{ActiveMissionRecord, ArtifactStore};
+use super::artifact_store::{ActiveMissionRecord, ArtifactRootLock, ArtifactStore};
 #[cfg(test)]
 use super::discovery::DiscoveryRecord;
 use super::discovery::{DiscoveryConfig, DiscoveryOutcome, TcpDiscovery};
@@ -30,7 +30,7 @@ use super::scheduler::HostExecutor;
 
 const SMB_CONNECT_RETRY_COOLDOWN: Duration = Duration::from_secs(3);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PandorasBoxRunSummary {
     pub mission_dir: PathBuf,
     pub requested_targets: usize,
@@ -327,10 +327,11 @@ impl PandorasBoxRunner {
     }
 
     async fn prepare_store(&self) -> Result<(MissionSpec, ArtifactStore)> {
-        let spec = self.resolve_mission_spec().await?;
-        let store = ArtifactStore::new(&spec.artifact_root, &spec.mission_id);
+        let root_lock = ArtifactStore::acquire_root_lock(self.spec.artifact_root.clone()).await?;
+        let spec = self.resolve_mission_spec(&root_lock).await?;
+        let store = ArtifactStore::new_locked(&spec.artifact_root, &spec.mission_id, &root_lock)?;
         ArtifactStore::write_active_mission(
-            &spec.artifact_root,
+            &root_lock,
             &ActiveMissionRecord {
                 mission_id: spec.mission_id.clone(),
                 signature: spec.resume_signature(),
@@ -343,14 +344,15 @@ impl PandorasBoxRunner {
         Ok((spec, store))
     }
 
-    async fn resolve_mission_spec(&self) -> Result<MissionSpec> {
+    async fn resolve_mission_spec(&self, root_lock: &ArtifactRootLock) -> Result<MissionSpec> {
         let mut spec = self.spec.clone();
         if spec.mission_id_explicit {
+            super::artifact_store::validate_mission_id(&spec.mission_id)?;
             return Ok(spec);
         }
 
         let signature = spec.resume_signature();
-        let Some(active) = ArtifactStore::read_active_mission(&spec.artifact_root).await? else {
+        let Some(active) = ArtifactStore::read_active_mission(root_lock).await? else {
             return Ok(spec);
         };
 
@@ -358,12 +360,14 @@ impl PandorasBoxRunner {
             return Ok(spec);
         }
 
-        let active_store = ArtifactStore::new(&spec.artifact_root, &active.mission_id);
+        let active_store =
+            ArtifactStore::new_locked(&spec.artifact_root, &active.mission_id, root_lock)?;
         if !tokio::fs::try_exists(active_store.mission_dir()).await? {
             return Ok(spec);
         }
         if tokio::fs::try_exists(active_store.summary_path()).await? {
-            ArtifactStore::clear_active_mission_if_matches(&spec.artifact_root, &active.mission_id)
+            active_store
+                .clear_active_mission_if_matches(&active.mission_id)
                 .await?;
             return Ok(spec);
         }
@@ -412,7 +416,8 @@ impl PandorasBoxRunner {
         )
         .await?;
         store.write_summary(&render_summary_json(&summary)).await?;
-        ArtifactStore::clear_active_mission_if_matches(&spec.artifact_root, &spec.mission_id)
+        store
+            .clear_active_mission_if_matches(&spec.mission_id)
             .await?;
 
         Ok(summary)
@@ -1255,114 +1260,84 @@ fn is_smb_session_setup_burst_error(error: &str) -> bool {
         .any(|needle| lower.contains(needle))
 }
 
+#[derive(Serialize)]
+struct MissionManifest<'a> {
+    engine: &'static str,
+    mission_id: &'a str,
+    target_count: usize,
+    concurrency_limit: usize,
+    best_effort: bool,
+    dry_run: bool,
+    allow_smb_fallback: bool,
+    identity_command: &'a str,
+    unix_username: &'a str,
+    windows_username: &'a str,
+    ssh_port: u16,
+    discovery_ports: &'a [u16],
+    chimera_unix_path: String,
+    chimera_windows_path: String,
+}
+
+fn pretty_json<T: Serialize>(value: &T, context: &str) -> String {
+    serde_json::to_string_pretty(value)
+        .unwrap_or_else(|err| panic!("{context} should serialize to JSON: {err}"))
+        + "\n"
+}
+
 fn render_mission_manifest(spec: &MissionSpec) -> String {
-    format!(
-        concat!(
-            "{{\n",
-            "  \"engine\": \"pandoras_box\",\n",
-            "  \"mission_id\": \"{}\",\n",
-            "  \"target_count\": {},\n",
-            "  \"concurrency_limit\": {},\n",
-            "  \"best_effort\": {},\n",
-            "  \"dry_run\": {},\n",
-            "  \"allow_smb_fallback\": {},\n",
-            "  \"identity_command\": \"{}\",\n",
-            "  \"unix_username\": \"{}\",\n",
-            "  \"windows_username\": \"{}\",\n",
-            "  \"ssh_port\": {},\n",
-            "  \"discovery_ports\": [{}],\n",
-            "  \"chimera_unix_path\": \"{}\",\n",
-            "  \"chimera_windows_path\": \"{}\"\n",
-            "}}\n"
-        ),
-        escape_json(&spec.mission_id),
-        spec.targets.len(),
-        spec.concurrency_limit,
-        spec.best_effort,
-        spec.dry_run,
-        spec.allow_smb_fallback,
-        escape_json(&spec.identity_command),
-        escape_json(&spec.unix_username),
-        escape_json(&spec.windows_username),
-        spec.ssh_port,
-        spec.discovery_ports
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", "),
-        escape_json(&spec.chimera_unix_path.to_string_lossy()),
-        escape_json(&spec.chimera_windows_path.to_string_lossy()),
+    pretty_json(
+        &MissionManifest {
+            engine: "pandoras_box",
+            mission_id: &spec.mission_id,
+            target_count: spec.targets.len(),
+            concurrency_limit: spec.concurrency_limit,
+            best_effort: spec.best_effort,
+            dry_run: spec.dry_run,
+            allow_smb_fallback: spec.allow_smb_fallback,
+            identity_command: &spec.identity_command,
+            unix_username: &spec.unix_username,
+            windows_username: &spec.windows_username,
+            ssh_port: spec.ssh_port,
+            discovery_ports: &spec.discovery_ports,
+            chimera_unix_path: spec.chimera_unix_path.to_string_lossy().into_owned(),
+            chimera_windows_path: spec.chimera_windows_path.to_string_lossy().into_owned(),
+        },
+        "mission manifest",
     )
 }
 
-fn render_plan_json(plan: &HostPlan) -> String {
-    let open_ports = plan
-        .target
-        .open_ports
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let transport_chain = plan
-        .transport_chain
-        .iter()
-        .map(|transport| format!("\"{}\"", transport.as_str()))
-        .collect::<Vec<_>>()
-        .join(", ");
+#[derive(Serialize)]
+struct PersistedHostPlan<'a> {
+    ip: String,
+    platform: &'static str,
+    state: &'static str,
+    open_ports: &'a [u16],
+    transport_chain: Vec<&'static str>,
+}
 
-    format!(
-        concat!(
-            "{{\n",
-            "  \"ip\": \"{}\",\n",
-            "  \"platform\": \"{}\",\n",
-            "  \"state\": \"{}\",\n",
-            "  \"open_ports\": [{}],\n",
-            "  \"transport_chain\": [{}]\n",
-            "}}\n"
-        ),
-        plan.target.ip,
-        plan.target.platform.as_str(),
-        plan.state.as_str(),
-        open_ports,
-        transport_chain,
+fn render_plan_json(plan: &HostPlan) -> String {
+    pretty_json(
+        &PersistedHostPlan {
+            ip: plan.target.ip.to_string(),
+            platform: plan.target.platform.as_str(),
+            state: plan.state.as_str(),
+            open_ports: &plan.target.open_ports,
+            transport_chain: plan
+                .transport_chain
+                .iter()
+                .map(|transport| transport.as_str())
+                .collect(),
+        },
+        "host plan",
     )
 }
 
 fn render_report_json(report: &HostExecutionReport) -> String {
-    serde_json::to_string_pretty(&persisted_status_from_report(report))
-        .expect("host status should serialize to JSON")
-        + "\n"
+    pretty_json(&persisted_status_from_report(report), "host status")
 }
 
 fn render_summary_json(summary: &PandorasBoxRunSummary) -> String {
-    format!(
-        concat!(
-            "{{\n",
-            "  \"mission_dir\": \"{}\",\n",
-            "  \"requested_targets\": {},\n",
-            "  \"reachable_targets\": {},\n",
-            "  \"unreachable_targets\": {},\n",
-            "  \"skipped_targets\": {},\n",
-            "  \"attempted_targets\": {},\n",
-            "  \"discovered_hosts\": {},\n",
-            "  \"completed_hosts\": {},\n",
-            "  \"failed_hosts\": {}\n",
-            "}}\n"
-        ),
-        escape_json(&summary.mission_dir.to_string_lossy()),
-        summary.requested_targets,
-        summary.reachable_targets,
-        summary.unreachable_targets,
-        summary.skipped_targets,
-        summary.attempted_targets,
-        summary.discovered_hosts,
-        summary.completed_hosts,
-        summary.failed_hosts,
-    )
-}
-
-fn escape_json(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    pretty_json(summary, "mission summary")
 }
 
 #[cfg(test)]
@@ -1822,19 +1797,55 @@ mod tests {
     }
 
     #[test]
-    fn mission_manifest_omits_password_and_includes_engine() {
+    fn mission_manifest_omits_password_and_serializes_control_characters() {
         let spec = MissionSpec {
             password: "super-secret".to_string(),
             discovery_ports: vec![2222],
+            identity_command: "printf '\n\u{1}'".to_string(),
+            unix_username: "operator\\\"quoted".to_string(),
             ..MissionSpec::default()
         };
         let manifest = render_mission_manifest(&spec);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&manifest).expect("manifest should always be valid JSON");
 
-        assert!(manifest.contains("\"engine\": \"pandoras_box\""));
-        assert!(manifest.contains("\"ssh_port\": 22"));
-        assert!(manifest.contains("\"discovery_ports\": [2222]"));
-        assert!(!manifest.contains("collector_port"));
+        assert_eq!(parsed["engine"], "pandoras_box");
+        assert_eq!(parsed["ssh_port"], 22);
+        assert_eq!(parsed["discovery_ports"], serde_json::json!([2222]));
+        assert_eq!(parsed["identity_command"], "printf '\n\u{1}'");
+        assert_eq!(parsed["unix_username"], "operator\\\"quoted");
+        assert!(parsed.get("collector_port").is_none());
         assert!(!manifest.contains("super-secret"));
+    }
+
+    #[tokio::test]
+    async fn runner_rejects_escaped_mission_id_before_mission_writes() {
+        let root = temp_root("invalid-mission-id");
+        let escaped_name = format!(
+            "{}-escaped",
+            root.file_name()
+                .expect("temporary artifact root should have a file name")
+                .to_string_lossy()
+        );
+        let escaped = root
+            .parent()
+            .expect("temporary artifact root should have a parent")
+            .join(&escaped_name);
+        let runner = PandorasBoxRunner::new(MissionSpec {
+            artifact_root: root.clone(),
+            mission_id: format!("../{escaped_name}"),
+            mission_id_explicit: true,
+            ..MissionSpec::default()
+        });
+
+        let error = runner
+            .prepare_store()
+            .await
+            .expect_err("escaped mission identifier should fail before mission writes");
+        assert!(error.to_string().contains("portable path component"));
+        assert!(!escaped.exists());
+
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[test]
@@ -1861,7 +1872,7 @@ mod tests {
     #[test]
     fn summary_json_includes_host_counts() {
         let summary = PandorasBoxRunSummary {
-            mission_dir: PathBuf::from("artifacts/mission-123"),
+            mission_dir: PathBuf::from("artifacts/mission-123\nquoted\"path"),
             requested_targets: 5,
             reachable_targets: 5,
             unreachable_targets: 0,
@@ -1873,17 +1884,29 @@ mod tests {
         };
         let json = render_summary_json(&summary);
 
-        assert!(json.contains("\"requested_targets\": 5"));
-        assert!(json.contains("\"attempted_targets\": 5"));
-        assert!(json.contains("\"discovered_hosts\": 5"));
-        assert!(json.contains("\"failed_hosts\": 1"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("summary should always be valid JSON");
+        assert_eq!(parsed["mission_dir"], "artifacts/mission-123\nquoted\"path");
+        assert_eq!(parsed["requested_targets"], 5);
+        assert_eq!(parsed["attempted_targets"], 5);
+        assert_eq!(parsed["discovered_hosts"], 5);
+        assert_eq!(parsed["failed_hosts"], 1);
         assert!(summary.requires_failure_exit());
     }
 
     #[tokio::test]
     async fn finalize_summary_writes_asset_inventory_bundle_for_completed_hosts() {
         let root = temp_root("asset-inventory-complete");
-        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let root_lock =
+            crate::runtime::artifact_store::ArtifactStore::acquire_root_lock(root.clone())
+                .await
+                .expect("artifact root lock should be available");
+        let store = crate::runtime::artifact_store::ArtifactStore::new_locked(
+            &root,
+            "mission-123",
+            &root_lock,
+        )
+        .expect("mission identifier should be valid");
         let mission_spec = spec(root.clone());
         let runner = PandorasBoxRunner::new(mission_spec.clone());
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 41));
@@ -1985,7 +2008,16 @@ mod tests {
     #[tokio::test]
     async fn finalize_summary_asset_inventory_includes_failed_hosts_without_inventory() {
         let root = temp_root("asset-inventory-failed");
-        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let root_lock =
+            crate::runtime::artifact_store::ArtifactStore::acquire_root_lock(root.clone())
+                .await
+                .expect("artifact root lock should be available");
+        let store = crate::runtime::artifact_store::ArtifactStore::new_locked(
+            &root,
+            "mission-123",
+            &root_lock,
+        )
+        .expect("mission identifier should be valid");
         let mission_spec = spec(root.clone());
         let runner = PandorasBoxRunner::new(mission_spec.clone());
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42));
@@ -2040,7 +2072,16 @@ mod tests {
     #[tokio::test]
     async fn finalize_summary_writes_network_topology_for_connected_hosts() {
         let root = temp_root("network-topology");
-        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let root_lock =
+            crate::runtime::artifact_store::ArtifactStore::acquire_root_lock(root.clone())
+                .await
+                .expect("artifact root lock should be available");
+        let store = crate::runtime::artifact_store::ArtifactStore::new_locked(
+            &root,
+            "mission-123",
+            &root_lock,
+        )
+        .expect("mission identifier should be valid");
         let mission_spec = spec(root.clone());
         let runner = PandorasBoxRunner::new(mission_spec.clone());
         let ip_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 51));
@@ -2141,7 +2182,8 @@ mod tests {
     #[test]
     fn collector_job_for_unix_host_has_explicit_stage_run_and_collect_steps() {
         let root = PathBuf::from("/tmp/pandoras-box-runner");
-        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123")
+            .expect("mission identifier should be valid");
         let spec = MissionSpec {
             artifact_root: root,
             mission_id: "mission-123".to_string(),
@@ -2206,7 +2248,8 @@ mod tests {
     #[test]
     fn collector_job_for_windows_host_has_explicit_stage_run_and_collect_steps() {
         let root = PathBuf::from("/tmp/pandoras-box-runner");
-        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123")
+            .expect("mission identifier should be valid");
         let spec = MissionSpec {
             artifact_root: root,
             mission_id: "mission-123".to_string(),
@@ -2271,7 +2314,8 @@ mod tests {
     #[test]
     fn collector_job_for_unix_dry_run_skips_stage_and_artifact_collection() {
         let root = PathBuf::from("/tmp/pandoras-box-runner");
-        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123")
+            .expect("mission identifier should be valid");
         let spec = MissionSpec {
             artifact_root: root,
             mission_id: "mission-123".to_string(),
@@ -2436,7 +2480,7 @@ mod tests {
         ]));
         let records = stream::iter(vec![
             (Duration::from_millis(20), fast.clone()),
-            (Duration::from_millis(250), slow.clone()),
+            (Duration::from_millis(700), slow.clone()),
         ])
         .then(|(delay, record)| async move {
             tokio::time::sleep(delay).await;
@@ -2449,7 +2493,7 @@ mod tests {
             async move { runner.run_with_stream_and_executor(records, executor).await }
         });
 
-        tokio::time::sleep(Duration::from_millis(220)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(
             executor.completions().first().copied(),
             Some(fast.host.ip),
@@ -3354,7 +3398,8 @@ mod tests {
             vec![22],
             Some(64),
         );
-        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123")
+            .expect("mission identifier should be valid");
 
         store
             .ensure_layout(vec![record.host.ip])
@@ -3440,7 +3485,8 @@ mod tests {
             vec![22],
             Some(64),
         );
-        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123")
+            .expect("mission identifier should be valid");
 
         store
             .ensure_layout(vec![record.host.ip])
@@ -3526,7 +3572,8 @@ mod tests {
             vec![22],
             Some(64),
         );
-        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123");
+        let store = crate::runtime::artifact_store::ArtifactStore::new(&root, "mission-123")
+            .expect("mission identifier should be valid");
         store
             .ensure_layout(vec![record.host.ip])
             .await
@@ -3637,7 +3684,8 @@ mod tests {
             ..spec(root.clone())
         };
         let previous_store =
-            crate::runtime::artifact_store::ArtifactStore::new(&root, &previous_mission_id);
+            crate::runtime::artifact_store::ArtifactStore::new(&root, &previous_mission_id)
+                .expect("mission identifier should be valid");
 
         previous_store
             .ensure_layout(vec![ip])
