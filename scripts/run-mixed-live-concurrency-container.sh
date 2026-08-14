@@ -20,7 +20,7 @@ WINDOWS_LOCAL_SSH_PORT="${PANDORAS_BOX_LIVE_MIXED_WINDOWS_LOCAL_SSH_PORT:-3222}"
 WINDOWS_LOCAL_SMB_PORT="${PANDORAS_BOX_LIVE_MIXED_WINDOWS_LOCAL_SMB_PORT:-3445}"
 WINDOWS_BUILD_TARGET_DIR="${PANDORAS_BOX_WINDOWS_BUILD_TARGET_DIR:-$ROOT_DIR/target/chimera-windows}"
 WINDOWS_CHIMERA_PATH="${PANDORAS_BOX_LIVE_CHIMERA_WINDOWS_PATH:-}"
-LINUX_CHIMERA_PATH="${PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH:-$ROOT_DIR/target/x86_64-unknown-linux-gnu/debug/chimera}"
+LINUX_CHIMERA_PATH="${PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH:-$ROOT_DIR/target/x86_64-unknown-linux-musl/debug/chimera}"
 LINUX_TEST_BINARY="${PANDORAS_BOX_LIVE_MIXED_TEST_BINARY:-}"
 LINUX_TEST_TARGET_DIR="${PANDORAS_BOX_LIVE_MIXED_LINUX_TARGET_DIR:-$ROOT_DIR/target/live-mixed-linux}"
 LINUX_TEST_RUSTFLAGS="${PANDORAS_BOX_LIVE_MIXED_LINUX_RUSTFLAGS:--C debuginfo=0 -C codegen-units=1}"
@@ -329,7 +329,7 @@ fi
 mkdir -p "$LIVE_ARTIFACT_DIR"
 
 LINUX_CHIMERA_PATH="$(absolute_path "$LINUX_CHIMERA_PATH")"
-cross build --locked -j 1 -p chimera --bin chimera --target x86_64-unknown-linux-gnu
+cross build --locked -j 1 -p chimera --bin chimera --target x86_64-unknown-linux-musl
 
 if [[ -z "$WINDOWS_CHIMERA_PATH" ]]; then
   if [[ -f "$ROOT_DIR/target/x86_64-pc-windows-gnu/release/chimera.exe" ]]; then

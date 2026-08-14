@@ -54,8 +54,8 @@ export PANDORAS_BOX_LIVE_ALPINE_SSH_PASSWORD
 
 if [[ -z "$CHIMERA_TARGET" ]]; then
     require_command cross
-    cross build --locked -j 1 -p chimera --bin chimera --target x86_64-unknown-linux-gnu
-    CHIMERA_TARGET="$ROOT_DIR/target/x86_64-unknown-linux-gnu/debug/chimera"
+    cross build --locked -j 1 -p chimera --bin chimera --target x86_64-unknown-linux-musl
+    CHIMERA_TARGET="$ROOT_DIR/target/x86_64-unknown-linux-musl/debug/chimera"
 elif [[ "$CHIMERA_TARGET" != /* ]]; then
     CHIMERA_TARGET="$ROOT_DIR/$CHIMERA_TARGET"
 fi
