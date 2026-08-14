@@ -10,7 +10,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
   CI: true
 
 permissions:
@@ -22,13 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Verify Password Configuration
-      run: |
-        if [ -z "$APP_PASSWORD" ]; then
-          echo "Error: APP_PASSWORD secret is not configured"
-          exit 1
-        fi
-    
     - name: Checkout Repository
       uses: actions/checkout@v4
     
@@ -59,19 +51,12 @@ jobs:
     # Linux Build
     - name: Build Linux Target
       env:
-        APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
         RUST_LOG: debug
       run: |
         cd chimera
-        # Remove any existing .password file
-        rm -f .password
-        # Create new .password from APP_PASSWORD
-        echo "$APP_PASSWORD" > .password
-        cross build --target i686-unknown-linux-musl --release
+        cross build --locked --target i686-unknown-linux-musl --release
         mkdir -p release-artifacts
         cp ../target/i686-unknown-linux-musl/release/chimera release-artifacts/chimera
-        # Clean up password file
-        rm -f .password
     
     - name: Verify Linux Build Output
       run: |
@@ -84,19 +69,12 @@ jobs:
     # Windows Build
     - name: Build Windows Target
       env:
-        APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
         RUST_LOG: debug
       run: |
         cd chimera
-        # Remove any existing .password file
-        rm -f .password
-        # Create new .password from APP_PASSWORD
-        echo "$APP_PASSWORD" > .password
-        cross build --target x86_64-pc-windows-gnu --release
+        cross build --locked --target x86_64-pc-windows-gnu --release
         mkdir -p release-artifacts
         cp ../target/x86_64-pc-windows-gnu/release/chimera.exe release-artifacts/chimera.exe
-        # Clean up password file
-        rm -f .password
     
     - name: Verify Windows Build Output
       run: |
@@ -126,10 +104,3 @@ jobs:
         asset_path: chimera/release-artifacts/chimera.exe
         asset_name: chimera.exe
         asset_content_type: application/octet-stream
-
-    # Final cleanup
-    - name: Cleanup
-      if: always()
-      run: |
-        cd chimera
-        rm -f .password

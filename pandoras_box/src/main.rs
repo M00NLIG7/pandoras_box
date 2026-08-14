@@ -106,13 +106,12 @@ mod tests {
             PathBuf::from("release/chimera.exe")
         );
         assert_eq!(spec.password, "secret");
-        assert_eq!(spec.password_rotation_magic, None);
         assert!(spec.allow_smb_fallback);
     }
 
     #[test]
-    fn mission_spec_from_matches_parses_password_rotation_magic() {
-        let matches = build_cli()
+    fn cli_rejects_removed_password_rotation_flag() {
+        let error = build_cli()
             .try_get_matches_from([
                 "pandoras_box",
                 "--range",
@@ -122,14 +121,9 @@ mod tests {
                 "--magic",
                 "17",
             ])
-            .expect("CLI should parse Pandora's Box arguments");
-        let targets = Subnet::try_from("10.0.0.0/30")
-            .expect("subnet should parse")
-            .hosts();
+            .expect_err("password rotation must not be exposed in the first-release CLI");
 
-        let spec = mission_spec_from_matches(&matches, targets, "secret".to_string());
-
-        assert_eq!(spec.password_rotation_magic, Some(17));
+        assert!(error.to_string().contains("--magic"));
     }
 
     #[test]
@@ -196,11 +190,6 @@ fn build_cli() -> ClapCommand {
                 .default_value("Administrator")
                 .value_parser(value_parser!(String)),
         )
-        .arg(
-            carg!(--magic <VALUE> "Rotate the privileged account password using the embedded schema and this magic multiplier")
-                .required(false)
-                .value_parser(value_parser!(u32)),
-        )
 }
 
 fn mission_spec_from_matches(
@@ -237,7 +226,6 @@ fn mission_spec_from_matches(
             .expect("windows_user should have a default")
             .clone(),
         password,
-        password_rotation_magic: matches.get_one::<u32>("magic").copied(),
         dry_run: matches.get_flag("dry_run"),
         ..runtime::MissionSpec::default()
     }

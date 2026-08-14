@@ -22,14 +22,6 @@ pub enum ExecutionMode {
     /// * Validate administrative access
     Remote,
 
-    /// Credential and account security management
-    ///
-    /// # Tasks
-    /// * Change default passwords
-    /// * Create backup administrative accounts
-    /// * Disable unnecessary accounts
-    Credentials,
-
     /// System inventory and asset discovery
     ///
     /// # Tasks
@@ -111,7 +103,6 @@ impl ExecutionMode {
     pub fn description(&self) -> &'static str {
         match self {
             ExecutionMode::Remote => "Establishes initial system access and remote connections",
-            ExecutionMode::Credentials => "Manages system credentials and account security",
             ExecutionMode::Inventory => "Performs system inventory and asset discovery",
             ExecutionMode::Collector => "Collects runtime artifacts for Pandora integration",
             ExecutionMode::Update => "Handles system updates and patch management",
@@ -124,7 +115,6 @@ impl ExecutionMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             ExecutionMode::Remote => "REMOTE",
-            ExecutionMode::Credentials => "CREDS",
             ExecutionMode::Inventory => "INVEN",
             ExecutionMode::Collector => "COLLECT",
             ExecutionMode::Update => "UPDATE",

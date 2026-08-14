@@ -24,9 +24,6 @@ use sysinfo::SystemExt;
 
 #[cfg(feature = "legacy-modes")]
 use crate::modes::baseline::BaselineMode;
-#[cfg(feature = "credentials-mode")]
-use crate::modes::credentials::{default_privileged_user, CredentialsArgs, CredentialsMode};
-
 #[cfg(feature = "legacy-modes")]
 pub async fn run_baseline() -> ExecutionResult {
     let current_exe = std::env::current_exe().expect("Failed to get current executable path");
@@ -195,22 +192,6 @@ async fn run_collector_mode(output_dir: PathBuf) -> ExecutionResult {
     mode.execute(CollectorConfig { output_dir }).await
 }
 
-#[cfg(feature = "credentials-mode")]
-async fn run_credentials_mode(magic_value: u32, username: Option<String>) -> ExecutionResult {
-    let mode = CredentialsMode;
-    let username = username.unwrap_or_else(|| default_privileged_user().to_string());
-    info!(
-        "Starting credentials mode execution with magic value: {} for {}",
-        magic_value, username
-    );
-
-    mode.execute(CredentialsArgs {
-        magic: magic_value,
-        username,
-    })
-    .await
-}
-
 #[cfg(feature = "legacy-modes")]
 async fn run_baseline_mode() -> ExecutionResult {
     let mode = BaselineMode;
@@ -231,11 +212,10 @@ async fn run_update_mode() -> ExecutionResult {
 }
 
 #[cfg(feature = "legacy-modes")]
-async fn run_all_modes(output_dir: &Path, magic_value: u32) {
+async fn run_all_modes(output_dir: &Path) {
     info!("Starting execution of all modes");
 
     let results = [
-        run_credentials_mode(magic_value, None).await,
         run_inventory_mode(output_dir, false).await,
         run_update_mode().await,
         run_serve_mode(DEFAULT_SERVE_PORT).await,
@@ -295,32 +275,10 @@ fn build_cli() -> Command {
     #[cfg(feature = "legacy-modes")]
     {
         return cli
-            .subcommand(
-                Command::new("all").about("Run all modes sequentially").arg(
-                    arg!(-m --magic <VALUE> "Magic number for credentials")
-                        .required(true)
-                        .value_parser(value_parser!(u32)),
-                ),
-            )
+            .subcommand(Command::new("all").about("Run all legacy modes sequentially"))
             .subcommand(Command::new("update").about("Perform system updates"))
             .subcommand(Command::new("baseline").about("Perform OS-specific configurations"));
     }
-
-    #[cfg(feature = "credentials-mode")]
-    let cli = cli.subcommand(
-        Command::new("credentials")
-            .about("Manage system credentials")
-            .arg(
-                arg!(-m --magic <VALUE> "Magic number for credentials")
-                    .required(true)
-                    .value_parser(value_parser!(u32)),
-            )
-            .arg(
-                arg!(--username <USERNAME> "Privileged account to rotate")
-                    .required(false)
-                    .value_parser(value_parser!(String)),
-            ),
-    );
 
     cli
 }
@@ -352,12 +310,8 @@ async fn main() {
 
     match matches.subcommand() {
         #[cfg(feature = "legacy-modes")]
-        Some(("all", sub_matches)) => {
-            let magic_value = sub_matches
-                .get_one::<u32>("magic")
-                .copied()
-                .expect("Required argument");
-            run_all_modes(&output_dir, magic_value).await;
+        Some(("all", _)) => {
+            run_all_modes(&output_dir).await;
         }
         Some(("collector", _)) => {
             let result = run_collector_mode(output_dir.clone()).await;
@@ -378,19 +332,6 @@ async fn main() {
             let result = run_inventory_mode(&output_dir, use_hostname_for_output).await;
             if !result.success {
                 error!("Inventory mode failed: {}", result.message);
-                std::process::exit(1);
-            }
-        }
-        #[cfg(feature = "credentials-mode")]
-        Some(("credentials", sub_matches)) => {
-            let magic_value = sub_matches
-                .get_one::<u32>("magic")
-                .copied()
-                .expect("Required argument");
-            let username = sub_matches.get_one::<String>("username").cloned();
-            let result = run_credentials_mode(magic_value, username).await;
-            if !result.success {
-                error!("Credentials mode failed: {}", result.message);
                 std::process::exit(1);
             }
         }

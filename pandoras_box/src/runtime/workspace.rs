@@ -12,7 +12,6 @@ pub enum RemoteShell {
 pub struct RemoteWorkspace {
     pub shell: RemoteShell,
     pub collector_source_path: PathBuf,
-    pub credentials_username: String,
     pub staged_local_name: String,
     pub remote_temp_dir: String,
     pub remote_binary_path: String,
@@ -80,34 +79,6 @@ impl RemoteWorkspace {
     }
 
     #[must_use]
-    pub fn credentials_command(&self, magic: u32) -> String {
-        match self.shell {
-            RemoteShell::Posix => format!(
-                "{} credentials --magic {} --username {}",
-                self.remote_binary_path, magic, self.credentials_username
-            ),
-            RemoteShell::Cmd => format!(
-                r#"cmd.exe /C "{} credentials --magic {} --username {}""#,
-                self.remote_binary_path, magic, self.credentials_username,
-            ),
-        }
-    }
-
-    #[must_use]
-    pub fn credentials_cleanup_command(&self, magic: u32) -> String {
-        match self.shell {
-            RemoteShell::Posix => format!(
-                "sh -lc '\"{}\" credentials --magic {} --username {}; status=$?; rm -rf \"{}\"; exit $status'",
-                self.remote_binary_path, magic, self.credentials_username, self.remote_temp_dir,
-            ),
-            RemoteShell::Cmd => format!(
-                r#"cmd.exe /V:ON /C ""{}" credentials --magic {} --username {} & set PB_STATUS=!ERRORLEVEL! & if exist "{}" rmdir /S /Q "{}" & exit /B !PB_STATUS!""#,
-                self.remote_binary_path, magic, self.credentials_username, self.remote_temp_dir, self.remote_temp_dir,
-            ),
-        }
-    }
-
-    #[must_use]
     pub fn preview_command(&self) -> String {
         match self.shell {
             RemoteShell::Posix => "sh -lc 'uname -a && printf \"\\n\" && id'".to_string(),
@@ -160,7 +131,6 @@ pub fn remote_workspace(spec: &MissionSpec, plan: &HostPlan) -> RemoteWorkspace 
         return RemoteWorkspace {
             shell: RemoteShell::Cmd,
             collector_source_path: spec.chimera_windows_path.clone(),
-            credentials_username: spec.windows_username.clone(),
             staged_local_name: "chimera.exe".to_string(),
             remote_temp_dir,
             remote_binary_path,
@@ -178,7 +148,6 @@ pub fn remote_workspace(spec: &MissionSpec, plan: &HostPlan) -> RemoteWorkspace 
     RemoteWorkspace {
         shell: RemoteShell::Posix,
         collector_source_path: spec.chimera_unix_path.clone(),
-        credentials_username: spec.unix_username.clone(),
         staged_local_name: "chimera".to_string(),
         remote_temp_dir,
         remote_binary_path,
@@ -265,7 +234,6 @@ mod tests {
             RemoteWorkspace {
                 shell: RemoteShell::Posix,
                 collector_source_path: PathBuf::from("/tmp/chimera-local"),
-                credentials_username: "root".to_string(),
                 staged_local_name: "chimera".to_string(),
                 remote_temp_dir: "/tmp/pandoras_box/mission-123".to_string(),
                 remote_binary_path: "/tmp/pandoras_box/mission-123/chimera".to_string(),
@@ -282,14 +250,6 @@ mod tests {
         assert_eq!(
             workspace.serve_command(),
             "/tmp/pandoras_box/mission-123/chimera --output-root /tmp/pandoras_box/mission-123/output serve --port 44372"
-        );
-        assert_eq!(
-            workspace.credentials_command(17),
-            "/tmp/pandoras_box/mission-123/chimera credentials --magic 17 --username root"
-        );
-        assert_eq!(
-            workspace.credentials_cleanup_command(17),
-            r#"sh -lc '"/tmp/pandoras_box/mission-123/chimera" credentials --magic 17 --username root; status=$?; rm -rf "/tmp/pandoras_box/mission-123"; exit $status'"#
         );
         assert_eq!(
             workspace.ensure_directories_command(),
@@ -320,7 +280,6 @@ mod tests {
             RemoteWorkspace {
                 shell: RemoteShell::Cmd,
                 collector_source_path: PathBuf::from(r"C:\Temp\chimera-local.exe"),
-                credentials_username: "mitre".to_string(),
                 staged_local_name: "chimera.exe".to_string(),
                 remote_temp_dir: r"C:\Windows\Temp\pandoras_box\mission-123".to_string(),
                 remote_binary_path: r"C:\Windows\Temp\pandoras_box\mission-123\chimera.exe"
@@ -338,14 +297,6 @@ mod tests {
         assert_eq!(
             workspace.serve_command(),
             r#"cmd.exe /C "C:\Windows\Temp\pandoras_box\mission-123\chimera.exe --output-root C:\Windows\Temp\pandoras_box\mission-123\output serve --port 44372""#
-        );
-        assert_eq!(
-            workspace.credentials_command(17),
-            r#"cmd.exe /C "C:\Windows\Temp\pandoras_box\mission-123\chimera.exe credentials --magic 17 --username mitre""#
-        );
-        assert_eq!(
-            workspace.credentials_cleanup_command(17),
-            r#"cmd.exe /V:ON /C ""C:\Windows\Temp\pandoras_box\mission-123\chimera.exe" credentials --magic 17 --username mitre & set PB_STATUS=!ERRORLEVEL! & if exist "C:\Windows\Temp\pandoras_box\mission-123" rmdir /S /Q "C:\Windows\Temp\pandoras_box\mission-123" & exit /B !PB_STATUS!""#
         );
         assert_eq!(
             workspace.ensure_directories_command(),

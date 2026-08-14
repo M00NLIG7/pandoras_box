@@ -336,10 +336,8 @@ cargo build --release --bin pandoras_box
 ./target/release/pandoras_box --range 10.0.0.0/24 --password yourpass
 \`\`\`
 
-**Password Configuration:**
-- Default: \`Sudo!!UrM0m\`
-- Magic number: 62
-- Final password: \`Sudo!!UrM0m<last_ip_octet * 62>\`
+**Credential behavior:**
+- Privileged password rotation is intentionally unavailable in the first release.
 
 ---
 Built: $(date -u +"%Y-%m-%d %H:%M:%S UTC")

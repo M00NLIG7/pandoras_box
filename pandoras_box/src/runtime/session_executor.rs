@@ -18,9 +18,6 @@ pub enum SessionOperation {
         request: ExecRequest,
         local_path: PathBuf,
     },
-    CredentialsExec {
-        request: ExecRequest,
-    },
     CleanupCaptureExec {
         request: ExecRequest,
         local_path: PathBuf,
@@ -59,13 +56,6 @@ impl SessionOperation {
         Self::CaptureExec {
             request: ExecRequest::new(command),
             local_path: local_path.into(),
-        }
-    }
-
-    #[must_use]
-    pub fn credentials_exec(command: impl Into<String>) -> Self {
-        Self::CredentialsExec {
-            request: ExecRequest::new(command),
         }
     }
 
@@ -223,29 +213,6 @@ impl<F> SessionExecutor<F> {
                             plan,
                             phase,
                             capture_context(phase),
-                            err,
-                        );
-                    }
-                },
-                SessionOperation::CredentialsExec { request } => match session.exec(request.clone()).await
-                {
-                    Ok(response) => {
-                        if let Err(err) = validate_exec_response(request, &response) {
-                            let _ = session.cleanup().await;
-                            return terminal_phase_failure(
-                                plan,
-                                phase,
-                                "credentials_exec failed",
-                                err,
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        let _ = session.cleanup().await;
-                        return operation_transport_failure(
-                            plan,
-                            phase,
-                            "credentials_exec failed",
                             err,
                         );
                     }
@@ -410,7 +377,6 @@ impl SessionOperation {
         match self {
             Self::PutFile { .. } | Self::EnsureDir { .. } => FailurePhase::Stage,
             Self::GetFile { .. } => FailurePhase::Collect,
-            Self::CredentialsExec { .. } => FailurePhase::Credentials,
             Self::CleanupExec { .. } | Self::CleanupCaptureExec { .. } => FailurePhase::Cleanup,
             Self::Exec { .. } | Self::CaptureExec { .. } => FailurePhase::Execute,
         }
