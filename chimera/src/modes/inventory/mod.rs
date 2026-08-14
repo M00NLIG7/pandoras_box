@@ -3,8 +3,8 @@ mod platform;
 use super::ModeExecutor;
 use crate::error::{Error, Result};
 use crate::types::{
-    Container, ContainerNetwork, ContainerVolume, Disk, ExecutionMode, ExecutionResult, Host, User,
-    UserInfo,
+    Container, ContainerNetwork, ContainerVolume, Disk, ExecutionMode, ExecutionResult, Host,
+    InventorySection, InventorySectionError, User, UserInfo,
 };
 use crate::utils::CommandExecutor;
 use platform::conn_info;
@@ -13,6 +13,7 @@ use futures::future::join_all;
 use local_ip_address::local_ip;
 use log::{debug, error};
 use serde_json::{Map, Value};
+use std::net::{IpAddr, Ipv4Addr};
 use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt};
 
 pub struct InventoryMode {
@@ -24,18 +25,14 @@ impl ModeExecutor for InventoryMode {
     type ArgRequirement = super::Optional;
 
     async fn execute(&self, _args: Option<Self::Args>) -> ExecutionResult {
-        match self.fetch_inventory().await {
-            Ok(host) => ExecutionResult::new(
-                ExecutionMode::Inventory,
-                true,
-                serde_json::to_string(&host).unwrap(),
-            ),
-            Err(e) => {
-                error!("Failed to collect inventory: {}", e);
+        match self.collect_inventory_json().await {
+            Ok(inventory) => ExecutionResult::new(ExecutionMode::Inventory, true, inventory),
+            Err(error) => {
+                error!("Failed to collect inventory: {error}");
                 ExecutionResult::new(
                     ExecutionMode::Inventory,
                     false,
-                    format!("Inventory collection failed: {}", e),
+                    format!("Inventory collection failed: {error}"),
                 )
             }
         }
@@ -56,23 +53,77 @@ impl InventoryMode {
     }
 
     async fn fetch_inventory(&self) -> Result<Host> {
-        let (connections, open_ports) = conn_info().await;
+        let mut section_errors = Vec::new();
+        let (connections, open_ports, connection_errors) = conn_info().await;
+        extend_section_errors(
+            &mut section_errors,
+            InventorySection::Connections,
+            connection_errors,
+        );
+
+        let services = match platform::services().await {
+            Ok(services) => services,
+            Err(error) => {
+                section_errors.push(InventorySectionError::new(
+                    InventorySection::Services,
+                    error.to_string(),
+                ));
+                Vec::new()
+            }
+        };
+        let (shares, share_errors) = platform::shares();
+        extend_section_errors(&mut section_errors, InventorySection::Shares, share_errors);
+        let (containers, container_errors) = self.get_containers().await;
+        extend_section_errors(
+            &mut section_errors,
+            InventorySection::Containers,
+            container_errors,
+        );
+
+        let hostname = self.system.host_name().unwrap_or_default();
+        if hostname.is_empty() {
+            section_errors.push(InventorySectionError::new(
+                InventorySection::Identity,
+                "hostname was unavailable",
+            ));
+        }
+        let ip = match local_ip() {
+            Ok(ip) => ip,
+            Err(error) => {
+                section_errors.push(InventorySectionError::new(
+                    InventorySection::Identity,
+                    format!("primary IP address was unavailable: {error}"),
+                ));
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+            }
+        };
+        let cpu = match self.system.cpus().first() {
+            Some(cpu) => cpu.brand().to_string(),
+            None => {
+                section_errors.push(InventorySectionError::new(
+                    InventorySection::Identity,
+                    "CPU information was unavailable",
+                ));
+                String::new()
+            }
+        };
 
         Ok(Host {
-            hostname: self.system.host_name().unwrap_or_default(),
-            ip: local_ip().unwrap_or("0.0.0.0".parse().unwrap()).to_string(),
+            hostname,
+            ip: ip.to_string(),
             os: self.system.long_os_version().unwrap_or_default(),
-            cpu: self.system.cpus().first().unwrap().brand().into(),
-            cores: self.system.cpus().len() as u8,
+            cpu,
+            cores: u8::try_from(self.system.cpus().len()).unwrap_or(u8::MAX),
             memory: self.system.total_memory() / 1024 / 1024,
             disks: self.get_disks(),
-            network_adapters: String::from(""),
+            network_adapters: String::new(),
             ports: open_ports,
             connections,
-            services: platform::services().await,
+            services,
             users: self.get_users(),
-            shares: platform::shares(),
-            containers: self.get_containers().await,
+            shares,
+            containers,
+            section_errors,
         })
     }
 
@@ -81,11 +132,9 @@ impl InventoryMode {
             .disks()
             .iter()
             .map(|disk| Disk {
-                name: disk.name().to_str().unwrap().into(),
-                mount_point: disk.mount_point().to_str().unwrap().into(),
-                filesystem: String::from_utf8(disk.file_system().to_vec())
-                    .unwrap()
-                    .into(),
+                name: disk.name().to_string_lossy().into_owned(),
+                mount_point: disk.mount_point().to_string_lossy().into_owned(),
+                filesystem: String::from_utf8_lossy(disk.file_system()).into_owned(),
                 total_space: disk.total_space() / 1024 / 1024,
                 available_space: disk.available_space() / 1024 / 1024,
             })
@@ -108,36 +157,29 @@ impl InventoryMode {
             .collect()
     }
 
-    async fn get_containers(&self) -> Vec<Container> {
+    async fn get_containers(&self) -> (Vec<Container>, Vec<String>) {
         if cfg!(target_os = "windows") {
-            match self.get_generic_containers("docker.exe").await {
-                Ok(containers) => containers,
-                Err(e) => {
-                    error!("Failed to get Windows containers: {}", e);
-                    Vec::new()
-                }
-            }
+            self.get_generic_containers("docker.exe").await
         } else {
-            let commands = vec!["docker", "podman"];
-            let mut containers = Vec::new();
-
-            let kubes = self.get_kubernetes_containers().await;
-
-            containers.extend(match kubes {
-                Ok(kubes) => kubes,
-                Err(e) => {
-                    error!("Failed to get Kubernetes containers: {}", e);
-                    Vec::new()
+            let (kubernetes, docker, podman) = tokio::join!(
+                self.get_kubernetes_containers(),
+                self.get_generic_containers("docker"),
+                self.get_generic_containers("podman")
+            );
+            let (mut docker_containers, mut errors) = docker;
+            let (podman_containers, podman_errors) = podman;
+            docker_containers.extend(podman_containers);
+            errors.extend(podman_errors);
+            match kubernetes {
+                Ok(mut containers) => {
+                    containers.extend(docker_containers);
+                    (containers, errors)
                 }
-            });
-
-            for command in commands {
-                match self.get_generic_containers(command).await {
-                    Ok(generic_containers) => containers.extend(generic_containers),
-                    Err(e) => error!("Failed to get containers using {}: {}", command, e),
+                Err(error) => {
+                    errors.push(format!("Kubernetes inventory failed: {error}"));
+                    (docker_containers, errors)
                 }
             }
-            containers
         }
     }
 
@@ -159,43 +201,38 @@ impl InventoryMode {
             .collect())
     }
 
-    async fn get_generic_containers(&self, command: &str) -> Result<Vec<Container>> {
-        let container_ids = self.get_container_ids(command).await?;
+    async fn get_generic_containers(&self, command: &str) -> (Vec<Container>, Vec<String>) {
+        let container_ids = match self.get_container_ids(command).await {
+            Ok(container_ids) => container_ids,
+            Err(error) => {
+                return (
+                    Vec::new(),
+                    vec![format!("{command} inventory failed: {error}")],
+                );
+            }
+        };
         debug!("Found {} containers for {}", container_ids.len(), command);
 
-        let inspect_futures: Vec<_> = container_ids
-            .iter()
-            .map(|id| async move {
-                let inspect_result =
-                    CommandExecutor::execute_command(command, Some(&["inspect", id]), None).await;
+        let inspect_futures = container_ids.iter().map(|id| async move {
+            let output = CommandExecutor::execute_command(command, Some(&["inspect", id]), None)
+                .await
+                .map_err(|error| {
+                    Error::Execution(format!(
+                        "failed to inspect {command} container {id}: {error}"
+                    ))
+                })?;
+            self.generic_container(&String::from_utf8_lossy(&output.stdout))
+        });
 
-                match inspect_result {
-                    Ok(output) => {
-                        let inspect_str = String::from_utf8_lossy(&output.stdout);
-                        self.generic_container(&inspect_str)
-                    }
-                    Err(e) => {
-                        let err =
-                            Error::Execution(format!("Failed to inspect container {}: {}", id, e));
-                        error!("{}", err);
-                        Err(err)
-                    }
-                }
-            })
-            .collect();
-
-        let results = join_all(inspect_futures).await;
-
-        Ok(results
-            .into_iter()
-            .filter_map(|result| match result {
-                Ok(container) => Some(container),
-                Err(e) => {
-                    error!("{}", e);
-                    None
-                }
-            })
-            .collect())
+        let mut containers = Vec::new();
+        let mut errors = Vec::new();
+        for result in join_all(inspect_futures).await {
+            match result {
+                Ok(container) => containers.push(container),
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+        (containers, errors)
     }
 
     fn volumes_from_inspect(&self, mounts: &Option<&Vec<Value>>) -> Vec<ContainerVolume> {
@@ -410,7 +447,10 @@ impl InventoryMode {
             err
         })?;
 
-        let container_info = &json[0];
+        let container_info = json
+            .as_array()
+            .and_then(|containers| containers.first())
+            .ok_or_else(|| Error::Execution("container inspect response was empty".into()))?;
 
         Ok(Container {
             name: container_info["Name"].as_str().unwrap_or_default().into(),
@@ -425,8 +465,8 @@ impl InventoryMode {
             container_id: container_info["Id"].as_str().unwrap_or_default().into(),
             cmd: container_info["Config"]["Cmd"]
                 .as_array()
-                .unwrap_or(&vec!["".into()])[0]
-                .as_str()
+                .and_then(|command| command.first())
+                .and_then(Value::as_str)
                 .unwrap_or_default()
                 .into(),
             port_bindings: self
@@ -438,22 +478,44 @@ impl InventoryMode {
     }
 }
 
+fn extend_section_errors(
+    section_errors: &mut Vec<InventorySectionError>,
+    section: InventorySection,
+    messages: impl IntoIterator<Item = String>,
+) {
+    section_errors.extend(
+        messages
+            .into_iter()
+            .map(|message| InventorySectionError::new(section, message)),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_inventory_mode() {
+    #[test]
+    fn parses_container_fixture_without_panicking_on_empty_commands() {
         let mode = InventoryMode::new();
-        let result = mode.execute(None).await;
-        assert!(result.success);
+        let fixture = r#"[{
+            "Name": "fixture",
+            "Id": "abc123",
+            "Config": {"Image": "example:latest", "Cmd": []},
+            "State": {"Status": "running"},
+            "NetworkSettings": {"Ports": {}, "Networks": {}},
+            "Mounts": []
+        }]"#;
+
+        let container = mode
+            .generic_container(fixture)
+            .expect("fixture should parse");
+        assert_eq!(container.name, "fixture");
+        assert!(container.cmd.is_empty());
     }
 
-    #[tokio::test]
-    async fn test_cont() {
+    #[test]
+    fn rejects_an_empty_container_inspect_response() {
         let mode = InventoryMode::new();
-        let containers = mode.get_containers().await;
-        println!("{:?}", containers);
-        assert!(!containers.is_empty());
+        assert!(mode.generic_container("[]").is_err());
     }
 }

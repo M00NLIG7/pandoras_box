@@ -44,8 +44,12 @@ async fn collector_command_writes_inventory_and_application_log() {
         .await
         .expect("application.log should exist");
 
-    serde_json::from_str::<serde_json::Value>(&inventory)
+    let inventory: serde_json::Value = serde_json::from_str(&inventory)
         .expect("inventory.json should contain valid JSON");
+    assert!(
+        inventory["sectionErrors"].is_array(),
+        "partial collection failures must be represented structurally"
+    );
     assert!(
         !log.trim().is_empty(),
         "application.log should not be empty after collector run"

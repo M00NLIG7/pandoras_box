@@ -2,8 +2,6 @@ use crate::types::{ConnectionState, NetworkConnection, OpenPort, Process as Proc
 use procfs::net::{TcpNetEntry, TcpState, UdpNetEntry, UdpState};
 use procfs::process::{FDTarget, Stat};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
 
 macro_rules! impl_from_state {
     ($from_type:ty, $($variant:ident),* $(,)?) => {
@@ -44,7 +42,6 @@ fn is_localhost(ip: &str) -> bool {
 trait NetworkScanner {
     fn to_connection(&self, process_map: &HashMap<u64, Stat>) -> NetworkConnection;
     fn to_open_port(&self, process_map: &HashMap<u64, Stat>) -> Option<OpenPort>;
-    fn get_inode(&self) -> u64;
 }
 
 macro_rules! impl_network_scanner {
@@ -54,25 +51,22 @@ macro_rules! impl_network_scanner {
                 let (local_ip, local_port) = parse_address(&self.local_address.to_string());
                 let (remote_ip, remote_port) = parse_address(&self.remote_address.to_string());
 
-                let local_addr = format!(
+                let local_address = format!(
                     "{}:{}",
                     local_ip.unwrap_or_default(),
                     local_port.unwrap_or_default()
                 );
-                let remote_addr = if remote_ip.is_some() && remote_port.is_some() {
-                    Some(format!("{}:{}", remote_ip.unwrap(), remote_port.unwrap()))
-                } else {
-                    None
-                };
-
+                let remote_address = remote_ip
+                    .zip(remote_port)
+                    .map(|(ip, port)| format!("{ip}:{port}"));
                 let process = process_map.get(&self.inode).map(|stat| ProcessInfo {
-                    pid: stat.pid as u32,
+                    pid: u32::try_from(stat.pid).unwrap_or_default(),
                     name: stat.comm.clone(),
                 });
 
                 NetworkConnection {
-                    local_address: local_addr,
-                    remote_address: remote_addr,
+                    local_address,
+                    remote_address,
                     state: Some(ConnectionState::from(&self.state)),
                     protocol: format!("{}-{}", $protocol, $version),
                     process,
@@ -86,37 +80,29 @@ macro_rules! impl_network_scanner {
 
                 let (local_ip, port) = parse_address(&self.local_address.to_string());
                 let (remote_ip, _) = parse_address(&self.remote_address.to_string());
-
-                let port = port?;
-
+                let port = u16::try_from(port?).ok()?;
                 let is_public = match (local_ip.as_deref(), remote_ip.as_deref()) {
                     (Some(ip), _) if is_localhost(ip) => false,
-                    (Some("0.0.0.0"), _) | (Some("::"), _) => true,
-                    (_, Some("0.0.0.0")) | (_, Some("::")) => true,
+                    (Some("0.0.0.0" | "::"), _) => true,
+                    (_, Some("0.0.0.0" | "::")) => true,
                     (Some(_), _) => true,
                     _ => true,
                 };
-
                 if !is_public {
                     return None;
                 }
 
                 let process = process_map.get(&self.inode).map(|stat| ProcessInfo {
-                    pid: stat.pid as u32,
+                    pid: u32::try_from(stat.pid).unwrap_or_default(),
                     name: stat.comm.clone(),
                 });
-
                 Some(OpenPort {
-                    port: port as u16,
+                    port,
                     protocol: $protocol.to_string(),
                     process,
                     version: $version.to_string(),
                     state: Some(ConnectionState::from(&self.state)),
                 })
-            }
-
-            fn get_inode(&self) -> u64 {
-                self.inode
             }
         }
     };
@@ -125,154 +111,142 @@ macro_rules! impl_network_scanner {
 impl_network_scanner!(TcpNetEntry, "TCP", "IPv4");
 impl_network_scanner!(UdpNetEntry, "UDP", "IPv4");
 
-pub async fn conn_info() -> (Vec<NetworkConnection>, Vec<OpenPort>) {
-    let (tx, mut rx) = mpsc::channel(32);
-    let connections = Arc::new(Mutex::new(Vec::new()));
-    let open_ports = Arc::new(Mutex::new(Vec::new()));
-    let seen_ports = Arc::new(Mutex::new(HashSet::new()));
+pub async fn conn_info() -> (Vec<NetworkConnection>, Vec<OpenPort>, Vec<String>) {
+    let (process_map, mut errors) = build_process_map();
+    let mut connections = Vec::new();
+    let mut open_ports = Vec::new();
+    let mut seen_ports = HashSet::new();
 
-    let process_map = build_process_map();
-    let process_map = Arc::new(process_map);
-
-    let seen_ports_tcp = Arc::clone(&seen_ports);
-    let seen_ports_udp = Arc::clone(&seen_ports);
-    let seen_ports_tcp6 = Arc::clone(&seen_ports);
-    let seen_ports_udp6 = Arc::clone(&seen_ports);
-
-    let tcp_task = spawn_scanner::<_, TcpNetEntry>(
-        procfs::net::tcp as fn() -> Result<_, _>,
-        tx.clone(),
-        Arc::clone(&process_map),
-        seen_ports_tcp,
+    scan_entries(
+        "IPv4 TCP",
+        procfs::net::tcp(),
+        &process_map,
+        &mut connections,
+        &mut open_ports,
+        &mut seen_ports,
+        &mut errors,
+    );
+    scan_entries(
+        "IPv4 UDP",
+        procfs::net::udp(),
+        &process_map,
+        &mut connections,
+        &mut open_ports,
+        &mut seen_ports,
+        &mut errors,
+    );
+    scan_entries(
+        "IPv6 TCP",
+        procfs::net::tcp6(),
+        &process_map,
+        &mut connections,
+        &mut open_ports,
+        &mut seen_ports,
+        &mut errors,
+    );
+    scan_entries(
+        "IPv6 UDP",
+        procfs::net::udp6(),
+        &process_map,
+        &mut connections,
+        &mut open_ports,
+        &mut seen_ports,
+        &mut errors,
     );
 
-    let udp_task = spawn_scanner::<_, UdpNetEntry>(
-        procfs::net::udp as fn() -> Result<_, _>,
-        tx.clone(),
-        Arc::clone(&process_map),
-        seen_ports_udp,
-    );
+    open_ports.sort_by_key(|port| (port.port, port.protocol.clone()));
+    (connections, open_ports, errors)
+}
 
-    let tcp6_task = spawn_scanner::<_, TcpNetEntry>(
-        procfs::net::tcp6 as fn() -> Result<_, _>,
-        tx.clone(),
-        Arc::clone(&process_map),
-        seen_ports_tcp6,
-    );
-
-    let udp6_task = spawn_scanner::<_, UdpNetEntry>(
-        procfs::net::udp6 as fn() -> Result<_, _>,
-        tx.clone(),
-        Arc::clone(&process_map),
-        seen_ports_udp6,
-    );
-
-    drop(tx);
-
-    let connections_clone = Arc::clone(&connections);
-    let open_ports_clone = Arc::clone(&open_ports);
-
-    let collector = tokio::spawn(async move {
-        while let Some((conn, port)) = rx.recv().await {
-            if let Some(conn) = conn {
-                connections_clone.lock().await.push(conn);
-            }
-            if let Some(port) = port {
-                open_ports_clone.lock().await.push(port);
-            }
+#[allow(clippy::too_many_arguments)]
+fn scan_entries<T: NetworkScanner>(
+    description: &str,
+    entries: Result<Vec<T>, procfs::ProcError>,
+    process_map: &HashMap<u64, Stat>,
+    connections: &mut Vec<NetworkConnection>,
+    open_ports: &mut Vec<OpenPort>,
+    seen_ports: &mut HashSet<(u16, String)>,
+    errors: &mut Vec<String>,
+) {
+    let entries = match entries {
+        Ok(entries) => entries,
+        Err(error) => {
+            errors.push(format!("{description} socket inventory failed: {error}"));
+            return;
         }
-    });
-
-    let _ = tokio::join!(tcp_task, udp_task, tcp6_task, udp6_task);
-    let _ = collector.await;
-
-    let connections = Arc::try_unwrap(connections).unwrap().into_inner();
-    let mut open_ports = Arc::try_unwrap(open_ports).unwrap().into_inner();
-
-    open_ports.sort_by_key(|p| (p.port, p.protocol.clone()));
-    open_ports.dedup_by_key(|p| (p.port, p.protocol.clone()));
-
-    (connections, open_ports)
-}
-
-async fn spawn_scanner<F, T>(
-    fetch_entries: F,
-    tx: mpsc::Sender<(Option<NetworkConnection>, Option<OpenPort>)>,
-    process_map: Arc<HashMap<u64, Stat>>,
-    seen_ports: Arc<Mutex<HashSet<(u16, String)>>>,
-) -> tokio::task::JoinHandle<()>
-where
-    F: Fn() -> Result<Vec<T>, procfs::ProcError> + Send + Sync + 'static,
-    T: NetworkScanner + Send + 'static,
-{
-    tokio::spawn(async move {
-        if let Ok(entries) = fetch_entries() {
-            for entry in entries {
-                let conn = entry.to_connection(&process_map);
-
-                let port = if let Some(p) = entry.to_open_port(&process_map) {
-                    let key = (p.port, p.protocol.clone());
-                    let mut seen = seen_ports.lock().await;
-                    if seen.insert(key) {
-                        Some(p)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                let _ = tx.send((Some(conn), port)).await;
-            }
-        }
-    })
-}
-
-fn build_process_map() -> HashMap<u64, Stat> {
-    let mut map = HashMap::new();
-
-    if let Ok(all_procs) = procfs::process::all_processes() {
-        for proc_result in all_procs {
-            if let Ok(process) = proc_result {
-                if let (Ok(stat), Ok(fds)) = (process.stat(), process.fd()) {
-                    for fd in fds.filter_map(Result::ok) {
-                        if let FDTarget::Socket(inode) = fd.target {
-                            map.insert(inode, stat.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    map
-}
-
-fn parse_address(addr: &str) -> (Option<String>, Option<i32>) {
-    if addr.contains('[') {
-        parse_ipv6_address(addr)
-    } else {
-        parse_ipv4_address(addr)
-    }
-}
-
-fn parse_ipv6_address(addr: &str) -> (Option<String>, Option<i32>) {
-    let mut parts = match addr.strip_prefix("[") {
-        Some(addr) => addr.split("]:"),
-        None => return (None, None),
     };
 
-    let ip = parts.next().map(String::from);
-    let port = parts.next().and_then(|p| p.parse().ok());
+    for entry in entries {
+        connections.push(entry.to_connection(process_map));
+        if let Some(port) = entry.to_open_port(process_map) {
+            let key = (port.port, port.protocol.clone());
+            if seen_ports.insert(key) {
+                open_ports.push(port);
+            }
+        }
+    }
+}
 
+fn build_process_map() -> (HashMap<u64, Stat>, Vec<String>) {
+    let mut map = HashMap::new();
+    let mut errors = Vec::new();
+    let processes = match procfs::process::all_processes() {
+        Ok(processes) => processes,
+        Err(error) => {
+            errors.push(format!(
+                "process socket ownership inventory failed: {error}"
+            ));
+            return (map, errors);
+        }
+    };
+
+    let mut inaccessible = 0usize;
+    for process in processes {
+        let Ok(process) = process else {
+            inaccessible += 1;
+            continue;
+        };
+        let (Ok(stat), Ok(file_descriptors)) = (process.stat(), process.fd()) else {
+            inaccessible += 1;
+            continue;
+        };
+        for descriptor in file_descriptors.filter_map(Result::ok) {
+            if let FDTarget::Socket(inode) = descriptor.target {
+                map.insert(inode, stat.clone());
+            }
+        }
+    }
+    if inaccessible > 0 {
+        errors.push(format!(
+            "process ownership was unavailable for {inaccessible} processes"
+        ));
+    }
+
+    (map, errors)
+}
+
+fn parse_address(address: &str) -> (Option<String>, Option<i32>) {
+    if address.contains('[') {
+        parse_ipv6_address(address)
+    } else {
+        parse_ipv4_address(address)
+    }
+}
+
+fn parse_ipv6_address(address: &str) -> (Option<String>, Option<i32>) {
+    let mut parts = match address.strip_prefix('[') {
+        Some(address) => address.split("]:"),
+        None => return (None, None),
+    };
+    let ip = parts.next().map(String::from);
+    let port = parts.next().and_then(|port| port.parse().ok());
     (ip, port)
 }
 
-fn parse_ipv4_address(addr: &str) -> (Option<String>, Option<i32>) {
-    let mut parts = addr.split(':');
+fn parse_ipv4_address(address: &str) -> (Option<String>, Option<i32>) {
+    let mut parts = address.split(':');
     let ip = parts.next().map(String::from);
-    let port = parts.next().and_then(|p| p.parse().ok());
-
+    let port = parts.next().and_then(|port| port.parse().ok());
     (ip, port)
 }
 
@@ -280,10 +254,19 @@ fn parse_ipv4_address(addr: &str) -> (Option<String>, Option<i32>) {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_conn_info() {
-        let (connections, open_ports) = conn_info().await;
-        println!("Connections: {:#?}", connections);
-        println!("Open ports: {:#?}", open_ports);
+    #[test]
+    fn parses_ipv4_and_ipv6_socket_addresses() {
+        assert_eq!(
+            parse_address("192.0.2.4:443"),
+            (Some("192.0.2.4".to_string()), Some(443))
+        );
+        assert_eq!(
+            parse_address("[2001:db8::1]:22"),
+            (Some("2001:db8::1".to_string()), Some(22))
+        );
+        assert_eq!(
+            parse_address("invalid"),
+            (Some("invalid".to_string()), None)
+        );
     }
 }

@@ -130,15 +130,22 @@ pub fn read_nfs_shares() -> io::Result<Vec<Share>> {
     parse_nfs_shares(BufReader::new(file), Path::is_dir)
 }
 
-pub fn shares() -> Vec<Share> {
+pub fn shares() -> (Vec<Share>, Vec<String>) {
     let mut shares = Vec::new();
-    if let Ok(smb_shares) = read_smb_shares() {
-        shares.extend(smb_shares);
+    let mut errors = Vec::new();
+
+    match read_smb_shares() {
+        Ok(smb_shares) => shares.extend(smb_shares),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => errors.push(format!("SMB share inventory failed: {error}")),
     }
-    if let Ok(nfs_shares) = read_nfs_shares() {
-        shares.extend(nfs_shares);
+    match read_nfs_shares() {
+        Ok(nfs_shares) => shares.extend(nfs_shares),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => errors.push(format!("NFS share inventory failed: {error}")),
     }
-    shares
+
+    (shares, errors)
 }
 
 #[cfg(test)]

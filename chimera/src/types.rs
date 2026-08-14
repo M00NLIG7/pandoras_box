@@ -374,6 +374,34 @@ pub trait ServerFeatures {
     fn server_features() -> Vec<String>;
 }
 
+/// Inventory sections that can be partially unavailable.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum InventorySection {
+    Identity,
+    Connections,
+    Services,
+    Shares,
+    Containers,
+}
+
+/// A machine-readable explanation for an incomplete inventory section.
+#[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InventorySectionError {
+    pub(crate) section: InventorySection,
+    pub(crate) message: String,
+}
+
+impl InventorySectionError {
+    pub(crate) fn new(section: InventorySection, message: impl Into<String>) -> Self {
+        Self {
+            section,
+            message: message.into(),
+        }
+    }
+}
+
 /// Comprehensive system information.
 ///
 /// Contains all queryable information about the host system
@@ -409,11 +437,8 @@ pub struct Host {
     pub(crate) shares: Vec<Share>,
     /// Container configurations
     pub(crate) containers: Vec<Container>,
-    /*
-    /// Windows server features
-    #[cfg(target_os = "windows")]
-    pub(crate) server_features: Vec<String>,
-    */
+    /// Collection failures that left one or more sections incomplete
+    pub(crate) section_errors: Vec<InventorySectionError>,
 }
 
 /// Interface for user information operations.
@@ -431,11 +456,4 @@ pub trait UserInfo {
     /// * `true` if user is a local account
     /// * `false` if domain account
     fn is_local(&self) -> bool;
-
-    /// Gets the user's login shell.
-    ///
-    /// # Returns
-    /// * The path to the user's login shell
-    #[cfg(target_os = "linux")]
-    fn shell(&self) -> String;
 }

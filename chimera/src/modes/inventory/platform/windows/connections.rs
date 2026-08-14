@@ -2,7 +2,6 @@ use crate::types::{ConnectionState, NetworkConnection, OpenPort, Process};
 use netstat::*;
 use std::collections::{HashMap, HashSet};
 use sysinfo::{ProcessExt, System, SystemExt};
-use wmi::COMLibrary;
 
 impl From<TcpState> for ConnectionState {
     fn from(tcp_state: TcpState) -> Self {
@@ -23,15 +22,24 @@ impl From<TcpState> for ConnectionState {
     }
 }
 
-pub async fn conn_info() -> (Vec<NetworkConnection>, Vec<OpenPort>) {
+pub async fn conn_info() -> (Vec<NetworkConnection>, Vec<OpenPort>, Vec<String>) {
     let sys = System::new_all();
     let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
     let proto_flags = ProtocolFlags::TCP | ProtocolFlags::UDP;
-    let iterator =
-        iterate_sockets_info(af_flags, proto_flags).expect("Failed to get socket information!");
+    let iterator = match iterate_sockets_info(af_flags, proto_flags) {
+        Ok(iterator) => iterator,
+        Err(error) => {
+            return (
+                Vec::new(),
+                Vec::new(),
+                vec![format!("socket inventory failed: {error}")],
+            );
+        }
+    };
 
     let mut sockets: Vec<NetworkConnection> = Vec::new();
     let mut open_ports_set: HashSet<OpenPort> = HashSet::new();
+    let mut errors = Vec::new();
 
     // Preprocess all_processes into a HashMap for O(1) access time
     let all_processes = process_info(&sys)
@@ -46,8 +54,8 @@ pub async fn conn_info() -> (Vec<NetworkConnection>, Vec<OpenPort>) {
     for info in iterator {
         let si = match info {
             Ok(si) => si,
-            Err(_err) => {
-                println!("Failed to get info for socket!");
+            Err(error) => {
+                errors.push(format!("individual socket inventory failed: {error}"));
                 continue;
             }
         };
@@ -100,7 +108,11 @@ pub async fn conn_info() -> (Vec<NetworkConnection>, Vec<OpenPort>) {
             }
         }
     }
-    (sockets, open_ports_set.into_iter().collect::<Vec<_>>())
+    (
+        sockets,
+        open_ports_set.into_iter().collect::<Vec<_>>(),
+        errors,
+    )
 }
 
 fn process_info(sys: &System) -> std::vec::Vec<Process> {
@@ -109,11 +121,12 @@ fn process_info(sys: &System) -> std::vec::Vec<Process> {
     let mut process_dump = vec![];
 
     for (pid, process_data) in processes {
-        let value = Process {
-            pid: pid.to_string().parse::<u32>().unwrap(),
-            name: process_data.name().to_string(),
-        };
-        process_dump.push(value);
+        if let Ok(pid) = pid.to_string().parse::<u32>() {
+            process_dump.push(Process {
+                pid,
+                name: process_data.name().to_string(),
+            });
+        }
     }
-    return process_dump;
+    process_dump
 }

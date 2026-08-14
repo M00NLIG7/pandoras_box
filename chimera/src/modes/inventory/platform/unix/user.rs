@@ -10,10 +10,4 @@ impl UserInfo for User {
     fn is_local(&self) -> bool {
         true
     }
-
-    #[cfg(target_os = "linux")]
-    fn shell(&self) -> String {
-        todo!()
-        // self.shell().into()
-    }
 }
