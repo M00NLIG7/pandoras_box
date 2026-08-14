@@ -1,78 +1,124 @@
 use crate::types::{Share, ShareType};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
+use std::path::Path;
 
-pub fn read_smb_shares() -> io::Result<Vec<Share>> {
-    let config_paths = [
-        "/etc/samba/smb.conf",
-        "/usr/local/samba/lib/smb.conf",
-        "/usr/local/etc/smb.conf",
-        "/opt/samba/etc/smb.conf",
-    ];
+const SMB_CONFIG_PATHS: &[&str] = &[
+    "/etc/samba/smb.conf",
+    "/usr/local/samba/lib/smb.conf",
+    "/usr/local/etc/smb.conf",
+    "/opt/samba/etc/smb.conf",
+];
+const NFS_EXPORT_PATHS: &[&str] = &[
+    "/etc/exports",
+    "/usr/local/etc/exports",
+    "/etc/nfs.conf/exports",
+];
 
-    // Try each possible config location
-    let mut config_file = None;
-    for path in config_paths {
-        if let Ok(file) = File::open(path) {
-            config_file = Some(file);
-            break;
+fn open_first(paths: &[&str], description: &str) -> io::Result<File> {
+    let mut first_error = None;
+
+    for path in paths {
+        match File::open(path) {
+            Ok(file) => return Ok(file),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                first_error.get_or_insert_with(|| {
+                    io::Error::new(error.kind(), format!("failed to open {path}: {error}"))
+                });
+            }
         }
     }
 
-    let file = config_file.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "SMB configuration file not found")
-    })?;
+    Err(first_error.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, description)))
+}
 
-    let reader = BufReader::new(file);
+fn push_smb_share(
+    shares: &mut Vec<Share>,
+    current_share: &mut Option<String>,
+    has_path: &mut bool,
+) {
+    if *has_path {
+        if let Some(share_name) = current_share.take() {
+            shares.push(Share {
+                share_type: ShareType::SMB,
+                network_path: format!("//localhost/{share_name}"),
+            });
+        }
+    } else {
+        current_share.take();
+    }
+    *has_path = false;
+}
+
+fn parse_smb_shares(reader: impl BufRead) -> io::Result<Vec<Share>> {
     let mut shares = Vec::new();
-    let mut current_share: Option<String> = None;
-    let mut current_path: Option<String> = None;
+    let mut current_share = None;
+    let mut has_path = false;
 
     for line in reader.lines() {
         let line = line?;
         let trimmed = line.trim();
 
-        // Skip comments and empty lines
         if trimmed.starts_with('#') || trimmed.starts_with(';') || trimmed.is_empty() {
             continue;
         }
 
-        // Check for share definition
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            // Save previous share if it exists and has a path
-            if let (Some(share_name), Some(path)) = (current_share.take(), current_path.take()) {
-                shares.push(Share {
-                    share_type: ShareType::SMB,
-                    network_path: format!("//{}/{}", "localhost", share_name),
-                });
-            }
-
-            let share_name = trimmed[1..trimmed.len() - 1].to_string();
-            // Skip [global] and [printers] sections
-            if share_name != "global" && share_name != "printers" {
-                current_share = Some(share_name);
+        if let Some(section) = trimmed
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            push_smb_share(&mut shares, &mut current_share, &mut has_path);
+            if !section.eq_ignore_ascii_case("global") && !section.eq_ignore_ascii_case("printers")
+            {
+                current_share = Some(section.to_string());
             }
             continue;
         }
 
-        // Parse path for current share
         if current_share.is_some() {
             if let Some((key, value)) = trimmed.split_once('=') {
-                let key = key.trim().to_lowercase();
-                let value = value.trim();
-
-                if key == "path" {
-                    current_path = Some(value.to_string());
+                if key.trim().eq_ignore_ascii_case("path") {
+                    has_path = !value.trim().is_empty();
                 }
             }
         }
     }
 
-    // Don't forget to add the last share
-    if let (Some(share_name), Some(_)) = (current_share, current_path) {
+    push_smb_share(&mut shares, &mut current_share, &mut has_path);
+    Ok(shares)
+}
+
+pub fn read_smb_shares() -> io::Result<Vec<Share>> {
+    let file = open_first(SMB_CONFIG_PATHS, "SMB configuration file not found")?;
+    parse_smb_shares(BufReader::new(file))
+}
+
+fn parse_nfs_shares(
+    reader: impl BufRead,
+    is_directory: impl Fn(&Path) -> bool,
+) -> io::Result<Vec<Share>> {
+    let mut shares = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let Some(raw_path) = trimmed.split_whitespace().next() else {
+            continue;
+        };
+        let clean_path = raw_path.trim_matches(['"', '\'']);
+        let path = Path::new(clean_path);
+        if !path.is_absolute() || clean_path.contains('*') || !is_directory(path) {
+            continue;
+        }
+
         shares.push(Share {
-            share_type: ShareType::SMB,
-            network_path: format!("//{}/{}", "localhost", share_name),
+            share_type: ShareType::NFS,
+            network_path: format!("nfs://localhost{clean_path}"),
         });
     }
 
@@ -80,65 +126,8 @@ pub fn read_smb_shares() -> io::Result<Vec<Share>> {
 }
 
 pub fn read_nfs_shares() -> io::Result<Vec<Share>> {
-    let export_paths = [
-        "/etc/exports",
-        "/usr/local/etc/exports",
-        "/etc/nfs.conf/exports",
-    ];
-
-    // Try each possible exports location
-    let mut exports_file = None;
-    for path in export_paths {
-        if let Ok(file) = File::open(path) {
-            exports_file = Some(file);
-            break;
-        }
-    }
-
-    let file = exports_file
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "NFS exports file not found"))?;
-
-    let reader = BufReader::new(file);
-    let mut shares = Vec::new();
-
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim();
-
-        // Skip comments and empty lines
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        // Split the line into path and clients/options
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
-        }
-
-        let path = parts[0];
-
-        // Skip non-absolute paths and invalid entries
-        if !path.starts_with('/') || path.contains('*') {
-            continue;
-        }
-
-        // Clean the path (remove any quotes if present)
-        let clean_path = path.trim_matches('"').trim_matches('\'');
-
-        // Verify path exists
-        if let Ok(metadata) = std::fs::metadata(clean_path) {
-            if metadata.is_dir() {
-                shares.push(Share {
-                    share_type: ShareType::NFS,
-                    // Format as nfs://hostname/path
-                    network_path: format!("nfs://localhost{}", clean_path),
-                });
-            }
-        }
-    }
-
-    Ok(shares)
+    let file = open_first(NFS_EXPORT_PATHS, "NFS exports file not found")?;
+    parse_nfs_shares(BufReader::new(file), Path::is_dir)
 }
 
 pub fn shares() -> Vec<Share> {
@@ -155,22 +144,52 @@ pub fn shares() -> Vec<Share> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+    use tempfile::tempdir;
 
-    #[tokio::test]
-    async fn test_read_smb_shares() {
-        let shares = read_smb_shares().unwrap();
-        assert!(!shares.is_empty());
-        for share in shares {
-            println!("{:?}", share);
-        }
+    #[test]
+    fn parses_smb_shares_from_a_fixture() {
+        let fixture = r#"
+            [global]
+            workgroup = WORKGROUP
+
+            [documents]
+            path = /srv/documents
+
+            [missing-path]
+            read only = yes
+
+            [printers]
+            path = /var/spool/samba
+
+            [backups]
+            PATH = /srv/backups
+        "#;
+
+        let shares = parse_smb_shares(Cursor::new(fixture)).expect("fixture should parse");
+        assert_eq!(shares.len(), 2);
+        assert_eq!(shares[0].network_path, "//localhost/documents");
+        assert_eq!(shares[1].network_path, "//localhost/backups");
     }
 
-    #[tokio::test]
-    async fn test_read_nfs_shares() {
-        let shares = read_nfs_shares().unwrap();
-        assert!(!shares.is_empty());
-        for share in shares {
-            println!("{:?}", share);
-        }
+    #[test]
+    fn parses_nfs_shares_from_a_fixture() {
+        let root = tempdir().expect("tempdir should be created");
+        let exported = root.path().join("exported");
+        std::fs::create_dir(&exported).expect("export fixture should be created");
+        let missing = root.path().join("missing");
+        let fixture = format!(
+            "# exports fixture\n\"{}\" *(ro)\n{} *(rw)\nrelative *(rw)\n",
+            exported.display(),
+            missing.display()
+        );
+
+        let shares =
+            parse_nfs_shares(Cursor::new(fixture), Path::is_dir).expect("fixture should parse");
+        assert_eq!(shares.len(), 1);
+        assert_eq!(
+            shares[0].network_path,
+            format!("nfs://localhost{}", exported.display())
+        );
     }
 }
