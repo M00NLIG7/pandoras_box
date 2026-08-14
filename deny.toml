@@ -1,0 +1,17 @@
+[graph]
+targets = [
+    "x86_64-unknown-linux-musl",
+    "i686-pc-windows-gnu",
+]
+all-features = false
+
+[advisories]
+unmaintained = "workspace"
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/M00NLIG7/smolder.git",
+]
