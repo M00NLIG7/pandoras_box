@@ -43,10 +43,12 @@ Cargo must resolve Smolder from the exact public Git revision. A local path over
 ```sh
 cargo fmt --all -- --check
 cargo clippy --locked --offline --workspace --all-targets -- -D warnings
+cross clippy --locked --offline --workspace --all-targets \
+  --target x86_64-unknown-linux-musl -- -D warnings
 cargo test --locked --offline --workspace
 cargo test --locked --offline -p rustrc --doc
-cargo check --locked --offline --workspace --all-targets \
-  --target i686-pc-windows-gnu
+cargo clippy --locked --offline --workspace --all-targets \
+  --target i686-pc-windows-gnu -- -D warnings
 ```
 
 The Windows command is a source compile-check only. It is not a live gate and does not make Windows a release target.
