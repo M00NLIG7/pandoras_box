@@ -97,11 +97,11 @@ if [[ -z "$CHIMERA_PATH" ]]; then
     CARGO_TARGET_DIR="$WINDOWS_BUILD_TARGET_DIR" \
       CC_x86_64_pc_windows_gnu="$windows_linker" \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$windows_linker" \
-      cargo build -j 1 -p chimera --bin chimera --target x86_64-pc-windows-gnu
+      cargo build --locked -j 1 -p chimera --bin chimera --target x86_64-pc-windows-gnu
   else
     require_command cross
     CARGO_TARGET_DIR="$WINDOWS_BUILD_TARGET_DIR" \
-      cross build -j 1 -p chimera --bin chimera --target x86_64-pc-windows-gnu
+      cross build --locked -j 1 -p chimera --bin chimera --target x86_64-pc-windows-gnu
   fi
   CHIMERA_PATH="$WINDOWS_BUILD_TARGET_DIR/x86_64-pc-windows-gnu/debug/chimera.exe"
 fi
@@ -123,7 +123,7 @@ export PANDORAS_BOX_LIVE_WINDOWS_SMB_PASSWORD="$WINDOWS_PASSWORD"
 export PANDORAS_BOX_LIVE_WINDOWS_SMB_EXEC_MODE="$SMB_EXEC_MODE"
 export PANDORAS_BOX_LIVE_WINDOWS_SMB_ARTIFACT_ROOT="$ARTIFACT_ROOT"
 export PANDORAS_BOX_LIVE_CHIMERA_WINDOWS_PATH="$CHIMERA_PATH"
-cargo test -p pandoras_box \
+cargo test --locked -p pandoras_box \
   --test live_windows_smb \
   live_windows_smb_target_collects_inventory_and_cleans_up \
   -- --ignored --nocapture

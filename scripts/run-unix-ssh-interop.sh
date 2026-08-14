@@ -6,17 +6,19 @@ IMAGE_NAME="pandoras-box-unix-ssh-interop:local"
 CONTAINER_NAME="pandoras-box-unix-ssh-interop-target"
 NETWORK_NAME="pandoras-box-unix-ssh-interop-network"
 RUNNER_TARGET_VOLUME="pandoras-box-unix-ssh-interop-runner-target"
-RUNNER_IMAGE="rust:1.94-bookworm"
-CHIMERA_TARGET="$ROOT_DIR/target/x86_64-unknown-linux-gnu/debug/chimera"
+RUNNER_IMAGE="rust:1.94-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55"
 DOCKERFILE_DIR="$ROOT_DIR/pandoras_box/tests/fixtures/unix_ssh_target"
 HOST_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 LIVE_ARTIFACT_DIR="/workspace/target/live-unix-ssh-artifacts/$(date +%s%N)"
 KNOWN_HOSTS_DIR="$ROOT_DIR/target/live-unix-known-hosts-$$"
+PASSWORD_FILE="$ROOT_DIR/target/live-unix-password-$$"
+CHIMERA_TARGET="${PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH:-}"
 
 cleanup() {
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
     docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
     rm -rf "$KNOWN_HOSTS_DIR"
+    rm -f "$PASSWORD_FILE"
 }
 
 show_logs_on_failure() {
@@ -27,13 +29,49 @@ show_logs_on_failure() {
     exit $exit_code
 }
 
+require_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        printf '%s is required for the Unix SSH interop harness\n' "$1" >&2
+        exit 1
+    fi
+}
+
 trap cleanup EXIT
 trap show_logs_on_failure ERR
 
 cd "$ROOT_DIR"
+require_command docker
+mkdir -p "$ROOT_DIR/target" "$HOST_CARGO_HOME/registry" "$HOST_CARGO_HOME/git"
+umask 077
+if [[ -n "${PANDORAS_BOX_LIVE_UNIX_SSH_PASSWORD:-}" ]]; then
+    printf '%s' "$PANDORAS_BOX_LIVE_UNIX_SSH_PASSWORD" > "$PASSWORD_FILE"
+else
+    printf 'pbx-%s' "$(od -An -N18 -tx1 /dev/urandom | tr -d ' \n')" > "$PASSWORD_FILE"
+fi
+PANDORAS_BOX_LIVE_UNIX_SSH_PASSWORD="$(<"$PASSWORD_FILE")"
+export PANDORAS_BOX_LIVE_UNIX_SSH_PASSWORD
 
-cross build -j 1 -p chimera --bin chimera --target x86_64-unknown-linux-gnu
-docker build --platform linux/amd64 -t "$IMAGE_NAME" "$DOCKERFILE_DIR"
+if [[ -z "$CHIMERA_TARGET" ]]; then
+    require_command cross
+    cross build --locked -j 1 -p chimera --bin chimera --target x86_64-unknown-linux-gnu
+    CHIMERA_TARGET="$ROOT_DIR/target/x86_64-unknown-linux-gnu/debug/chimera"
+elif [[ "$CHIMERA_TARGET" != /* ]]; then
+    CHIMERA_TARGET="$ROOT_DIR/$CHIMERA_TARGET"
+fi
+if [[ ! -f "$CHIMERA_TARGET" ]]; then
+    printf 'Linux Chimera binary not found at %s\n' "$CHIMERA_TARGET" >&2
+    exit 1
+fi
+case "$CHIMERA_TARGET" in
+    "$ROOT_DIR"/*) ;;
+    *)
+        printf 'Linux Chimera binary must be inside %s for the containerized harness\n' "$ROOT_DIR" >&2
+        exit 1
+        ;;
+esac
+
+docker build --platform linux/amd64 --secret "id=root_password,src=$PASSWORD_FILE" \
+    -t "$IMAGE_NAME" "$DOCKERFILE_DIR"
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 docker network create "$NETWORK_NAME" >/dev/null
@@ -51,6 +89,9 @@ docker exec "$CONTAINER_NAME" cat /etc/ssh/ssh_host_ed25519_key.pub \
 chmod 700 "$KNOWN_HOSTS_DIR"
 chmod 600 "$KNOWN_HOSTS_DIR/known_hosts"
 
+PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH="/workspace/${CHIMERA_TARGET#"$ROOT_DIR/"}"
+export PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH
+
 docker run --rm \
     --network "$NETWORK_NAME" \
     -v "$ROOT_DIR:/workspace" \
@@ -66,9 +107,9 @@ docker run --rm \
     -e PANDORAS_BOX_LIVE_ARTIFACT_ROOT="$LIVE_ARTIFACT_DIR" \
     -e RUSTFLAGS="-C debuginfo=0" \
     -e RUST_BACKTRACE=1 \
-    -e PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH="/workspace/target/x86_64-unknown-linux-gnu/debug/chimera" \
+    -e PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH \
     -e PANDORAS_BOX_LIVE_UNIX_SSH_HOST="$TARGET_IP" \
-    -e PANDORAS_BOX_LIVE_UNIX_SSH_PORT="22" \
-    -e PANDORAS_BOX_LIVE_UNIX_SSH_PASSWORD="secret" \
+    -e PANDORAS_BOX_LIVE_UNIX_SSH_PORT=22 \
+    -e PANDORAS_BOX_LIVE_UNIX_SSH_PASSWORD \
     "$RUNNER_IMAGE" \
     bash -lc '/usr/local/cargo/bin/cargo test -j 1 --locked --offline -p pandoras_box --test live_unix_ssh live_unix_ssh_target_collects_inventory_and_cleans_up -- --ignored --nocapture'

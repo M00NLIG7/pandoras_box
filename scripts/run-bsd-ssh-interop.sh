@@ -47,7 +47,7 @@ require_non_empty PANDORAS_BOX_LIVE_BSD_SSH_PASSWORD "$BSD_PASSWORD"
 if [[ -z "$CHIMERA_PATH" ]]; then
   require_command cross
   CARGO_TARGET_DIR="$BSD_BUILD_TARGET_DIR" \
-    cross build -j 1 -p chimera --bin chimera --target "$BSD_TARGET" --release
+    cross build --locked -j 1 -p chimera --bin chimera --target "$BSD_TARGET" --release
   CHIMERA_PATH="$BSD_BUILD_TARGET_DIR/$BSD_TARGET/release/chimera"
 fi
 

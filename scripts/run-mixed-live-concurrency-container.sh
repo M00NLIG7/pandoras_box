@@ -11,7 +11,7 @@ UNIX_DOCKERFILE_DIR="$ROOT_DIR/pandoras_box/tests/fixtures/unix_ssh_target"
 ALPINE_DOCKERFILE_DIR="$ROOT_DIR/pandoras_box/tests/fixtures/alpine_ssh_target"
 LIVE_ARTIFACT_DIR="$ROOT_DIR/target/live-mixed-concurrency-artifacts/$(date +%s%N)"
 NETWORK_NAME="pandoras-box-mixed-live-$(date +%s%N)"
-MIXED_PASSWORD="${PANDORAS_BOX_LIVE_MIXED_PASSWORD:-mitre}"
+MIXED_PASSWORD="${PANDORAS_BOX_LIVE_MIXED_PASSWORD:-}"
 SSH_PORT="${PANDORAS_BOX_LIVE_MIXED_SSH_PORT:-4222}"
 SMB_PORT="${PANDORAS_BOX_LIVE_MIXED_SMB_PORT:-4445}"
 HOST_TIMEOUT_SECS="${PANDORAS_BOX_LIVE_MIXED_HOST_TIMEOUT_SECS:-120}"
@@ -25,8 +25,9 @@ LINUX_TEST_BINARY="${PANDORAS_BOX_LIVE_MIXED_TEST_BINARY:-}"
 LINUX_TEST_TARGET_DIR="${PANDORAS_BOX_LIVE_MIXED_LINUX_TARGET_DIR:-$ROOT_DIR/target/live-mixed-linux}"
 LINUX_TEST_RUSTFLAGS="${PANDORAS_BOX_LIVE_MIXED_LINUX_RUSTFLAGS:--C debuginfo=0 -C codegen-units=1}"
 RUNNER_LINUX_TARGET="${PANDORAS_BOX_LIVE_MIXED_RUNNER_TARGET:-aarch64-unknown-linux-gnu}"
-RUNNER_IMAGE="${PANDORAS_BOX_LIVE_MIXED_RUNNER_IMAGE:-ubuntu:24.04}"
-RUNNER_BUILD_IMAGE="${PANDORAS_BOX_LIVE_MIXED_RUNNER_BUILD_IMAGE:-rust:1.94}"
+RUNNER_IMAGE="${PANDORAS_BOX_LIVE_MIXED_RUNNER_IMAGE:-ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea}"
+RUNNER_BUILD_IMAGE="${PANDORAS_BOX_LIVE_MIXED_RUNNER_BUILD_IMAGE:-rust:1.94-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55}"
+ALPINE_UTILITY_IMAGE="alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d"
 VM_NAME="${PANDORAS_BOX_WINDOWS_VM:-Tiny11}"
 LOCAL_SSH_RULE_NAME="${PANDORAS_BOX_WINDOWS_LOCAL_SSH_NAT_RULE:-mixed-ssh-local}"
 LOCAL_SMB_RULE_NAME="${PANDORAS_BOX_WINDOWS_LOCAL_SMB_NAT_RULE:-mixed-smb-local}"
@@ -39,6 +40,7 @@ PROXY_SOURCE="$ROOT_DIR/scripts/tcp-port-proxy.rs"
 SLOW_TARGET_BINARY="$ROOT_DIR/target/live-harness/slow-ssh-target-linux-amd64"
 SLOW_TARGET_SOURCE="$ROOT_DIR/scripts/slow-ssh-target.rs"
 KNOWN_HOSTS_DIR="$ROOT_DIR/target/live-mixed-known-hosts-$$"
+MIXED_PASSWORD_FILE="$ROOT_DIR/target/live-mixed-password-$$"
 PROXY_PIDS=()
 
 cleanup() {
@@ -50,6 +52,7 @@ cleanup() {
   docker rm -f "$SLOW_CONTAINER_NAME" >/dev/null 2>&1 || true
   docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
   rm -rf "$KNOWN_HOSTS_DIR"
+  rm -f "$MIXED_PASSWORD_FILE"
 }
 
 show_logs_on_failure() {
@@ -174,7 +177,7 @@ ensure_windows_nat_forward() {
 }
 
 resolve_host_gateway_ip() {
-  docker run --rm alpine:3.21 sh -lc "ping -c 1 host.docker.internal | awk -F'[()]' 'NR==1 { print \$2 }'"
+  docker run --rm "$ALPINE_UTILITY_IMAGE" sh -lc "ping -c 1 host.docker.internal | awk -F'[()]' 'NR==1 { print \$2 }'"
 }
 
 start_proxy() {
@@ -210,7 +213,7 @@ wait_for_network_port() {
   if docker run --rm \
     --platform linux/amd64 \
     --network "$NETWORK_NAME" \
-    alpine:3.21 \
+    "$ALPINE_UTILITY_IMAGE" \
     sh -lc "for _ in \$(seq 1 30); do nc -z -w 1 '$host' '$port' && exit 0; sleep 1; done; exit 1" >/dev/null; then
     return 0
   fi
@@ -273,14 +276,14 @@ build_linux_test_binary() {
         -e CARGO_PROFILE_TEST_DEBUG=0 \
         -e RUSTFLAGS="$LINUX_TEST_RUSTFLAGS" \
         "$RUNNER_BUILD_IMAGE" \
-        cargo test --offline -j 1 -p pandoras_box --test live_mixed_concurrency --target "$RUNNER_LINUX_TARGET" --no-run
+        cargo test --locked --offline -j 1 -p pandoras_box --test live_mixed_concurrency --target "$RUNNER_LINUX_TARGET" --no-run
       ;;
     *)
       CARGO_TARGET_DIR="$LINUX_TEST_TARGET_DIR" \
         CARGO_INCREMENTAL=0 \
         CARGO_PROFILE_TEST_DEBUG=0 \
         RUSTFLAGS="$LINUX_TEST_RUSTFLAGS" \
-        cross test -j 1 -p pandoras_box --test live_mixed_concurrency --target "$RUNNER_LINUX_TARGET" --no-run
+        cross test --locked -j 1 -p pandoras_box --test live_mixed_concurrency --target "$RUNNER_LINUX_TARGET" --no-run
       ;;
   esac
 }
@@ -299,6 +302,15 @@ require_command rustup
 build_proxy_binary
 build_slow_target_binary
 
+mkdir -p "$ROOT_DIR/target"
+umask 077
+if [[ -n "$MIXED_PASSWORD" ]]; then
+  printf '%s' "$MIXED_PASSWORD" > "$MIXED_PASSWORD_FILE"
+else
+  printf 'pbx-%s' "$(od -An -N18 -tx1 /dev/urandom | tr -d ' \n')" > "$MIXED_PASSWORD_FILE"
+fi
+MIXED_PASSWORD="$(<"$MIXED_PASSWORD_FILE")"
+
 if [[ -z "$WINDOWS_SSH_USER" || -z "$WINDOWS_SSH_PASSWORD" ]]; then
   printf 'PANDORAS_BOX_LIVE_WINDOWS_SSH_USERNAME/PASSWORD or SMOLDER_WINDOWS_USERNAME/PASSWORD must be set\n' >&2
   exit 1
@@ -316,7 +328,7 @@ fi
 mkdir -p "$LIVE_ARTIFACT_DIR"
 
 LINUX_CHIMERA_PATH="$(absolute_path "$LINUX_CHIMERA_PATH")"
-cross build -j 1 -p chimera --bin chimera --target x86_64-unknown-linux-gnu
+cross build --locked -j 1 -p chimera --bin chimera --target x86_64-unknown-linux-gnu
 
 if [[ -z "$WINDOWS_CHIMERA_PATH" ]]; then
   if [[ -f "$ROOT_DIR/target/x86_64-pc-windows-gnu/release/chimera.exe" ]]; then
@@ -331,10 +343,10 @@ if have_windows_gnu_toolchain; then
   CARGO_TARGET_DIR="$WINDOWS_BUILD_TARGET_DIR" \
     CC_x86_64_pc_windows_gnu="$windows_linker" \
     CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$windows_linker" \
-    cargo build -j 1 -p chimera --bin chimera --target x86_64-pc-windows-gnu --release
+    cargo build --locked -j 1 -p chimera --bin chimera --target x86_64-pc-windows-gnu --release
 else
   CARGO_TARGET_DIR="$WINDOWS_BUILD_TARGET_DIR" \
-    cross build -j 1 -p chimera --bin chimera --target x86_64-pc-windows-gnu --release
+    cross build --locked -j 1 -p chimera --bin chimera --target x86_64-pc-windows-gnu --release
 fi
 WINDOWS_CHIMERA_PATH="${WINDOWS_CHIMERA_PATH:-$WINDOWS_BUILD_TARGET_DIR/x86_64-pc-windows-gnu/release/chimera.exe}"
 
@@ -353,12 +365,16 @@ fi
 
 docker build \
   --platform linux/amd64 \
-  --build-arg ROOT_PASSWORD="$MIXED_PASSWORD" \
+  --secret "id=root_password,src=$MIXED_PASSWORD_FILE" \
   -t "$UNIX_IMAGE_NAME" \
   "$UNIX_DOCKERFILE_DIR"
+ALPINE_BUILD_SECRETS=(--secret "id=root_password,src=$MIXED_PASSWORD_FILE")
+if [[ -n "${NODE_EXTRA_CA_CERTS:-}" && -f "$NODE_EXTRA_CA_CERTS" ]]; then
+  ALPINE_BUILD_SECRETS+=(--secret "id=ca_certificate,src=$NODE_EXTRA_CA_CERTS")
+fi
 docker build \
   --platform linux/amd64 \
-  --build-arg ROOT_PASSWORD="$MIXED_PASSWORD" \
+  "${ALPINE_BUILD_SECRETS[@]}" \
   -t "$ALPINE_IMAGE_NAME" \
   "$ALPINE_DOCKERFILE_DIR"
 
@@ -386,7 +402,7 @@ docker run -d --rm \
   --platform linux/amd64 \
   --network "$NETWORK_NAME" \
   -v "$ROOT_DIR:/work" \
-  ubuntu:24.04 \
+  "$RUNNER_IMAGE" \
   /work/target/live-harness/slow-ssh-target-linux-amd64 0.0.0.0 "$SSH_PORT" >/dev/null
 
 UNIX_HOST="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$UNIX_CONTAINER_NAME")"
@@ -444,9 +460,12 @@ export PANDORAS_BOX_LIVE_MIXED_SLOW_HOST="$SLOW_HOST"
 export PANDORAS_BOX_LIVE_WINDOWS_SSH_USERNAME="$WINDOWS_SSH_USER"
 export PANDORAS_BOX_LIVE_WINDOWS_SSH_PASSWORD="$WINDOWS_SSH_PASSWORD"
 export PANDORAS_BOX_LIVE_MIXED_EXTERNAL_SLOW_TARGET=1
-export PANDORAS_BOX_LIVE_MIXED_ARTIFACT_ROOT="$(container_path "$LIVE_ARTIFACT_DIR")"
-export PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH="$(container_path "$LINUX_CHIMERA_PATH")"
-export PANDORAS_BOX_LIVE_CHIMERA_WINDOWS_PATH="$(container_path "$WINDOWS_CHIMERA_PATH")"
+PANDORAS_BOX_LIVE_MIXED_ARTIFACT_ROOT="$(container_path "$LIVE_ARTIFACT_DIR")"
+PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH="$(container_path "$LINUX_CHIMERA_PATH")"
+PANDORAS_BOX_LIVE_CHIMERA_WINDOWS_PATH="$(container_path "$WINDOWS_CHIMERA_PATH")"
+export PANDORAS_BOX_LIVE_MIXED_ARTIFACT_ROOT
+export PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH
+export PANDORAS_BOX_LIVE_CHIMERA_WINDOWS_PATH
 
 docker run --rm \
   --platform "$(runner_platform)" \

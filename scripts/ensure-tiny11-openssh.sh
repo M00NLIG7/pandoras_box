@@ -15,6 +15,8 @@ OPENSSH_MSI_PATH='C:\Windows\Temp\OpenSSH-Win64-v10.0.0.0.msi'
 OPENSSH_LOG_PATH='C:\Windows\Temp\OpenSSH-install.log'
 PASSWORD_FILE="${TMPDIR:-/tmp}/pandoras-box-tiny11-password-$$"
 
+# Invoked through the EXIT trap below.
+# shellcheck disable=SC2329
 cleanup() {
   rm -f "$PASSWORD_FILE"
 }
