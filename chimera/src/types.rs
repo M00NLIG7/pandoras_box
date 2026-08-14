@@ -7,9 +7,6 @@ use chrono::{DateTime, Utc};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::PermissionsExt;
-
 /// Represents the different execution modes available for system
 /// automation and configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
