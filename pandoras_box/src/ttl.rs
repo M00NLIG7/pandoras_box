@@ -1,5 +1,8 @@
+#[cfg(unix)]
 use std::io;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
+#[cfg(any(unix, test))]
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -203,6 +206,7 @@ fn populate_sockaddr_in(target: &mut libc::sockaddr_in, ip: Ipv4Addr) {
     };
 }
 
+#[cfg(any(unix, test))]
 fn build_icmp_echo_request(identifier: u16, sequence: u16) -> Vec<u8> {
     let mut packet = vec![
         8,
@@ -222,6 +226,7 @@ fn build_icmp_echo_request(identifier: u16, sequence: u16) -> Vec<u8> {
     packet
 }
 
+#[cfg(any(unix, test))]
 fn icmp_checksum(packet: &[u8]) -> u16 {
     let mut sum = 0_u32;
 
@@ -241,6 +246,7 @@ fn icmp_checksum(packet: &[u8]) -> u16 {
     !(sum as u16)
 }
 
+#[cfg(any(unix, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EchoReply {
     source: Ipv4Addr,
@@ -249,6 +255,7 @@ struct EchoReply {
     sequence: u16,
 }
 
+#[cfg(any(unix, test))]
 fn parse_ipv4_icmp_echo_reply(packet: &[u8]) -> Option<EchoReply> {
     if packet.len() < 20 {
         return None;

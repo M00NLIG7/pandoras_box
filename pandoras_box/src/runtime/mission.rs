@@ -207,7 +207,7 @@ impl HostState {
     }
 
     #[must_use]
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "discovered" => Some(Self::Discovered),
             "queued" => Some(Self::Queued),
@@ -244,7 +244,7 @@ impl TransportKind {
     }
 
     #[must_use]
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "unix_ssh" => Some(Self::UnixSsh),
             "windows_ssh" => Some(Self::WindowsSsh),

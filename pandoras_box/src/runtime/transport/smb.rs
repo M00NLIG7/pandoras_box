@@ -115,11 +115,8 @@ impl AdminShareHandle for SmolderAdminShareHandle {
 
     async fn reconnect(&mut self) -> Result<()> {
         if let Some(share) = self.share.take() {
-            match share.disconnect().await {
-                Ok(client) => {
-                    let _ = client.logoff().await;
-                }
-                Err(_) => {}
+            if let Ok(client) = share.disconnect().await {
+                let _ = client.logoff().await;
             }
         }
 

@@ -103,6 +103,226 @@ impl Drop for MemoryReport {
     }
 }
 
+fn build_cli() -> ClapCommand {
+    command!()
+        .arg(
+            carg!(-r --range <IP_RANGE>)
+                .required(true)
+                .value_parser(value_parser!(String)),
+        )
+        .arg(
+            carg!(--"password-stdin" "Read the login secret from standard input")
+                .required(false),
+        )
+        .arg(
+            carg!(--"password-file" <PATH> "Read the login secret from a protected file or file descriptor")
+                .required(false)
+                .value_parser(value_parser!(PathBuf)),
+        )
+        .group(
+            ArgGroup::new("password-source")
+                .required(true)
+                .multiple(false)
+                .args(["password-stdin", "password-file"]),
+        )
+        .arg(carg!(--dry_run "Skip remote mutation operations"))
+        .arg(carg!(--"dangerously-accept-unknown-host-keys" "DANGER: permit first contact with an unknown SSH host key; changed enrolled keys are still rejected"))
+        .arg(carg!(--"best-effort" "Return success after handled target failures, including zero attempted targets; unhandled mission errors still fail"))
+        .arg(
+            carg!(--"max-targets" <COUNT> "Reject a CIDR containing more usable targets than this bound")
+                .required(false)
+                .default_value("65536")
+                .value_parser(value_parser!(usize)),
+        )
+        .arg(
+            carg!(--artifact_root <DIR>)
+                .required(false)
+                .default_value("artifacts")
+                .value_parser(value_parser!(String)),
+        )
+        .arg(
+            carg!(--mission_id <MISSION_ID>)
+                .required(false)
+                .value_parser(clap::builder::ValueParser::new(mission_id_value)),
+        )
+        .arg(
+            carg!(--identity_command <COMMAND>)
+                .required(false)
+                .default_value("whoami")
+                .value_parser(value_parser!(String)),
+        )
+        .arg(
+            carg!(--unix_user <USERNAME>)
+                .required(false)
+                .default_value("root")
+                .value_parser(value_parser!(String)),
+        )
+        .arg(
+            carg!(--windows_user <USERNAME>)
+                .required(false)
+                .default_value("Administrator")
+                .value_parser(value_parser!(String)),
+        )
+}
+
+fn mission_spec_from_matches(
+    matches: &ArgMatches,
+    targets: Vec<IpAddr>,
+    password: runtime::SecretString,
+) -> runtime::MissionSpec {
+    let mission_id_explicit =
+        matches.contains_id("mission_id") && matches.get_one::<String>("mission_id").is_some();
+    let mission_id = matches
+        .get_one::<String>("mission_id")
+        .cloned()
+        .unwrap_or_else(current_timestamp_string);
+
+    runtime::MissionSpec {
+        targets,
+        artifact_root: PathBuf::from(
+            matches
+                .get_one::<String>("artifact_root")
+                .expect("artifact_root should have a default"),
+        ),
+        mission_id,
+        mission_id_explicit,
+        identity_command: matches
+            .get_one::<String>("identity_command")
+            .expect("identity_command should have a default")
+            .clone(),
+        unix_username: matches
+            .get_one::<String>("unix_user")
+            .expect("unix_user should have a default")
+            .clone(),
+        windows_username: matches
+            .get_one::<String>("windows_user")
+            .expect("windows_user should have a default")
+            .clone(),
+        password,
+        ssh_host_key_policy: if matches.get_flag("dangerously-accept-unknown-host-keys") {
+            runtime::SshHostKeyPolicy::DangerouslyAcceptUnknown
+        } else {
+            runtime::SshHostKeyPolicy::RequireKnown
+        },
+        best_effort: matches.get_flag("best-effort"),
+        dry_run: matches.get_flag("dry_run"),
+        ..runtime::MissionSpec::default()
+    }
+}
+
+pub fn setup_tracing() -> Result<()> {
+    let mut result = Ok(());
+
+    INIT.call_once(|| {
+        // Create log file
+        let timestamp = current_timestamp_string();
+        let log_path = format!("./pandoras_box{}.log", timestamp);
+
+        // Create file appender
+        let file = match OpenOptions::new().create(true).append(true).open(&log_path) {
+            Ok(file) => file,
+            Err(e) => {
+                result = Err(Error::InvalidSubnet(e.to_string()));
+                return;
+            }
+        };
+
+        // Set up the file layer
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_thread_ids(true)
+            .with_thread_names(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_writer(file);
+
+        // Set up the console layer
+        let console_layer = tracing_subscriber::fmt::layer()
+            .with_thread_ids(true)
+            .with_thread_names(true)
+            .with_file(true)
+            .with_line_number(true);
+
+        // Set up the filter
+        let filter_layer =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+        // Combine everything and initialize
+        tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(console_layer)
+            .with(file_layer)
+            .init();
+
+        println!("Logging initialized to {}", log_path);
+    });
+
+    result
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    setup_tracing()?;
+
+    let _memory_report = MemoryReport;
+
+    let matches = build_cli().get_matches();
+
+    let range = matches.get_one::<String>("range").unwrap();
+    let password = {
+        let stdin = std::io::stdin();
+        let mut stdin = stdin.lock();
+        read_login_secret(&matches, &mut stdin)?
+    };
+
+    info!("Starting application with range: {}", range);
+
+    let subnet = match enumerator::Subnet::try_from(range.as_str()) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to parse subnet: {}", e);
+            return Err(Error::InvalidSubnet(e.to_string()));
+        }
+    };
+
+    info!("Created subnet: {}", range);
+
+    let max_targets = *matches
+        .get_one::<usize>("max-targets")
+        .expect("max-targets should have a default");
+    let targets = subnet.hosts_bounded(max_targets)?;
+    let spec = mission_spec_from_matches(&matches, targets, password);
+    let best_effort = spec.best_effort;
+
+    let summary = runtime::PandorasBoxRunner::new(spec).run().await?;
+    info!(
+        concat!(
+            "Pandora's Box completed: requested={} reachable={} unreachable={} skipped={} ",
+            "attempted={} complete={} failed={} mission_dir={}"
+        ),
+        summary.requested_targets,
+        summary.reachable_targets,
+        summary.unreachable_targets,
+        summary.skipped_targets,
+        summary.attempted_targets,
+        summary.completed_hosts,
+        summary.failed_hosts,
+        summary.mission_dir.display()
+    );
+
+    if summary.requires_failure_exit() && !best_effort {
+        return Err(Error::MissionFailure(format!(
+            "mission attempted {} of {} targets and recorded {} failures ({} unreachable, {} skipped)",
+            summary.attempted_targets,
+            summary.requested_targets,
+            summary.failed_hosts,
+            summary.unreachable_targets,
+            summary.skipped_targets
+        )));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{build_cli, mission_spec_from_matches, read_login_secret};
@@ -360,229 +580,4 @@ mod tests {
         assert!(!spec.mission_id_explicit);
         assert!(!spec.mission_id.is_empty());
     }
-}
-
-fn build_cli() -> ClapCommand {
-    command!()
-        .arg(
-            carg!(-r --range <IP_RANGE>)
-                .required(true)
-                .value_parser(value_parser!(String)),
-        )
-        .arg(
-            carg!(--"password-stdin" "Read the login secret from standard input")
-                .required(false),
-        )
-        .arg(
-            carg!(--"password-file" <PATH> "Read the login secret from a protected file or file descriptor")
-                .required(false)
-                .value_parser(value_parser!(PathBuf)),
-        )
-        .group(
-            ArgGroup::new("password-source")
-                .required(true)
-                .multiple(false)
-                .args(["password-stdin", "password-file"]),
-        )
-        .arg(carg!(--dry_run "Skip remote mutation operations"))
-        .arg(carg!(--"dangerously-accept-unknown-host-keys" "DANGER: permit first contact with an unknown SSH host key; changed enrolled keys are still rejected"))
-        .arg(carg!(--"best-effort" "Return success after handled target failures, including zero attempted targets; unhandled mission errors still fail"))
-        .arg(
-            carg!(--"max-targets" <COUNT> "Reject a CIDR containing more usable targets than this bound")
-                .required(false)
-                .default_value("65536")
-                .value_parser(value_parser!(usize)),
-        )
-        .arg(
-            carg!(--artifact_root <DIR>)
-                .required(false)
-                .default_value("artifacts")
-                .value_parser(value_parser!(String)),
-        )
-        .arg(
-            carg!(--mission_id <MISSION_ID>)
-                .required(false)
-                .value_parser(clap::builder::ValueParser::new(mission_id_value)),
-        )
-        .arg(
-            carg!(--identity_command <COMMAND>)
-                .required(false)
-                .default_value("whoami")
-                .value_parser(value_parser!(String)),
-        )
-        .arg(
-            carg!(--unix_user <USERNAME>)
-                .required(false)
-                .default_value("root")
-                .value_parser(value_parser!(String)),
-        )
-        .arg(
-            carg!(--windows_user <USERNAME>)
-                .required(false)
-                .default_value("Administrator")
-                .value_parser(value_parser!(String)),
-        )
-}
-
-fn mission_spec_from_matches(
-    matches: &ArgMatches,
-    targets: Vec<IpAddr>,
-    password: runtime::SecretString,
-) -> runtime::MissionSpec {
-    let mission_id_explicit =
-        matches.contains_id("mission_id") && matches.get_one::<String>("mission_id").is_some();
-    let mission_id = matches
-        .get_one::<String>("mission_id")
-        .cloned()
-        .unwrap_or_else(current_timestamp_string);
-
-    runtime::MissionSpec {
-        targets,
-        artifact_root: PathBuf::from(
-            matches
-                .get_one::<String>("artifact_root")
-                .expect("artifact_root should have a default"),
-        ),
-        mission_id,
-        mission_id_explicit,
-        identity_command: matches
-            .get_one::<String>("identity_command")
-            .expect("identity_command should have a default")
-            .clone(),
-        unix_username: matches
-            .get_one::<String>("unix_user")
-            .expect("unix_user should have a default")
-            .clone(),
-        windows_username: matches
-            .get_one::<String>("windows_user")
-            .expect("windows_user should have a default")
-            .clone(),
-        password,
-        ssh_host_key_policy: if matches.get_flag("dangerously-accept-unknown-host-keys") {
-            runtime::SshHostKeyPolicy::DangerouslyAcceptUnknown
-        } else {
-            runtime::SshHostKeyPolicy::RequireKnown
-        },
-        best_effort: matches.get_flag("best-effort"),
-        dry_run: matches.get_flag("dry_run"),
-        ..runtime::MissionSpec::default()
-    }
-}
-
-pub fn setup_tracing() -> Result<()> {
-    let mut result = Ok(());
-
-    INIT.call_once(|| {
-        // Create log file
-        let timestamp = current_timestamp_string();
-        let log_path = format!("./pandoras_box{}.log", timestamp);
-
-        // Create file appender
-        let file = match OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(true)
-            .open(&log_path)
-        {
-            Ok(file) => file,
-            Err(e) => {
-                result = Err(Error::InvalidSubnet(e.to_string()));
-                return;
-            }
-        };
-
-        // Set up the file layer
-        let file_layer = tracing_subscriber::fmt::layer()
-            .with_thread_ids(true)
-            .with_thread_names(true)
-            .with_file(true)
-            .with_line_number(true)
-            .with_writer(file);
-
-        // Set up the console layer
-        let console_layer = tracing_subscriber::fmt::layer()
-            .with_thread_ids(true)
-            .with_thread_names(true)
-            .with_file(true)
-            .with_line_number(true);
-
-        // Set up the filter
-        let filter_layer =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-        // Combine everything and initialize
-        tracing_subscriber::registry()
-            .with(filter_layer)
-            .with(console_layer)
-            .with(file_layer)
-            .init();
-
-        println!("Logging initialized to {}", log_path);
-    });
-
-    result
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    setup_tracing()?;
-
-    let _memory_report = MemoryReport;
-
-    let matches = build_cli().get_matches();
-
-    let range = matches.get_one::<String>("range").unwrap();
-    let password = {
-        let stdin = std::io::stdin();
-        let mut stdin = stdin.lock();
-        read_login_secret(&matches, &mut stdin)?
-    };
-
-    info!("Starting application with range: {}", range);
-
-    let subnet = match enumerator::Subnet::try_from(range.as_str()) {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to parse subnet: {}", e);
-            return Err(Error::InvalidSubnet(e.to_string()));
-        }
-    };
-
-    info!("Created subnet: {}", range);
-
-    let max_targets = *matches
-        .get_one::<usize>("max-targets")
-        .expect("max-targets should have a default");
-    let targets = subnet.hosts_bounded(max_targets)?;
-    let spec = mission_spec_from_matches(&matches, targets, password);
-    let best_effort = spec.best_effort;
-
-    let summary = runtime::PandorasBoxRunner::new(spec).run().await?;
-    info!(
-        concat!(
-            "Pandora's Box completed: requested={} reachable={} unreachable={} skipped={} ",
-            "attempted={} complete={} failed={} mission_dir={}"
-        ),
-        summary.requested_targets,
-        summary.reachable_targets,
-        summary.unreachable_targets,
-        summary.skipped_targets,
-        summary.attempted_targets,
-        summary.completed_hosts,
-        summary.failed_hosts,
-        summary.mission_dir.display()
-    );
-
-    if summary.requires_failure_exit() && !best_effort {
-        return Err(Error::MissionFailure(format!(
-            "mission attempted {} of {} targets and recorded {} failures ({} unreachable, {} skipped)",
-            summary.attempted_targets,
-            summary.requested_targets,
-            summary.failed_hosts,
-            summary.unreachable_targets,
-            summary.skipped_targets
-        )));
-    }
-
-    Ok(())
 }

@@ -51,6 +51,15 @@ impl PandorasBoxRunSummary {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TargetAccounting {
+    requested: usize,
+    reachable: usize,
+    unreachable: usize,
+    skipped: usize,
+    attempted: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
 struct PersistedHostStatus {
@@ -201,13 +210,11 @@ impl PandorasBoxRunner {
             let collector_job = plan_collector_job(&host_spec, &store, &plan);
             let semaphore = Arc::clone(&semaphore);
             let store = store.clone();
-            let policy = policy;
             let factory = Arc::clone(&factory);
             tasks.spawn(async move {
-                let _permit = semaphore
-                    .acquire_owned()
-                    .await
-                    .expect("Pandora's Box semaphore unexpectedly closed");
+                let _permit = semaphore.acquire_owned().await.map_err(|_| {
+                    Error::MissionFailure("host execution semaphore closed unexpectedly".into())
+                })?;
                 let report = execute_host_with_persistent_session_with_retry(
                     &host_spec,
                     &store,
@@ -225,7 +232,10 @@ impl PandorasBoxRunner {
         }
 
         while let Some(report) = tasks.join_next().await {
-            reports.push(report.expect("Pandora's Box task should not panic")?);
+            let report = report.map_err(|error| {
+                Error::MissionFailure(format!("host execution task failed: {error}"))
+            })??;
+            reports.push(report);
         }
 
         let requested_targets = if spec.targets.is_empty() {
@@ -236,11 +246,13 @@ impl PandorasBoxRunner {
         self.finalize_summary(
             &spec,
             &store,
-            requested_targets,
-            reachable_targets,
-            unreachable_targets,
-            skipped_targets,
-            attempted_targets,
+            TargetAccounting {
+                requested: requested_targets,
+                reachable: reachable_targets,
+                unreachable: unreachable_targets,
+                skipped: skipped_targets,
+                attempted: attempted_targets,
+            },
             reports,
         )
         .await
@@ -294,10 +306,9 @@ impl PandorasBoxRunner {
             let store = store.clone();
             let retry_policy = spec.retry_policy.clone();
             tasks.spawn(async move {
-                let _permit = semaphore
-                    .acquire_owned()
-                    .await
-                    .expect("Pandora's Box semaphore unexpectedly closed");
+                let _permit = semaphore.acquire_owned().await.map_err(|_| {
+                    Error::MissionFailure("host execution semaphore closed unexpectedly".into())
+                })?;
                 let report =
                     execute_host_plan_with_retry(&retry_policy, Arc::clone(&executor), plan).await;
                 store
@@ -308,7 +319,10 @@ impl PandorasBoxRunner {
         }
 
         while let Some(report) = tasks.join_next().await {
-            reports.push(report.expect("Pandora's Box task should not panic")?);
+            let report = report.map_err(|error| {
+                Error::MissionFailure(format!("host execution task failed: {error}"))
+            })??;
+            reports.push(report);
         }
 
         let requested_targets = if spec.targets.is_empty() {
@@ -319,11 +333,13 @@ impl PandorasBoxRunner {
         self.finalize_summary(
             &spec,
             &store,
-            requested_targets,
-            reachable_targets,
-            0,
-            skipped_targets,
-            attempted_targets,
+            TargetAccounting {
+                requested: requested_targets,
+                reachable: reachable_targets,
+                unreachable: 0,
+                skipped: skipped_targets,
+                attempted: attempted_targets,
+            },
             reports,
         )
         .await
@@ -383,21 +399,17 @@ impl PandorasBoxRunner {
         &self,
         spec: &MissionSpec,
         store: &ArtifactStore,
-        requested_targets: usize,
-        reachable_targets: usize,
-        unreachable_targets: usize,
-        skipped_targets: usize,
-        attempted_targets: usize,
+        accounting: TargetAccounting,
         reports: Vec<HostExecutionReport>,
     ) -> Result<PandorasBoxRunSummary> {
         let summary = PandorasBoxRunSummary {
             mission_dir: store.mission_dir(),
-            requested_targets,
-            reachable_targets,
-            unreachable_targets,
-            skipped_targets,
-            attempted_targets,
-            discovered_hosts: reachable_targets,
+            requested_targets: accounting.requested,
+            reachable_targets: accounting.reachable,
+            unreachable_targets: accounting.unreachable,
+            skipped_targets: accounting.skipped,
+            attempted_targets: accounting.attempted,
+            discovered_hosts: accounting.reachable,
             completed_hosts: reports
                 .iter()
                 .filter(|report| report.final_state == HostState::Complete)
@@ -411,11 +423,11 @@ impl PandorasBoxRunner {
         write_asset_inventory_bundle(
             store,
             &reports,
-            requested_targets,
-            reachable_targets,
-            unreachable_targets,
-            skipped_targets,
-            attempted_targets,
+            accounting.requested,
+            accounting.reachable,
+            accounting.unreachable,
+            accounting.skipped,
+            accounting.attempted,
         )
         .await?;
         store.write_summary(&render_summary_json(&summary)).await?;
@@ -712,15 +724,15 @@ fn parse_completed_phases(status: &PersistedHostStatus) -> Vec<super::scheduler:
     let parsed = status
         .completed_phases
         .iter()
-        .filter_map(|phase| super::scheduler::FailurePhase::from_str(phase))
+        .filter_map(|phase| super::scheduler::FailurePhase::parse(phase))
         .collect::<Vec<_>>();
 
     if parsed.is_empty() {
-        let final_state = HostState::from_str(&status.final_state).unwrap_or(HostState::Failed);
+        let final_state = HostState::parse(&status.final_state).unwrap_or(HostState::Failed);
         let failure_phase = status
             .failure_phase
             .as_deref()
-            .and_then(super::scheduler::FailurePhase::from_str);
+            .and_then(super::scheduler::FailurePhase::parse);
         infer_legacy_completed_phases(final_state, failure_phase)
     } else {
         parsed
@@ -761,7 +773,7 @@ async fn load_resume_checkpoint(
     })?;
 
     let completed_phases = parse_completed_phases(&status);
-    let final_state = HostState::from_str(&status.final_state).unwrap_or(HostState::Failed);
+    let final_state = HostState::parse(&status.final_state).unwrap_or(HostState::Failed);
     let artifacts_exist = host_artifacts_exist(store, plan.target.ip).await;
 
     let mode = if final_state == HostState::Complete && artifacts_exist {
@@ -782,7 +794,7 @@ async fn load_resume_checkpoint(
         selected_transport: status
             .selected_transport
             .as_deref()
-            .and_then(TransportKind::from_str),
+            .and_then(TransportKind::parse),
     })
 }
 
@@ -1352,6 +1364,7 @@ mod tests {
         CollectorArtifact, CollectorCleanupJob, CollectorCollectJob, CollectorJobPlan,
         CollectorRunJob, CollectorStageJob, IdentityCaptureJob, LocalSupportFilePlan,
         PandorasBoxRunSummary, PandorasBoxRunner, PersistedHostStatus, StagedSupportFile,
+        TargetAccounting,
     };
     use crate::runtime::discovery::{DiscoveryOutcome, DiscoveryRecord};
     use crate::runtime::mission::{
@@ -1739,8 +1752,10 @@ mod tests {
         }
     }
 
+    type SessionTemplateQueues = HashMap<(IpAddr, TransportKind), Vec<SessionTemplate>>;
+
     struct FakeSessionFactory {
-        templates: Arc<Mutex<HashMap<(IpAddr, TransportKind), Vec<SessionTemplate>>>>,
+        templates: Arc<Mutex<SessionTemplateQueues>>,
         connect_events: Arc<Mutex<Vec<(IpAddr, TransportKind)>>>,
     }
 
@@ -1949,11 +1964,13 @@ mod tests {
             .finalize_summary(
                 &mission_spec,
                 &store,
-                1,
-                1,
-                0,
-                0,
-                1,
+                TargetAccounting {
+                    requested: 1,
+                    reachable: 1,
+                    unreachable: 0,
+                    skipped: 0,
+                    attempted: 1,
+                },
                 vec![HostExecutionReport::success(plan, HostState::Complete)
                     .with_selected_transport(TransportKind::UnixSsh)],
             )
@@ -2045,11 +2062,13 @@ mod tests {
             .finalize_summary(
                 &mission_spec,
                 &store,
-                1,
-                1,
-                0,
-                0,
-                1,
+                TargetAccounting {
+                    requested: 1,
+                    reachable: 1,
+                    unreachable: 0,
+                    skipped: 0,
+                    attempted: 1,
+                },
                 vec![HostExecutionReport::failure(
                     plan,
                     "ssh connect failed: timeout waiting for banner",
@@ -2150,11 +2169,13 @@ mod tests {
             .finalize_summary(
                 &mission_spec,
                 &store,
-                2,
-                2,
-                0,
-                0,
-                2,
+                TargetAccounting {
+                    requested: 2,
+                    reachable: 2,
+                    unreachable: 0,
+                    skipped: 0,
+                    attempted: 2,
+                },
                 vec![
                     HostExecutionReport::success(plan_a, HostState::Complete),
                     HostExecutionReport::success(plan_b, HostState::Complete),

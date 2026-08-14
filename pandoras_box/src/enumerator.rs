@@ -231,10 +231,10 @@ impl Enumerator {
 
     async fn tcp_connect(ip: Ipv4AddrExt, port: u16) -> bool {
         let addr = SocketAddr::new(IpAddr::V4(*ip), port);
-        match timeout(TIMEOUT_DURATION, TcpStream::connect(&addr)).await {
-            Ok(Ok(_)) => true,
-            _ => false,
-        }
+        matches!(
+            timeout(TIMEOUT_DURATION, TcpStream::connect(&addr)).await,
+            Ok(Ok(_))
+        )
     }
 
     async fn resolve_host(

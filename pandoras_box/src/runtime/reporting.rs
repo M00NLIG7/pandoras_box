@@ -854,20 +854,14 @@ fn render_network_topology_excalidraw(mission_id: &str, topology: &NetworkTopolo
     let subtitle_width = (legend_x - TOPOLOGY_LEFT_MARGIN - 24.0).max(700.0);
     elements.push(excalidraw_text_element(
         "network_topology_title",
-        48.0,
-        30.0,
-        subtitle_width.min(700.0),
-        38.0,
+        ExcalidrawBounds::new(48.0, 30.0, subtitle_width.min(700.0), 38.0),
         "Network Topology".to_string(),
         30,
         "#10233C",
     ));
     elements.push(excalidraw_text_element(
         "network_topology_subtitle",
-        48.0,
-        78.0,
-        subtitle_width,
-        38.0,
+        ExcalidrawBounds::new(48.0, 78.0, subtitle_width, 38.0),
         format!(
             "Mission {}: observed host relationships inferred from collected inventory artifacts.",
             mission_id
@@ -948,10 +942,7 @@ fn render_network_topology_excalidraw(mission_id: &str, topology: &NetworkTopolo
             .fold(TOPOLOGY_TOP + 64.0, f64::max);
         elements.push(excalidraw_text_element(
             "network_topology_note",
-            48.0,
-            note_y,
-            520.0,
-            38.0,
+            ExcalidrawBounds::new(48.0, note_y, 520.0, 38.0),
             "No observed inter-host connections were captured during this mission.\nThe layout still preserves network zones and unreachable targets.".to_string(),
             15,
             "#51606F",
@@ -1170,10 +1161,7 @@ fn render_topology_legend(x: f64) -> Vec<serde_json::Value> {
     let height = 146.0;
     let mut elements = vec![excalidraw_rectangle_element_with_style(
         "topology_legend",
-        x,
-        y,
-        width,
-        height,
+        ExcalidrawBounds::new(x, y, width, height),
         "#AAB7C4",
         "#F4F6F8",
         "solid",
@@ -1181,10 +1169,7 @@ fn render_topology_legend(x: f64) -> Vec<serde_json::Value> {
 
     elements.push(excalidraw_text_element(
         "topology_legend_title",
-        x + 18.0,
-        y + 16.0,
-        width - 36.0,
-        22.0,
+        ExcalidrawBounds::new(x + 18.0, y + 16.0, width - 36.0, 22.0),
         "Diagram Key".to_string(),
         17,
         "#10233C",
@@ -1226,10 +1211,7 @@ fn render_topology_legend(x: f64) -> Vec<serde_json::Value> {
         ));
         elements.push(excalidraw_text_element(
             &format!("{id}_label"),
-            x + 46.0,
-            y + offset - 2.0,
-            width - 64.0,
-            18.0,
+            ExcalidrawBounds::new(x + 46.0, y + offset - 2.0, width - 64.0, 18.0),
             label.to_string(),
             12,
             "#51606F",
@@ -1246,10 +1228,7 @@ fn render_topology_legend(x: f64) -> Vec<serde_json::Value> {
     ));
     elements.push(excalidraw_text_element(
         "legend_link_label",
-        x + 72.0,
-        y + 122.0,
-        width - 90.0,
-        18.0,
+        ExcalidrawBounds::new(x + 72.0, y + 122.0, width - 90.0, 18.0),
         "Dashed links show observed peer traffic".to_string(),
         12,
         "#51606F",
@@ -1262,10 +1241,12 @@ fn render_topology_section(section: &TopologySectionLayout) -> Vec<serde_json::V
     let (stroke, fill, chip_fill, chip_text) = topology_section_palette(section.kind);
     let mut elements = vec![excalidraw_rectangle_element_with_style(
         &section.frame.id,
-        section.frame.x,
-        section.frame.y,
-        section.frame.width,
-        section.frame.height,
+        ExcalidrawBounds::new(
+            section.frame.x,
+            section.frame.y,
+            section.frame.width,
+            section.frame.height,
+        ),
         stroke,
         fill,
         "dashed",
@@ -1283,20 +1264,24 @@ fn render_topology_section(section: &TopologySectionLayout) -> Vec<serde_json::V
     ));
     elements.push(excalidraw_text_element(
         &format!("{}_title", section.id),
-        section.frame.x + 30.0,
-        section.frame.y + 20.0,
-        chip_width - 20.0,
-        18.0,
+        ExcalidrawBounds::new(
+            section.frame.x + 30.0,
+            section.frame.y + 20.0,
+            chip_width - 20.0,
+            18.0,
+        ),
         section.title.clone(),
         15,
         chip_text,
     ));
     elements.push(excalidraw_text_element(
         &format!("{}_subtitle", section.id),
-        section.frame.x + 20.0,
-        section.frame.y + 48.0,
-        section.frame.width - 40.0,
-        18.0,
+        ExcalidrawBounds::new(
+            section.frame.x + 20.0,
+            section.frame.y + 48.0,
+            section.frame.width - 40.0,
+            18.0,
+        ),
         section.subtitle.clone(),
         12,
         "#51606F",
@@ -1337,20 +1322,24 @@ fn render_topology_host_card(layout: &TopologyHostLayout) -> Vec<serde_json::Val
         ),
         excalidraw_text_element(
             &format!("{}_title", layout.frame.id),
-            layout.frame.x + 14.0,
-            layout.frame.y + 12.0,
-            layout.frame.width - badge_width - 36.0,
-            18.0,
+            ExcalidrawBounds::new(
+                layout.frame.x + 14.0,
+                layout.frame.y + 12.0,
+                layout.frame.width - badge_width - 36.0,
+                18.0,
+            ),
             title,
             15,
             text_color,
         ),
         excalidraw_text_element(
             &format!("{}_badge_text", layout.frame.id),
-            layout.frame.x + layout.frame.width - badge_width - 4.0,
-            layout.frame.y + 14.0,
-            badge_width - 20.0,
-            14.0,
+            ExcalidrawBounds::new(
+                layout.frame.x + layout.frame.width - badge_width - 4.0,
+                layout.frame.y + 14.0,
+                badge_width - 20.0,
+                14.0,
+            ),
             badge_label,
             10,
             badge_text,
@@ -1365,10 +1354,12 @@ fn render_topology_host_card(layout: &TopologyHostLayout) -> Vec<serde_json::Val
         ),
         excalidraw_text_element(
             &format!("{}_body", layout.frame.id),
-            layout.frame.x + 14.0,
-            layout.frame.y + 46.0,
-            layout.frame.width - 28.0,
-            layout.frame.height - 56.0,
+            ExcalidrawBounds::new(
+                layout.frame.x + 14.0,
+                layout.frame.y + 46.0,
+                layout.frame.width - 28.0,
+                layout.frame.height - 56.0,
+            ),
             body,
             12,
             text_color,
@@ -1655,10 +1646,12 @@ fn excalidraw_connection_elements(
         let label_position = connection_label_position(&route);
         elements.push(excalidraw_text_element(
             &format!("{id}_label"),
-            label_position.x - 84.0,
-            label_position.y - 10.0,
-            168.0,
-            16.0,
+            ExcalidrawBounds::new(
+                label_position.x - 84.0,
+                label_position.y - 10.0,
+                168.0,
+                16.0,
+            ),
             label,
             11,
             "#51606F",
@@ -2113,6 +2106,25 @@ fn escape_mermaid_label(value: &str) -> String {
     value.replace('"', "'")
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ExcalidrawBounds {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl ExcalidrawBounds {
+    const fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ExcalidrawBox {
     id: String,
@@ -2305,14 +2317,17 @@ fn excalidraw_seed(id: &str) -> u32 {
 
 fn excalidraw_text_element(
     id: &str,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+    bounds: ExcalidrawBounds,
     text: String,
     font_size: u32,
     stroke_color: &str,
 ) -> serde_json::Value {
+    let ExcalidrawBounds {
+        x,
+        y,
+        width,
+        height,
+    } = bounds;
     let seed = excalidraw_seed(id);
     json!({
         "id": id,
@@ -2358,10 +2373,7 @@ fn excalidraw_rectangle_element(
 ) -> serde_json::Value {
     excalidraw_rectangle_element_with_style(
         id,
-        x,
-        y,
-        width,
-        height,
+        ExcalidrawBounds::new(x, y, width, height),
         stroke_color,
         background_color,
         "solid",
@@ -2370,14 +2382,17 @@ fn excalidraw_rectangle_element(
 
 fn excalidraw_rectangle_element_with_style(
     id: &str,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+    bounds: ExcalidrawBounds,
     stroke_color: &str,
     background_color: &str,
     stroke_style: &str,
 ) -> serde_json::Value {
+    let ExcalidrawBounds {
+        x,
+        y,
+        width,
+        height,
+    } = bounds;
     let seed = excalidraw_seed(id);
     json!({
         "id": id,
@@ -2633,13 +2648,18 @@ mod tests {
     use super::{
         parse_remote_ip, render_asset_inventory_csv, render_asset_inventory_markdown,
         render_asset_inventory_pdf, render_network_topology_excalidraw,
-        render_network_topology_markdown, render_network_topology_mermaid,
-        render_network_topology_png_with, AssetInventoryBundle, AssetInventoryHost,
-        ExcalidrawRenderer, InventoryArtifact, NetworkTopology, TopologyEdge, TopologyHost,
+        render_network_topology_markdown, render_network_topology_mermaid, AssetInventoryBundle,
+        AssetInventoryHost, InventoryArtifact, NetworkTopology, TopologyEdge, TopologyHost,
     };
+    #[cfg(unix)]
+    use super::{render_network_topology_png_with, ExcalidrawRenderer};
+    #[cfg(unix)]
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
     use std::path::PathBuf;
+    #[cfg(unix)]
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -2814,6 +2834,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn topology_png_renderer_contract_accepts_external_renderer() {
         let unique = SystemTime::now()

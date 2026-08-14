@@ -32,7 +32,7 @@ impl FailurePhase {
     }
 
     #[must_use]
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "connect" => Some(Self::Connect),
             "stage" => Some(Self::Stage),
@@ -62,7 +62,7 @@ impl FailureDisposition {
     }
 
     #[must_use]
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "retryable" => Some(Self::Retryable),
             "terminal" => Some(Self::Terminal),

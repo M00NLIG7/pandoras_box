@@ -78,6 +78,7 @@ impl ArtifactStore {
         let file = tokio::task::spawn_blocking(move || {
             let file = OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(&lock_path)?;
