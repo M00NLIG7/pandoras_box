@@ -56,9 +56,6 @@ pub enum ExecutionMode {
     /// * Set up Auditd logging
     /// * Configure fail2ban
     Baseline,
-
-    /// Serve inventory and log
-    Serve,
 }
 
 /// Result of an execution operation
@@ -107,7 +104,6 @@ impl ExecutionMode {
             ExecutionMode::Collector => "Collects runtime artifacts for Pandora integration",
             ExecutionMode::Update => "Handles system updates and patch management",
             ExecutionMode::Baseline => "Implements OS-specific security configurations",
-            ExecutionMode::Serve => "Serves inventory and log",
         }
     }
 
@@ -119,7 +115,6 @@ impl ExecutionMode {
             ExecutionMode::Collector => "COLLECT",
             ExecutionMode::Update => "UPDATE",
             ExecutionMode::Baseline => "BASELINE",
-            ExecutionMode::Serve => "SERVE",
         }
     }
 }

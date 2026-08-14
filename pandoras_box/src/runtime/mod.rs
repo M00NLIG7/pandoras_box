@@ -1,7 +1,7 @@
 pub mod artifact_store;
 pub mod discovery;
-mod embedded_payloads;
 pub mod mission;
+mod payloads;
 pub mod planner;
 pub mod policy;
 pub mod reporting;

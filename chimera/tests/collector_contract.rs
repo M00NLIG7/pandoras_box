@@ -1,22 +1,10 @@
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use reqwest::Client;
 use tempfile::tempdir;
 use tokio::process::Command;
-use tokio::time::{sleep, Instant};
 
 fn chimera_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_chimera"))
-}
-
-fn free_loopback_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("ephemeral loopback port should bind")
-        .local_addr()
-        .expect("local addr should be available")
-        .port()
 }
 
 fn command_debug_string(command: &Command) -> String {
@@ -31,20 +19,6 @@ async fn run_chimera(args: &[&str], output_root: &Path) -> std::process::Output 
         .output()
         .await
         .unwrap_or_else(|err| panic!("failed to run {}: {err}", command_debug_string(&command)))
-}
-
-async fn wait_for_http_ok(client: &Client, url: &str, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-
-    loop {
-        match client.get(url).send().await {
-            Ok(response) if response.status().is_success() => return,
-            _ if Instant::now() >= deadline => {
-                panic!("timed out waiting for {url}");
-            }
-            _ => sleep(Duration::from_millis(100)).await,
-        }
-    }
 }
 
 #[tokio::test]
@@ -79,71 +53,66 @@ async fn collector_command_writes_inventory_and_application_log() {
 }
 
 #[tokio::test]
-async fn serve_internal_exposes_and_removes_runtime_artifacts() {
-    let output_root = tempdir().expect("tempdir should be created");
-    let inventory_path = output_root.path().join("inventory.json");
-    let log_path = output_root.path().join("application.log");
+async fn removed_http_surface_cannot_traverse_fetch_replay_or_delete_artifacts() {
+    let root = tempdir().expect("tempdir should be created");
+    let output_root = root.path().join("artifacts");
+    tokio::fs::create_dir_all(&output_root)
+        .await
+        .expect("artifact root should be created");
+
+    let inventory_path = output_root.join("inventory.json");
+    let log_path = output_root.join("application.log");
+    let sibling_path = root.path().join("victim.txt");
     tokio::fs::write(&inventory_path, b"{\"hostname\":\"lab\"}\n")
         .await
         .expect("inventory fixture should be written");
     tokio::fs::write(&log_path, b"collector log\n")
         .await
         .expect("log fixture should be written");
-
-    let port = free_loopback_port();
-    let mut child = Command::new(chimera_bin());
-    child
-        .args([
-            "--output-root",
-            output_root.path().to_string_lossy().as_ref(),
-        ])
-        .args(["serve-internal", "--port", &port.to_string()])
-        .kill_on_drop(true);
-
-    let mut child = child.spawn().expect("serve-internal should spawn");
-    let client = Client::builder()
-        .connect_timeout(Duration::from_millis(250))
-        .timeout(Duration::from_secs(2))
-        .build()
-        .expect("HTTP client should build");
-
-    let root_url = format!("http://127.0.0.1:{port}/");
-    let inventory_url = format!("http://127.0.0.1:{port}/inventory.json");
-    let log_url = format!("http://127.0.0.1:{port}/application.log");
-    wait_for_http_ok(&client, &root_url, Duration::from_secs(5)).await;
-
-    let inventory = client
-        .get(&inventory_url)
-        .send()
+    tokio::fs::write(&sibling_path, b"do not expose or delete\n")
         .await
-        .expect("inventory request should succeed")
-        .text()
-        .await
-        .expect("inventory body should be readable");
-    assert_eq!(inventory, "{\"hostname\":\"lab\"}\n");
+        .expect("sibling fixture should be written");
 
-    let log = client
-        .get(&log_url)
-        .send()
-        .await
-        .expect("log request should succeed")
-        .text()
-        .await
-        .expect("log body should be readable");
-    assert_eq!(log, "collector log\n");
+    for removed_command in ["serve", "serve-internal"] {
+        for _ in 0..2 {
+            let output = run_chimera(
+                &[removed_command, "--port", "44372", "../victim.txt"],
+                &output_root,
+            )
+            .await;
+            assert!(
+                !output.status.success(),
+                "removed HTTP command {removed_command} unexpectedly succeeded"
+            );
+        }
+    }
 
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
-        .await
-        .expect("serve-internal should stop after terminal artifact fetch")
-        .expect("serve-internal wait should succeed");
-    assert!(status.success(), "serve-internal should exit cleanly");
-
-    assert!(
-        tokio::fs::metadata(&inventory_path).await.is_err(),
-        "inventory.json should be removed after serving"
+    assert_eq!(
+        tokio::fs::read(&inventory_path)
+            .await
+            .expect("inventory must remain after rejected requests"),
+        b"{\"hostname\":\"lab\"}\n"
     );
+    assert_eq!(
+        tokio::fs::read(&log_path)
+            .await
+            .expect("log must remain after rejected requests"),
+        b"collector log\n"
+    );
+    assert_eq!(
+        tokio::fs::read(&sibling_path)
+            .await
+            .expect("sibling must remain after traversal attempts"),
+        b"do not expose or delete\n"
+    );
+
+    let help = run_chimera(&["--help"], &output_root).await;
+    assert!(help.status.success(), "Chimera help should render");
+    let stdout = String::from_utf8_lossy(&help.stdout);
     assert!(
-        tokio::fs::metadata(&log_path).await.is_err(),
-        "application.log should be removed after serving"
+        !stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("serve")),
+        "HTTP commands must not be advertised"
     );
 }

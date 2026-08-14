@@ -99,7 +99,6 @@ mod tests {
         assert_eq!(spec.targets, targets);
         assert_eq!(spec.mission_id, "mission-override");
         assert!(spec.mission_id_explicit);
-        assert_eq!(spec.collector_port, 44_372);
         assert_eq!(spec.chimera_unix_path, PathBuf::from("release/chimera"));
         assert_eq!(
             spec.chimera_windows_path,

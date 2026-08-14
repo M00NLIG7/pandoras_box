@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1.89"
 clap = {version = "4.5.17", features = ["cargo"]}
-flate2 = { version = "1.0.35", default-features = false, features = ["rust_backend"] }
 futures = "0.3.30"
 libc = "0.2.177"
 thiserror = "1.0.63"
@@ -14,7 +13,6 @@ tokio = {version = "1.40.0", features = ["fs", "macros", "net", "rt-multi-thread
 rustrc = { path = "../rustrc", default-features = false, features = ["ssh"] }
 log = "0.4.22"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-reqwest = { version = "0.12.7", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 # Public, immutable SMB implementation used by clean checkouts and CI.

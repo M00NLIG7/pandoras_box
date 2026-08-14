@@ -16,9 +16,8 @@ pub struct RemoteWorkspace {
     pub remote_temp_dir: String,
     pub remote_binary_path: String,
     pub remote_output_root: String,
-    pub inventory_endpoint: String,
-    pub log_endpoint: String,
-    pub collector_port: u16,
+    pub inventory_path: String,
+    pub log_path: String,
 }
 
 impl RemoteWorkspace {
@@ -60,20 +59,6 @@ impl RemoteWorkspace {
             RemoteShell::Cmd => format!(
                 r#"cmd.exe /C "{} --output-root {} collector""#,
                 self.remote_binary_path, self.remote_output_root,
-            ),
-        }
-    }
-
-    #[must_use]
-    pub fn serve_command(&self) -> String {
-        match self.shell {
-            RemoteShell::Posix => format!(
-                "{} --output-root {} serve --port {}",
-                self.remote_binary_path, self.remote_output_root, self.collector_port,
-            ),
-            RemoteShell::Cmd => format!(
-                r#"cmd.exe /C "{} --output-root {} serve --port {}""#,
-                self.remote_binary_path, self.remote_output_root, self.collector_port,
             ),
         }
     }
@@ -134,10 +119,9 @@ pub fn remote_workspace(spec: &MissionSpec, plan: &HostPlan) -> RemoteWorkspace 
             staged_local_name: "chimera.exe".to_string(),
             remote_temp_dir,
             remote_binary_path,
+            inventory_path: format!(r"{remote_output_root}\inventory.json"),
+            log_path: format!(r"{remote_output_root}\application.log"),
             remote_output_root,
-            inventory_endpoint: "inventory.json".to_string(),
-            log_endpoint: "application.log".to_string(),
-            collector_port: spec.collector_port,
         };
     }
 
@@ -151,10 +135,9 @@ pub fn remote_workspace(spec: &MissionSpec, plan: &HostPlan) -> RemoteWorkspace 
         staged_local_name: "chimera".to_string(),
         remote_temp_dir,
         remote_binary_path,
+        inventory_path: format!("{remote_output_root}/inventory.json"),
+        log_path: format!("{remote_output_root}/application.log"),
         remote_output_root,
-        inventory_endpoint: "inventory.json".to_string(),
-        log_endpoint: "application.log".to_string(),
-        collector_port: spec.collector_port,
     }
 }
 
@@ -217,7 +200,6 @@ mod tests {
             chimera_unix_path: PathBuf::from("/tmp/chimera-local"),
             chimera_windows_path: PathBuf::from(r"C:\Temp\chimera-local.exe"),
             windows_username: "mitre".to_string(),
-            collector_port: 44_372,
             ..MissionSpec::default()
         }
     }
@@ -238,18 +220,13 @@ mod tests {
                 remote_temp_dir: "/tmp/pandoras_box/mission-123".to_string(),
                 remote_binary_path: "/tmp/pandoras_box/mission-123/chimera".to_string(),
                 remote_output_root: "/tmp/pandoras_box/mission-123/output".to_string(),
-                inventory_endpoint: "inventory.json".to_string(),
-                log_endpoint: "application.log".to_string(),
-                collector_port: 44_372,
+                inventory_path: "/tmp/pandoras_box/mission-123/output/inventory.json".to_string(),
+                log_path: "/tmp/pandoras_box/mission-123/output/application.log".to_string(),
             }
         );
         assert_eq!(
             workspace.collector_command(),
             "/tmp/pandoras_box/mission-123/chimera --output-root /tmp/pandoras_box/mission-123/output collector"
-        );
-        assert_eq!(
-            workspace.serve_command(),
-            "/tmp/pandoras_box/mission-123/chimera --output-root /tmp/pandoras_box/mission-123/output serve --port 44372"
         );
         assert_eq!(
             workspace.ensure_directories_command(),
@@ -285,18 +262,15 @@ mod tests {
                 remote_binary_path: r"C:\Windows\Temp\pandoras_box\mission-123\chimera.exe"
                     .to_string(),
                 remote_output_root: r"C:\Windows\Temp\pandoras_box\mission-123\output".to_string(),
-                inventory_endpoint: "inventory.json".to_string(),
-                log_endpoint: "application.log".to_string(),
-                collector_port: 44_372,
+                inventory_path: r"C:\Windows\Temp\pandoras_box\mission-123\output\inventory.json"
+                    .to_string(),
+                log_path: r"C:\Windows\Temp\pandoras_box\mission-123\output\application.log"
+                    .to_string(),
             }
         );
         assert_eq!(
             workspace.collector_command(),
             r#"cmd.exe /C "C:\Windows\Temp\pandoras_box\mission-123\chimera.exe --output-root C:\Windows\Temp\pandoras_box\mission-123\output collector""#
-        );
-        assert_eq!(
-            workspace.serve_command(),
-            r#"cmd.exe /C "C:\Windows\Temp\pandoras_box\mission-123\chimera.exe --output-root C:\Windows\Temp\pandoras_box\mission-123\output serve --port 44372""#
         );
         assert_eq!(
             workspace.ensure_directories_command(),

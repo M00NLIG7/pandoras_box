@@ -28,20 +28,15 @@ sysinfo = "0.29.11"
 reqwest = { version = "0.12.12", default-features = false, features = ["rustls-tls"], optional = true }
 thiserror = "2.0.3"
 zip = { version = "2.2.2", optional = true }
-hyper = {version = "1.5.2", features = ["server", "http1"]}
-mime_guess = "2.0.5"
-http-body-util = "0.1.2"
 ignore = { version = "0.4.23", optional = true }
-hyper-util = { version = "0.1.10", features = ["tokio"] }
 
 
 [dev-dependencies]
-reqwest = { version = "0.12.12", default-features = false, features = ["rustls-tls"] }
 tempfile = "3.14.0"
 
 [target.'cfg(unix)'.dependencies.tokio]
 version = "1.41.1"
-features = ["fs", "io-util", "net", "process", "rt-multi-thread", "macros", "time"]
+features = ["fs", "io-util", "net", "process", "rt-multi-thread", "macros", "sync", "time"]
 
 [target.'cfg(windows)'.dependencies.tokio]
 version = "1.41.1"

@@ -90,11 +90,6 @@ impl ArtifactStore {
     }
 
     #[must_use]
-    pub fn embedded_payload_dir(&self) -> PathBuf {
-        self.mission_dir().join("payloads")
-    }
-
-    #[must_use]
     pub fn hosts_dir(&self) -> PathBuf {
         self.mission_dir().join("hosts")
     }

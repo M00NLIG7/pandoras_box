@@ -12,7 +12,8 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 fn required_env(name: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for mixed live interop tests"))
+    std::env::var(name)
+        .unwrap_or_else(|_| panic!("{name} must be set for mixed live interop tests"))
 }
 
 fn optional_env(name: &str) -> Option<String> {
@@ -156,7 +157,10 @@ fn assert_artifacts_exist(host_dir: &Path) {
 
     let log = std::fs::read_to_string(&log_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", log_path.display()));
-    assert!(!log.trim().is_empty(), "application.log should not be empty");
+    assert!(
+        !log.trim().is_empty(),
+        "application.log should not be empty"
+    );
 
     let cleanup = std::fs::read_to_string(&cleanup_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", cleanup_path.display()));
@@ -189,13 +193,6 @@ async fn live_mixed_concurrency_keeps_hosts_moving_until_end_reconciliation() {
         .expect("mixed SMB port should be a valid u16");
     let password = required_env("PANDORAS_BOX_LIVE_MIXED_PASSWORD");
     let windows_username = required_env("PANDORAS_BOX_LIVE_WINDOWS_SSH_USERNAME");
-    let collector_port = optional_env("PANDORAS_BOX_LIVE_MIXED_COLLECTOR_PORT")
-        .map(|value| {
-            value
-                .parse::<u16>()
-                .expect("mixed collector port should be a valid u16")
-        })
-        .unwrap_or_else(|| MissionSpec::default().collector_port);
     let chimera_unix_path = PathBuf::from(required_env("PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH"));
     let chimera_windows_path =
         PathBuf::from(required_env("PANDORAS_BOX_LIVE_CHIMERA_WINDOWS_PATH"));
@@ -261,7 +258,6 @@ async fn live_mixed_concurrency_keeps_hosts_moving_until_end_reconciliation() {
         discovery_ports: vec![ssh_port, smb_port],
         chimera_unix_path,
         chimera_windows_path,
-        collector_port,
         concurrency_limit: 4,
         retry_policy: RetryPolicy {
             max_attempts: 3,

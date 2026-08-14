@@ -6,7 +6,6 @@ use tokio::process::{Child, Command};
 
 pub const APPLICATION_LOG_FILENAME: &str = "application.log";
 pub const INVENTORY_FILENAME: &str = "inventory.json";
-pub const DEFAULT_SERVE_PORT: u16 = 44372;
 const OUTPUT_ROOT_ENV_VAR: &str = "CHIMERA_OUTPUT_ROOT";
 
 pub fn get_default_output_dir() -> PathBuf {

@@ -80,7 +80,6 @@ pub struct MissionSpec {
     pub discovery_ports: Vec<u16>,
     pub chimera_unix_path: PathBuf,
     pub chimera_windows_path: PathBuf,
-    pub collector_port: u16,
     pub dry_run: bool,
     pub allow_smb_fallback: bool,
     pub windows_smb_exec_mode: WindowsSmbExecMode,
@@ -104,7 +103,6 @@ impl Default for MissionSpec {
             discovery_ports: Vec::new(),
             chimera_unix_path: PathBuf::from("release/chimera"),
             chimera_windows_path: PathBuf::from("release/chimera.exe"),
-            collector_port: 44_372,
             dry_run: false,
             allow_smb_fallback: true,
             windows_smb_exec_mode: WindowsSmbExecMode::SmbExec,
@@ -133,7 +131,6 @@ impl MissionSpec {
                 "windows_user={};",
                 "ssh_port={};",
                 "discovery_ports={};",
-                "collector_port={};",
                 "dry_run={};",
                 "allow_smb_fallback={};",
                 "windows_smb_exec_mode={}"
@@ -148,7 +145,6 @@ impl MissionSpec {
                 .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(","),
-            self.collector_port,
             self.dry_run,
             self.allow_smb_fallback,
             self.windows_smb_exec_mode.as_str(),

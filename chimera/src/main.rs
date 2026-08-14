@@ -1,18 +1,14 @@
 mod error;
 mod logging;
 mod modes;
-mod server;
 mod types;
 mod utils;
 
 use crate::modes::collector::{CollectorConfig, CollectorMode};
 use crate::modes::inventory::InventoryMode;
-use crate::modes::serve::{ServeConfig, ServeMode};
 use crate::modes::ModeExecutor;
 use crate::types::{ExecutionMode, ExecutionResult};
-use crate::utils::{
-    get_default_output_dir, set_output_root, DEFAULT_SERVE_PORT, INVENTORY_FILENAME,
-};
+use crate::utils::{get_default_output_dir, set_output_root, INVENTORY_FILENAME};
 use clap::{arg, command, value_parser, Command};
 use log::{error, info};
 use std::fs::{self, File};
@@ -132,19 +128,6 @@ pub async fn run_baseline() -> ExecutionResult {
     }
 }
 
-async fn run_serve_mode(port: u16) -> ExecutionResult {
-    let mode = ServeMode::new();
-    info!("Starting serve mode on port {}", port);
-
-    let config = ServeConfig { port };
-    mode.execute(config).await
-}
-
-async fn run_serve_internal(port: u16) -> ExecutionResult {
-    info!("Starting internal serve mode on port {}", port);
-    ServeMode::serve_internal(port).await
-}
-
 async fn run_inventory_mode(output_dir: &Path, use_hostname_for_output: bool) -> ExecutionResult {
     let mode = InventoryMode::new();
     info!("Starting inventory mode execution");
@@ -218,7 +201,6 @@ async fn run_all_modes(output_dir: &Path) {
     let results = [
         run_inventory_mode(output_dir, false).await,
         run_update_mode().await,
-        run_serve_mode(DEFAULT_SERVE_PORT).await,
         run_baseline().await,
     ];
 
@@ -239,7 +221,7 @@ async fn run_all_modes(output_dir: &Path) {
 fn build_cli() -> Command {
     let cli = command!()
         .arg(
-            arg!(--"output-root" <PATH> "Directory for collector artifacts and serve output")
+            arg!(--"output-root" <PATH> "Directory for collector artifacts")
                 .global(true)
                 .value_parser(value_parser!(String)),
         )
@@ -252,24 +234,8 @@ fn build_cli() -> Command {
                 ),
         )
         .subcommand(
-            Command::new("serve")
-                .about("Start HTTP server for file access")
-                .arg(
-                    arg!(-p --port <PORT> "Port to serve on")
-                        .default_value("44372")
-                        .value_parser(value_parser!(u16)),
-                ),
-        )
-        .subcommand(
-            Command::new("serve-internal").hide(true).arg(
-                arg!(-p --port <PORT> "Port to serve on")
-                    .required(true)
-                    .value_parser(value_parser!(u16)),
-            ),
-        )
-        .subcommand(
             Command::new("collector")
-                .about("Collect Pandora runtime artifacts without starting the file server"),
+                .about("Write Pandora runtime artifacts for authenticated retrieval"),
         );
 
     #[cfg(feature = "legacy-modes")]
@@ -286,7 +252,6 @@ fn build_cli() -> Command {
 fn logging_config_for(subcommand: Option<&str>) -> logging::LoggingConfig {
     match subcommand {
         Some("collector") => logging::LoggingConfig::truncate_file(),
-        Some("serve") | Some("serve-internal") => logging::LoggingConfig::stderr_only(),
         _ => logging::LoggingConfig::append_file(),
     }
 }
@@ -348,28 +313,6 @@ async fn main() {
             let result = run_update_mode().await;
             if !result.success {
                 error!("Update mode failed: {}", result.message);
-                std::process::exit(1);
-            }
-        }
-        Some(("serve", sub_matches)) => {
-            let port = sub_matches
-                .get_one::<u16>("port")
-                .copied()
-                .unwrap_or(DEFAULT_SERVE_PORT);
-            let result = run_serve_mode(port).await;
-            if !result.success {
-                error!("Serve mode failed: {}", result.message);
-                std::process::exit(1);
-            }
-        }
-        Some(("serve-internal", sub_matches)) => {
-            let port = sub_matches
-                .get_one::<u16>("port")
-                .copied()
-                .unwrap_or(DEFAULT_SERVE_PORT);
-            let result = run_serve_internal(port).await;
-            if !result.success {
-                error!("Serve-internal mode failed: {}", result.message);
                 std::process::exit(1);
             }
         }
