@@ -1,3 +1,5 @@
-/target
-./Cargo.lock
+/target/
+/artifacts/
+**/release-artifacts/
+*.log
 .password
