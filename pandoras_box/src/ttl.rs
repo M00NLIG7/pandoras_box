@@ -179,10 +179,8 @@ fn duration_to_timeval(timeout: Duration) -> io::Result<libc::timeval> {
             .as_secs()
             .try_into()
             .map_err(|_| invalid_timeout())?,
-        tv_usec: timeout
-            .subsec_micros()
-            .try_into()
-            .map_err(|_| invalid_timeout())?,
+        // POSIX timeval microseconds are signed and at least 32 bits; this value is < 1,000,000.
+        tv_usec: timeout.subsec_micros() as _,
     })
 }
 
