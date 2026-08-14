@@ -21,11 +21,11 @@ thiserror = "2.0.3"
 tempfile = "3.14.0"
 
 [target.'cfg(unix)'.dependencies.tokio]
-version = "1.41.1"
+version = "1.48.0"
 features = ["fs", "io-util", "net", "process", "rt-multi-thread", "macros", "sync", "time"]
 
 [target.'cfg(windows)'.dependencies.tokio]
-version = "1.41.1"
+version = "1.48.0"
 features = ["fs", "io-util", "net", "process", "rt-multi-thread", "macros", "signal", "time"]
 
 [target.'cfg(unix)'.dependencies]

@@ -1,12 +1,10 @@
 use crate::client::{Command, CommandOutput, Config, Session};
-use async_trait::async_trait;
 use russh::client;
-use russh_keys::key::PrivateKeyWithHashAlg;
-use russh_keys::known_hosts::{
+use russh::keys::key::PrivateKeyWithHashAlg;
+use russh::keys::known_hosts::{
     check_known_hosts, check_known_hosts_path, known_host_keys, known_host_keys_path,
 };
-use russh_keys::load_secret_key;
-use russh_keys::ssh_key::public::PublicKey;
+use russh::keys::{load_secret_key, PublicKey};
 use std::{
     borrow::Cow,
     net::SocketAddr,
@@ -825,14 +823,15 @@ impl Config for SSHConfig {
                     get_handle(*socket, *inactivity_timeout, *host_key_policy).await?;
 
                 let key_pair = load_secret_key(key_path, None)?;
+                ensure_private_key_algorithm_supported(key_pair.algorithm())?;
                 let auth_res = session
                     .authenticate_publickey(
                         username,
-                        PrivateKeyWithHashAlg::new(Arc::new(key_pair), None)?,
+                        PrivateKeyWithHashAlg::new(Arc::new(key_pair), None),
                     )
                     .await?;
 
-                if !auth_res {
+                if !auth_res.success() {
                     return Err(crate::Error::AuthenticationError(
                         "Failed to authenticate with public key".to_string(),
                     ));
@@ -856,7 +855,7 @@ impl Config for SSHConfig {
                     .authenticate_password(username, password.expose_secret())
                     .await?;
 
-                if !auth_res {
+                if !auth_res.success() {
                     return Err(crate::Error::AuthenticationError(
                         "Failed to authenticate with password".to_string(),
                     ));
@@ -869,6 +868,15 @@ impl Config for SSHConfig {
             }
         }
     }
+}
+
+fn ensure_private_key_algorithm_supported(algorithm: russh::keys::Algorithm) -> crate::Result<()> {
+    if algorithm.is_rsa() {
+        return Err(crate::Error::ConfigError(
+            "RSA SSH private keys are disabled pending resolution of RUSTSEC-2023-0071".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn get_handle(
@@ -948,7 +956,7 @@ fn lookup_known_hosts(
     host: &str,
     port: u16,
     known_hosts_path: Option<&Path>,
-) -> std::result::Result<Vec<(usize, PublicKey)>, russh_keys::Error> {
+) -> std::result::Result<Vec<(usize, PublicKey)>, russh::keys::Error> {
     match known_hosts_path {
         Some(path) => known_host_keys_path(host, port, path),
         None => known_host_keys(host, port),
@@ -960,14 +968,13 @@ fn check_known_host_match(
     port: u16,
     key: &PublicKey,
     known_hosts_path: Option<&Path>,
-) -> std::result::Result<bool, russh_keys::Error> {
+) -> std::result::Result<bool, russh::keys::Error> {
     match known_hosts_path {
         Some(path) => check_known_hosts_path(host, port, key, path),
         None => check_known_hosts(host, port, key),
     }
 }
 
-#[async_trait]
 impl client::Handler for Handler {
     type Error = russh::Error;
 
@@ -993,16 +1000,18 @@ impl client::Handler for Handler {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalized_sftp_path, verify_server_key, windows_parent_directories,
-        windows_sftp_path_candidates, HostKeyPolicy,
+        ensure_private_key_algorithm_supported, normalized_sftp_path, verify_server_key,
+        windows_parent_directories, windows_sftp_path_candidates, HostKeyPolicy,
     };
-    use russh_keys::ssh_key::PublicKey;
+    use russh::keys::{Algorithm, PublicKey};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    const RSA_3072_PUBLIC_KEY: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCmjkeMm8k3JkNrf16eb5pG4bc77B6Mt3VN4saltsRV8vASpyWa/PlBgdaeldOaNJ5NK0gqU3KyiUNzHbdcc8572e7IUBDJS/rlaWARiSL4aos2VbNX0k56Z5zYp9m/bq5m9/mlb+PQkNBjIhimgpYNiq2TwBiYeA6tLb79cPtHA0cX5BLk/a5oUpLsiR4kI/f+Q98vVDKasKXXVh5YLkLobrruDB6er2A9fOcIUF0O4JCRLh/Dc161gE3fQrYTMQenbppZzfxrZfQ8YwLPvKjnqm+XRX+pbTtaJuj0EgTSzUK+EZxoSw8CNwiZpxrjwecTMVQ8w/srQmh4ABGuTqk0wP8HcI7hg+fpBv7kiejh5X/Oehxt+Puu85u9GVXb1a0av/vhJvUCBcuISvCA/z1wVJ0xdLhb1/ZiTDdTzyNbZQ0OQijzK+e1SlkNhp+3eGVZu3pNZvnTppwIXv3wg6kV1HodkWGgh1ayY7Buc52Z8okDYqvJat5CzOj5OaQNr/k= user@example.com";
-    const RSA_4096_PUBLIC_KEY: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC0WRHtxuxefSJhpIxGq4ibGFgwYnESPm8C3JFM88A1JJLoprenklrd7VJ+VH3Ov/bQwZwLyRU5dRmfR/SWTtIPWs7tToJVayKKDB+/qoXmM5ui/0CU2U4rCdQ6PdaCJdC7yFgpPL8WexjWN06+eSIKYz1AAXbx9rRv1iasslK/KUqtsqzVliagI6jl7FPO2GhRZMcso6LsZGgSxuYf/Lp0D/FcBU8GkeOo1Sx5xEt8H8bJcErtCe4Blb8JxcW6EXO3sReb4z+zcR07gumPgFITZ6hDA8sSNuvo/AlWg0IKTeZSwHHVknWdQqDJ0uczE837caBxyTZllDNIGkBjCIIOFzuTT76HfYc/7CTTGk07uaNkUFXKN79xDiFOX8JQ1ZZMZvGOTwWjuT9CqgdTvQRORbRWwOYv3MH8re9ykw3Ip6lrPifY7s6hOaAKry/nkGPMt40m1TdiW98MTIpooE7W+WXu96ax2l2OJvxX8QR7l+LFlKnkIEEJd/ItF1G22UmOjkVwNASTwza/hlY+8DoVvEmwum/nMgH2TwQT3bTQzF9s9DOJkH4d8p4Mw4gEDjNx0EgUFA91ysCAeUMQQyIvuR8HXXa+VcvhOOO5mmBcVhxJ3qUOJTyDBsT0932Zb4mNtkxdigoVxu+iiwk0vwtvKwGVDYdyMP5EAQeEIP1t0w== user@example.com";
+    const ED25519_PUBLIC_KEY_ONE: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHxAmhZJPwGJReZkxexeDbUT2lNzlBja1wwZ73IWPgnc fixture-one";
+    const ED25519_PUBLIC_KEY_TWO: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPC+qyaLgo1fXCJMVIw3eWCWM1MchFSj3pkhHZW+lMDU fixture-two";
 
     fn temp_known_hosts_path(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -1019,6 +1028,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         PublicKey::from_openssh(&without_comment).expect("test public key should parse")
+    }
+
+    #[test]
+    fn rsa_private_keys_are_rejected_at_the_auth_boundary() {
+        let error = ensure_private_key_algorithm_supported(Algorithm::Rsa { hash: None })
+            .expect_err("RSA private keys must be rejected before authentication");
+        assert!(error.to_string().contains("RUSTSEC-2023-0071"));
+        ensure_private_key_algorithm_supported(Algorithm::Ed25519)
+            .expect("Ed25519 keys should remain supported");
     }
 
     #[test]
@@ -1073,7 +1091,7 @@ mod tests {
         verify_server_key(
             socket,
             HostKeyPolicy::DangerouslyAcceptUnknown,
-            &key(RSA_3072_PUBLIC_KEY),
+            &key(ED25519_PUBLIC_KEY_ONE),
             Some(&path),
         )
         .expect("explicit dangerous policy should accept an unknown host");
@@ -1083,13 +1101,13 @@ mod tests {
     fn dangerously_accept_unknown_still_rejects_changed_key() {
         let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 22);
         let path = temp_known_hosts_path("key-change");
-        std::fs::write(&path, format!("10.0.0.8 {RSA_3072_PUBLIC_KEY}\n"))
+        std::fs::write(&path, format!("10.0.0.8 {ED25519_PUBLIC_KEY_ONE}\n"))
             .expect("known_hosts fixture should be written");
 
         let error = verify_server_key(
             socket,
             HostKeyPolicy::DangerouslyAcceptUnknown,
-            &key(RSA_4096_PUBLIC_KEY),
+            &key(ED25519_PUBLIC_KEY_TWO),
             Some(&path),
         )
         .expect_err("changed keys should be rejected");
@@ -1119,13 +1137,13 @@ mod tests {
     fn require_known_hosts_accepts_enrolled_key() {
         let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 22);
         let path = temp_known_hosts_path("enrolled-host");
-        std::fs::write(&path, format!("10.0.0.8 {RSA_3072_PUBLIC_KEY}\n"))
+        std::fs::write(&path, format!("10.0.0.8 {ED25519_PUBLIC_KEY_ONE}\n"))
             .expect("known_hosts fixture should be written");
 
         verify_server_key(
             socket,
             HostKeyPolicy::RequireKnownHosts,
-            &key(RSA_3072_PUBLIC_KEY),
+            &key(ED25519_PUBLIC_KEY_ONE),
             Some(&path),
         )
         .expect("enrolled key should be accepted");
@@ -1141,7 +1159,7 @@ mod tests {
         let error = verify_server_key(
             socket,
             HostKeyPolicy::RequireKnownHosts,
-            &key(RSA_3072_PUBLIC_KEY),
+            &key(ED25519_PUBLIC_KEY_ONE),
             Some(&path),
         )
         .expect_err("strict known_hosts policy should reject unseen hosts");

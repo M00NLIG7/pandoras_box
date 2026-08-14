@@ -26,8 +26,8 @@ impl From<russh::Error> for Error {
     }
 }
 
-impl From<russh_keys::Error> for Error {
-    fn from(err: russh_keys::Error) -> Self {
+impl From<russh::keys::Error> for Error {
+    fn from(err: russh::keys::Error) -> Self {
         Error::ConnectionError(err.to_string())
     }
 }

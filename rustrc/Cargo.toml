@@ -8,11 +8,9 @@ repository = "https://github.com/M00NLIG7/pandoras_box"
 description = "SSH execution and SFTP transport primitives for Pandora's Box"
 
 [dependencies]
-async-trait = "0.1.89"
-russh = "0.49.2"
-russh-keys = "0.49.2"
-russh-sftp = "2.0.6"
+russh = { version = "0.62.6", default-features = false, features = ["ring"] }
+russh-sftp = "2.4.0"
 thiserror = "1.0.63"
-tokio = { version = "1.40.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { version = "1.48.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "time"] }
 tracing = "0.1.41"
 zeroize = "1.8.1"
