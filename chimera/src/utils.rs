@@ -38,7 +38,6 @@ pub fn set_output_root(path: &str) {
 pub struct CommandOutput {
     pub status: i32,
     pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -126,7 +125,7 @@ impl CommandExecutor {
             )
         };
 
-        let (stdout, stderr) = match timeout_at(deadline, reads).await {
+        let (stdout, _stderr) = match timeout_at(deadline, reads).await {
             Ok(Ok(output)) => output,
             Ok(Err(error)) => {
                 terminate(child).await;
@@ -155,7 +154,6 @@ impl CommandExecutor {
         Ok(CommandOutput {
             status: status.code().unwrap_or(-1),
             stdout,
-            stderr,
         })
     }
 }

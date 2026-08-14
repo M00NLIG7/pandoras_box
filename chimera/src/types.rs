@@ -62,17 +62,6 @@ impl ExecutionResult {
 }
 
 impl ExecutionMode {
-    /// Gets a description of what the mode does
-    ///
-    /// # Returns
-    /// A static string describing the mode's purpose
-    pub fn description(&self) -> &'static str {
-        match self {
-            ExecutionMode::Inventory => "Performs system inventory and asset discovery",
-            ExecutionMode::Collector => "Collects runtime artifacts for Pandora integration",
-        }
-    }
-
     /// Gets a short string representation of the mode
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -245,17 +234,6 @@ pub enum ConnectionState {
     Unknown,
 }
 
-impl ConnectionState {
-    /// Checks if the connection is in a closed state.
-    ///
-    /// # Returns
-    /// * `true` if the connection state is `Closed`
-    /// * `false` for all other states
-    pub fn is_closed(&self) -> bool {
-        matches!(self, ConnectionState::Close)
-    }
-}
-
 /// Information about a system process.
 ///
 /// Contains the process identifier and name for tracking
@@ -347,9 +325,11 @@ pub struct OpenPort {
 #[serde(rename_all = "camelCase")]
 pub enum ShareType {
     /// Network File System
-    NFS,
+    #[serde(rename = "NFS")]
+    Nfs,
     /// Server Message Block
-    SMB,
+    #[serde(rename = "SMB")]
+    Smb,
 }
 
 /// Configuration for a network file share.
@@ -362,16 +342,6 @@ pub struct Share {
     pub(crate) share_type: ShareType,
     /// Network path to the share
     pub(crate) network_path: String,
-}
-
-/// Windows-specific server feature detection.
-#[cfg(target_os = "windows")]
-pub trait ServerFeatures {
-    /// Lists enabled Windows server features.
-    ///
-    /// # Returns
-    /// * Vector of feature names
-    fn server_features() -> Vec<String>;
 }
 
 /// Inventory sections that can be partially unavailable.

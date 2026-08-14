@@ -147,9 +147,9 @@ impl InventoryMode {
             .iter()
             .map(|user| User {
                 name: user.name().into(),
-                uid: user.id().to_string().into(),
-                gid: user.group_id().to_string().into(),
-                groups: user.groups().iter().cloned().collect(),
+                uid: user.id().to_string(),
+                gid: user.group_id().to_string(),
+                groups: user.groups().to_vec(),
                 is_admin: user.is_admin(),
                 is_local: user.is_local(),
                 shell: None,
@@ -248,7 +248,7 @@ impl InventoryMode {
                     };
 
                     Some(ContainerVolume {
-                        host_path: host_path.into(),
+                        host_path,
                         container_path: mount["Destination"].as_str()?.into(),
                         mode: mount["Mode"].as_str()?.into(),
                         volume_name: mount["Name"].as_str()?.into(),
@@ -293,12 +293,12 @@ impl InventoryMode {
                         .map_or(Vec::new(), |host_ports_array| {
                             host_ports_array
                                 .iter()
-                                .filter_map(|host_port_details| {
+                                .map(|host_port_details| {
                                     let host_ip =
                                         host_port_details["HostIp"].as_str().unwrap_or("0.0.0.0");
                                     let host_port =
                                         host_port_details["HostPort"].as_str().unwrap_or("");
-                                    Some(format!("{}:{}->{}", host_ip, host_port, container_port))
+                                    format!("{}:{}->{}", host_ip, host_port, container_port)
                                 })
                                 .collect()
                         })

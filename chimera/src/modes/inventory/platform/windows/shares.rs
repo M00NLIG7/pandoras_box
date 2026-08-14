@@ -22,7 +22,7 @@ fn query_shares() -> Result<Vec<Share>, String> {
         .into_iter()
         .filter_map(|share| match share.get("Name") {
             Some(Variant::String(name)) if !name.is_empty() => Some(Share {
-                share_type: ShareType::SMB,
+                share_type: ShareType::Smb,
                 network_path: format!(r"\\localhost\{name}"),
             }),
             _ => None,

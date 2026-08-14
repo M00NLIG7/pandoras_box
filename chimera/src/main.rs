@@ -101,14 +101,17 @@ async fn main() {
         set_output_root(output_root);
     }
 
-    if let Err(e) = logging::init_logging(logging_config_for(matches.subcommand_name())) {
-        eprintln!("Failed to initialize logging: {}", e);
-        return;
+    if let Err(error) = logging::init_logging(logging_config_for(matches.subcommand_name())) {
+        eprintln!("Failed to initialize logging: {error}");
+        std::process::exit(1);
     }
 
     let mut output_dir = get_default_output_dir();
 
-    fs::create_dir_all(&output_dir).expect("Failed to create output directory");
+    if let Err(error) = fs::create_dir_all(&output_dir) {
+        error!("Failed to create output directory: {error}");
+        std::process::exit(1);
+    }
 
     match matches.subcommand() {
         Some(("collector", _)) => {

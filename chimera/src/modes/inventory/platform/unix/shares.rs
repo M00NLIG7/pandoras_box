@@ -41,7 +41,7 @@ fn push_smb_share(
     if *has_path {
         if let Some(share_name) = current_share.take() {
             shares.push(Share {
-                share_type: ShareType::SMB,
+                share_type: ShareType::Smb,
                 network_path: format!("//localhost/{share_name}"),
             });
         }
@@ -117,7 +117,7 @@ fn parse_nfs_shares(
         }
 
         shares.push(Share {
-            share_type: ShareType::NFS,
+            share_type: ShareType::Nfs,
             network_path: format!("nfs://localhost{clean_path}"),
         });
     }

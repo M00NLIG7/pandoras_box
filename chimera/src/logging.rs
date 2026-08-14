@@ -1,11 +1,9 @@
 use crate::utils::{get_default_output_dir, APPLICATION_LOG_FILENAME};
 use chrono::Local;
-use log::SetLoggerError;
 use std::io::Write;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogFileMode {
-    Disabled,
     Append,
     Truncate,
 }
@@ -16,12 +14,6 @@ pub struct LoggingConfig {
 }
 
 impl LoggingConfig {
-    pub fn stderr_only() -> Self {
-        Self {
-            file_mode: LogFileMode::Disabled,
-        }
-    }
-
     pub fn append_file() -> Self {
         Self {
             file_mode: LogFileMode::Append,
@@ -55,34 +47,26 @@ impl Write for MultiWriter {
     }
 }
 
-pub fn init_logging(config: LoggingConfig) -> Result<(), SetLoggerError> {
+pub fn init_logging(config: LoggingConfig) -> Result<(), Box<dyn std::error::Error>> {
     let default_output = get_default_output_dir();
     let mut writers: Vec<Box<dyn Write + Send + Sync>> = vec![Box::new(std::io::stderr())];
 
+    std::fs::create_dir_all(&default_output)?;
+
+    let mut file = std::fs::OpenOptions::new();
+    file.create(true).write(true);
     match config.file_mode {
-        LogFileMode::Disabled => {}
-        LogFileMode::Append | LogFileMode::Truncate => {
-            std::fs::create_dir_all(&default_output).expect("Failed to create output directory");
-
-            let mut file = std::fs::OpenOptions::new();
-            file.create(true).write(true);
-
-            match config.file_mode {
-                LogFileMode::Append => {
-                    file.append(true);
-                }
-                LogFileMode::Truncate => {
-                    file.truncate(true);
-                }
-                LogFileMode::Disabled => {}
-            }
-
-            writers.push(Box::new(
-                file.open(default_output.join(APPLICATION_LOG_FILENAME))
-                    .expect("Failed to open log file"),
-            ));
+        LogFileMode::Append => {
+            file.append(true);
+        }
+        LogFileMode::Truncate => {
+            file.truncate(true);
         }
     }
+
+    writers.push(Box::new(
+        file.open(default_output.join(APPLICATION_LOG_FILENAME))?,
+    ));
 
     let env = env_logger::Env::default().default_filter_or("info");
 
@@ -98,6 +82,6 @@ pub fn init_logging(config: LoggingConfig) -> Result<(), SetLoggerError> {
             )
         })
         .target(env_logger::Target::Pipe(Box::new(MultiWriter { writers })))
-        .init();
+        .try_init()?;
     Ok(())
 }

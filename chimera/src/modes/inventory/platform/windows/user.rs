@@ -1,6 +1,6 @@
 use crate::types::UserInfo;
 use once_cell::sync::Lazy;
-use sysinfo::{SystemExt, User, UserExt};
+use sysinfo::{SystemExt, UserExt};
 
 static LOCAL_DOMAIN_ID: Lazy<Option<String>> = Lazy::new(|| {
     // Get seperate list of users and filter for local admin
@@ -13,10 +13,7 @@ static LOCAL_DOMAIN_ID: Lazy<Option<String>> = Lazy::new(|| {
         .filter_map(|user| {
             let uid = &user.id().to_string();
             match get_rid_from_sid(uid) {
-                Some(rid) if rid == "500" => match get_domain_id_from_sid(uid) {
-                    Ok(domain_id) => Some(domain_id),
-                    Err(_) => None,
-                },
+                Some("500") => get_domain_id_from_sid(uid).ok(),
                 _ => None,
             }
         })
@@ -24,7 +21,7 @@ static LOCAL_DOMAIN_ID: Lazy<Option<String>> = Lazy::new(|| {
 });
 
 fn get_rid_from_sid(sid: &str) -> Option<&str> {
-    sid.split('-').last()
+    sid.split('-').next_back()
 }
 
 fn get_domain_id_from_sid(sid: &str) -> Result<String, &'static str> {
