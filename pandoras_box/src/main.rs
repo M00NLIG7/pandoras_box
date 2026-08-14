@@ -1,17 +1,14 @@
 use clap::{arg as carg, command, value_parser, ArgGroup, ArgMatches, Command as ClapCommand};
 use log::{error, info};
 use pandoras_box::*;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufRead, Read};
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::process::Command;
-use std::sync::Once;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
-static INIT: Once = Once::new();
 const MAX_LOGIN_SECRET_BYTES: u64 = 4096;
 
 fn current_timestamp_string() -> String {
@@ -84,23 +81,6 @@ fn read_login_secret(
     }
 
     normalize_login_secret(value)
-}
-
-struct MemoryReport;
-
-impl Drop for MemoryReport {
-    fn drop(&mut self) {
-        let output = Command::new("ps")
-            .arg("-o")
-            .arg("rss=")
-            .arg("-p")
-            .arg(std::process::id().to_string())
-            .output()
-            .expect("Failed to execute command");
-
-        let memory_usage = String::from_utf8_lossy(&output.stdout);
-        info!("Memory Usage at Exit: {} KB", memory_usage.trim());
-    }
 }
 
 fn build_cli() -> ClapCommand {
@@ -211,61 +191,24 @@ fn mission_spec_from_matches(
 }
 
 pub fn setup_tracing() -> Result<()> {
-    let mut result = Ok(());
+    let console_layer = tracing_subscriber::fmt::layer()
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .with_file(true)
+        .with_line_number(true);
+    let filter_layer = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    INIT.call_once(|| {
-        // Create log file
-        let timestamp = current_timestamp_string();
-        let log_path = format!("./pandoras_box{}.log", timestamp);
-
-        // Create file appender
-        let file = match OpenOptions::new().create(true).append(true).open(&log_path) {
-            Ok(file) => file,
-            Err(e) => {
-                result = Err(Error::InvalidSubnet(e.to_string()));
-                return;
-            }
-        };
-
-        // Set up the file layer
-        let file_layer = tracing_subscriber::fmt::layer()
-            .with_thread_ids(true)
-            .with_thread_names(true)
-            .with_file(true)
-            .with_line_number(true)
-            .with_writer(file);
-
-        // Set up the console layer
-        let console_layer = tracing_subscriber::fmt::layer()
-            .with_thread_ids(true)
-            .with_thread_names(true)
-            .with_file(true)
-            .with_line_number(true);
-
-        // Set up the filter
-        let filter_layer =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-        // Combine everything and initialize
-        tracing_subscriber::registry()
-            .with(filter_layer)
-            .with(console_layer)
-            .with(file_layer)
-            .init();
-
-        println!("Logging initialized to {}", log_path);
-    });
-
-    result
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(console_layer)
+        .try_init()
+        .map_err(|err| Error::CommandError(format!("failed to initialize logging: {err}")))
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    setup_tracing()?;
-
-    let _memory_report = MemoryReport;
-
     let matches = build_cli().get_matches();
+    setup_tracing()?;
 
     let range = matches.get_one::<String>("range").unwrap();
     let password = {
