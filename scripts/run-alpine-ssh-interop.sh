@@ -112,6 +112,7 @@ docker run --rm \
     -e CARGO_INCREMENTAL=0 \
     -e CARGO_TARGET_DIR=/tmp/pandoras-box-target \
     -e PANDORAS_BOX_LIVE_ALPINE_SSH_ARTIFACT_ROOT="$LIVE_ARTIFACT_DIR" \
+    -e RUSTUP_TOOLCHAIN=1.94.1 \
     -e RUSTFLAGS="-C debuginfo=0" \
     -e RUST_BACKTRACE=1 \
     -e PANDORAS_BOX_LIVE_ALPINE_CHIMERA_UNIX_PATH \
