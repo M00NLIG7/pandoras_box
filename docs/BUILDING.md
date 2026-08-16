@@ -9,9 +9,10 @@ These are the current repository-local build instructions. Historical commands u
 - cargo-audit `0.22.1`
 - cargo-deny `0.20.2`
 - OCI build images by digest in `Cross.toml` and the live harness scripts
-- Smolder revision `05cad6854d6044a1af659693ba202c3de5285d57` in `pandoras_box/Cargo.toml` and `Cargo.lock`
+- Smolder crates.io releases `smolder =0.4.0`, `smolder-smb-core =0.4.0`, and `smolder-proto =0.4.0` in `pandoras_box/Cargo.toml` and `Cargo.lock`
+- Registry checksums `0b315789f82c66d4a30e80a0fa8182427e938c2c0ebf03951dc54282aee24338` (Smolder), `3aab6dd20ecda51a542cc99829ac08a79725636ad39adf6848bf85c2caa81940` (core), and `66b5efa58838c8f674c43b8f01ace543c88f4487b72a589af5e2d3b79c44ba28` (protocol)
 
-Do not replace exact versions or image/source revisions with floating tags in release validation.
+Do not replace exact versions, checksums, or image/source revisions with floating inputs in release validation.
 
 ## Tool setup
 
@@ -36,7 +37,7 @@ cargo fetch --locked
 cargo metadata --locked --offline --format-version 1 >/dev/null
 ```
 
-Cargo must resolve Smolder from the exact public Git revision. A local path override is not a release input.
+Cargo must resolve the exact Smolder release set and checksums from crates.io. A local path, Git override, or sibling checkout is not a release input.
 
 ## Mandatory source gates
 

@@ -9,7 +9,7 @@ Pandora performs active discovery, authentication, command execution, file stagi
 ## Trusted components
 
 - The operator host, local executable bundle, enrolled SSH host keys, login-secret provider, and artifact storage are trusted.
-- The exact source revision, lockfile, Rust toolchain, Cross images, and Smolder revision are release inputs.
+- The exact source revision, lockfile, Rust toolchain, Cross images, and checksummed Smolder crates.io release set are release inputs.
 - The remote target and network are treated as potentially hostile.
 - The Chimera process may run with elevated privileges, so its local output and cleanup paths are security-sensitive.
 
@@ -48,7 +48,7 @@ Traversal, unauthenticated fetch, replay, and destructive-read semantics are abs
 
 ### Supply chain
 
-The first-release RustRC surface is SSH/SFTP only. Winexe, opaque runtime artifacts, listener-based transfer, invalid-TLS behavior, and compile-time downloads are removed. Smolder uses one immutable public Git revision. Release checks reject known advisories and unknown dependency sources without a broad waiver.
+The first-release RustRC surface is SSH/SFTP only. Winexe, opaque runtime artifacts, listener-based transfer, invalid-TLS behavior, and compile-time downloads are removed. Smolder uses the exact checksummed crates.io `0.4.0` release set, without a path or Git override. Release checks reject known advisories and unknown dependency sources without a broad waiver.
 
 ## Explicit non-goals and residual risk
 

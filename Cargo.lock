@@ -1774,9 +1774,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
  "libc",
  "rand_chacha",
@@ -2303,21 +2303,24 @@ checksum = "3c5e1a9a646d36c3599cd173a41282daf47c44583ad367b8e6837255952e5c67"
 
 [[package]]
 name = "smolder"
-version = "0.3.0"
-source = "git+https://github.com/M00NLIG7/smolder.git?rev=05cad6854d6044a1af659693ba202c3de5285d57#05cad6854d6044a1af659693ba202c3de5285d57"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b315789f82c66d4a30e80a0fa8182427e938c2c0ebf03951dc54282aee24338"
 dependencies = [
  "bytes",
  "crossterm",
- "rand 0.8.6",
+ "rand 0.8.7",
  "smolder-proto",
  "smolder-smb-core",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
 name = "smolder-proto"
-version = "0.3.0"
-source = "git+https://github.com/M00NLIG7/smolder.git?rev=05cad6854d6044a1af659693ba202c3de5285d57#05cad6854d6044a1af659693ba202c3de5285d57"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66b5efa58838c8f674c43b8f01ace543c88f4487b72a589af5e2d3b79c44ba28"
 dependencies = [
  "bitflags 2.13.1",
  "bytes",
@@ -2326,8 +2329,9 @@ dependencies = [
 
 [[package]]
 name = "smolder-smb-core"
-version = "0.3.0"
-source = "git+https://github.com/M00NLIG7/smolder.git?rev=05cad6854d6044a1af659693ba202c3de5285d57#05cad6854d6044a1af659693ba202c3de5285d57"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3aab6dd20ecda51a542cc99829ac08a79725636ad39adf6848bf85c2caa81940"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -2340,13 +2344,14 @@ dependencies = [
  "lznt1",
  "md-5",
  "md4",
- "rand 0.8.6",
+ "rand 0.8.7",
  "rust-lzxpress",
  "sha2 0.10.8",
  "smolder-proto",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

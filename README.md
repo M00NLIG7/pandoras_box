@@ -24,7 +24,7 @@ The first release does **not** rotate passwords, harden hosts, download executab
 - **Pandora (`pandoras_box`)** owns mission validation, bounded target enumeration, discovery, transport selection, operation policy, checkpoints, accounting, and reports.
 - **Chimera (`chimera`)** performs bounded, read-only inventory probes and records machine-readable section errors when data is incomplete.
 - **RustRC (`rustrc`)** is the audited SSH/SFTP adapter. Its first-release surface excludes Winexe, WinRM, Telnet, embedded runtimes, listener-based transfer, and build-time downloads.
-- **Smolder** supplies the SMB implementation from the immutable public revision `05cad6854d6044a1af659693ba202c3de5285d57` at <https://github.com/M00NLIG7/smolder.git>. `Cargo.lock` records the resolved source; no sibling checkout is used.
+- **Smolder** supplies the SMB implementation from the exact crates.io release `smolder =0.4.0`. Its exact `smolder-smb-core =0.4.0` and `smolder-proto =0.4.0` dependencies and all three registry checksums are recorded in `Cargo.lock`; no sibling checkout or Git source is used.
 
 See [the threat model](docs/THREAT_MODEL.md) for assumptions and non-goals.
 
