@@ -1,105 +1,165 @@
 # Pandora's Box
 
-Pandora's Box is an authorized fleet-inventory orchestrator. It discovers requested targets, opens authenticated remote sessions, stages the Chimera collector, retrieves its terminal artifacts through the same authenticated session, cleans up, and writes durable mission reports.
+Pandora's Box is an authorized, cross-platform fleet-inventory orchestrator. One CLI discovers a requested range, applies explicit target and payload contracts, uses authenticated transports, runs the Chimera collector, and writes durable local reports.
 
-> **Authorization required.** Use this software only on systems you own or are explicitly authorized to administer. Discovery, authentication, command execution, file transfer, and inventory collection can be disruptive and may expose sensitive operational data.
+> **Authorization required.** Discovery, authentication, command execution, staging, and collection can be disruptive. Use Pandora only on systems you own or are explicitly authorized to administer.
 
-This tree is a first-release candidate, not evidence of support for every platform represented in the source. The release contract is deliberately narrow.
+## Platform contract and qualification
 
-## First-release scope
+Linux, Windows, FreeBSD/BSD, and pfSense are product support goals and first-class target contracts. A represented target is **not** automatically a live-supported target. Runtime execution requires all of the following before authentication:
 
-| Component | Distribution target | Mandatory evidence | Status |
-| --- | --- | --- | --- |
-| Pandora operator | `x86_64-unknown-linux-musl` | Locked build and exact-artifact smoke test | Release candidate |
-| Chimera payload | `x86_64-unknown-linux-musl` | Exact artifact over SSH/SFTP against Ubuntu 24.04 and Alpine 3.21 | Release candidate |
-| Windows SSH/SMB | None | Source compile-check only; no approved live gate | Not released or supported |
-| BSD and other architectures | None | No mandatory live gate | Not released or supported |
+1. an explicit OS, architecture, and transport contract;
+2. an exact payload entry for that OS/architecture;
+3. a nonempty version, expected SHA-256, and regular non-link payload file; and
+4. `live_qualified` evidence in the payload manifest.
 
-A skipped, emulated-only, or unavailable gate is not support evidence. The workflow packages only the x86_64 musl Linux bundle after both Linux live gates pass; no GNU/glibc artifact is a distribution target.
+Missing, ambiguous, invalid, unknown, or contract-only payloads become isolated per-host outcomes. They do not authenticate and do not stop healthy hosts.
 
-The first release does **not** rotate passwords, harden hosts, download executables during compilation, ship Winexe, or expose an HTTP artifact server. Chimera writes terminal files locally; Pandora retrieves them with SFTP or, on the unreleased Windows path, through the already-authenticated SMB session.
+| Target/path | Implemented contract | Exact packaged/live evidence at this source revision |
+| --- | --- | --- |
+| Linux x86_64 over SSH/SFTP | Planning, capability probe, payload selection, secure workspace, collection, cleanup | The release workflow defines exact packaged-operator Ubuntu 24.04 and Alpine 3.21 gates. A bundle is qualified only when its generated payload manifest records those passing gates. No built artifact is present in this source tree. |
+| Windows x86_64 over SSH/SFTP | First-class Windows shell, payload, and transport contract | Awaiting exact x86_64 Windows payload packaging and controlled live gate. Not currently claimed live-qualified. |
+| Windows SMB fallback | Explicit fallback contract; SMB 3.1.1/signing and encryption-required ADMIN$ configuration | **Blocked before authentication** with pinned Smolder 0.4.0 because its public remote-exec builder cannot enforce `SecurityPolicy::pandora()` on every SCMR request. Awaiting a pinned strict adapter and controlled live gate. |
+| FreeBSD, OpenBSD, NetBSD, and DragonFly BSD x86_64 over SSH/SFTP | Exact-family POSIX contracts and runtime capability checks; generic `bsd` is report-only to prevent ABI guessing | Awaiting exact native payloads and controlled live gates. |
+| pfSense x86_64 over SSH/SFTP | First-class pfSense contract, verified as a FreeBSD runtime before staging | Awaiting an exact pfSense-compatible payload and controlled live gate. |
+| Other architectures | `x86`, `aarch64`, and `armv7` are representable payload keys | No packaged artifacts or live claims yet. |
 
-## Components and trust boundaries
+Passive TTL/port inference is retained only as a report hint. It never selects an authenticated adapter or payload.
 
-- **Pandora (`pandoras_box`)** owns mission validation, bounded target enumeration, discovery, transport selection, operation policy, checkpoints, accounting, and reports.
-- **Chimera (`chimera`)** performs bounded, read-only inventory probes and records machine-readable section errors when data is incomplete.
-- **RustRC (`rustrc`)** is the audited SSH/SFTP adapter. Its first-release surface excludes Winexe, WinRM, Telnet, embedded runtimes, listener-based transfer, and build-time downloads.
-- **Smolder** supplies the SMB implementation from the exact crates.io release `smolder =0.4.0`. Its exact `smolder-smb-core =0.4.0` and `smolder-proto =0.4.0` dependencies and all three registry checksums are recorded in `Cargo.lock`; no sibling checkout or Git source is used.
+## Fast one-bundle operation
 
-See [the threat model](docs/THREAT_MODEL.md) for assumptions and non-goals.
-
-## Safe operator setup
-
-Pandora requires a login secret from standard input or a protected file. It does not accept secrets in process arguments.
-
-Before connecting, enroll and independently verify each SSH host key in the operator account's normal OpenSSH `known_hosts` file. Unknown and changed keys fail closed by default.
-
-Run the packaged operator from the bundle root so its canonical `release/chimera` payload is available:
+A validated bundle contains one operator, the packaged collectors, and one generated payload manifest. Configure named credential profiles once, have the existing secret provider inject the referenced environment values/files/agent identities, then run one CLI from the bundle root:
 
 ```sh
-verified-secret-provider | ./bin/pandoras_box \
-  --range 192.0.2.10/32 \
-  --password-stdin \
-  --mission_id inventory-001 \
-  --artifact_root ./artifacts
-```
-
-A protected file or file descriptor is also supported:
-
-```sh
-chmod 600 /path/to/login-secret
 ./bin/pandoras_box \
   --range 192.0.2.0/28 \
-  --password-file /path/to/login-secret \
-  --mission_id inventory-002 \
-  --artifact_root ./artifacts
+  --profile linux-x86_64 \
+  --credential-config ./pandora-credentials.json \
+  --mission-id inventory-001 \
+  --artifact-root ./artifacts
 ```
 
-`--dangerously-accept-unknown-host-keys` is a conspicuous first-contact escape hatch. It does not enroll a key and must not replace out-of-band fingerprint verification. A changed enrolled key remains rejected.
+The default `release/payloads.json` is loaded automatically. The default target profile is `detect-only`; it performs bounded discovery and local reporting but never authenticates. This is the safe choice for unknown or mixed ranges and requires no credential prompt.
 
-Use `--dry_run` to preview without permitting mutating session operations. Discovery and local report creation can still occur. The operation boundary, not only the planner, rejects remote mutations in dry-run mode.
+For mixed fleets, provide per-host contracts:
 
-## Target and exit semantics
+```json
+{
+  "targets": {
+    "192.0.2.10": {
+      "operating_system": "linux",
+      "architecture": "x86_64",
+      "transports": ["ssh_sftp"]
+    },
+    "192.0.2.20": {
+      "operating_system": "windows",
+      "architecture": "x86_64",
+      "transports": ["ssh_sftp", "windows_smb"]
+    },
+    "192.0.2.30": {
+      "operating_system": "pfsense",
+      "architecture": "x86_64",
+      "transports": ["ssh_sftp"]
+    }
+  }
+}
+```
 
-- `/32` requests exactly one address; `/31` requests both addresses.
-- Larger CIDRs are checked against `--max-targets` (default `65536`) before host materialization.
-- `summary.json` separately records `requested_targets`, `reachable_targets`, `unreachable_targets`, `skipped_targets`, `attempted_targets`, `completed_hosts`, and `failed_hosts`.
-- Strict mode is the default. Zero attempted targets or any handled host failure returns nonzero; an unhandled mission error always returns nonzero.
-- `--best-effort` returns zero after handled target failures, including zero attempted targets. It does not convert an unhandled mission error into success.
-- Eligible transport fallback is recorded in each host status. A fallback is not attempted after a non-idempotent side effect may have occurred.
+Pass it with `--target-contracts contracts.json`. SMB is additionally disabled unless `--allow-encrypted-smb-fallback` is explicit, the selected named profile also permits `windows_smb`, and the current pinned adapter still fails closed as shown in the matrix.
 
-## Mission artifacts
+## Named credential profiles
 
-Mission identifiers are a single portable path component: 1–128 ASCII letters, digits, `.`, `_`, or `-`, beginning with a letter or digit and not ending in `.`. One process at a time may own an artifact root.
+`--credential-config` loads a bounded versioned configuration with a fleet default, optional OS defaults, exact per-host overrides, and named policies. Profiles support:
+
+- passwords from an external environment variable or protected file;
+- pinned Ed25519/ECDSA private keys or one exact existing SSH-agent identity;
+- username, Windows domain/workstation, SSH/SMB ports, transport allow-list, and host-key policy.
+
+Selection is automatic: host override, then OS default, then fleet default. Missing, duplicate/ambiguous, unavailable, or policy-incompatible selections become terminal per-host `credentials` outcomes before target authentication. Pandora never prompts per host, tries another credential, or downgrades transport/identity policy. Secret values are absent from inventories, logs, reports, mission state, and resume signatures; only profile names and hashes of non-secret policy are persisted.
+
+See [`docs/CREDENTIAL_PROFILES.md`](docs/CREDENTIAL_PROFILES.md) for the complete schema and external-provider contract. The legacy `--password-stdin`/`--password-file` path remains a fast one-global-secret compatibility mode and is internally represented as named defaults; it is mutually exclusive with `--credential-config`.
+
+A payload manifest has this shape; paths are relative to the manifest directory unless absolute:
+
+```json
+{
+  "payloads": [{
+    "operating_system": "linux",
+    "architecture": "x86_64",
+    "path": "chimera",
+    "version": "0.1.0",
+    "sha256": "<64 lowercase hexadecimal characters>",
+    "qualification": "live_qualified",
+    "evidence": ["exact packaged operator gate identifier"]
+  }]
+}
+```
+
+Do not mark an entry `live_qualified` without exact artifact evidence. Use `contract_only` while implementation or validation remains incomplete; Pandora will report it without authentication.
+
+## Safety behavior
+
+- SSH/SFTP is preferred. Known-host verification is required by default. Credential-profile, authentication, and host-identity failures are terminal and block retry or fallback.
+- Named profiles pin host-key policy per profile. The legacy `--dangerously-accept-unknown-host-keys` switch is an explicit first-contact exception; changed enrolled keys still fail closed.
+- Secrets come only from an external environment variable, protected file, existing SSH agent/key, or legacy standard input—never an argument value or host contract.
+- `--dry-run` never enters the authenticated transport stack. It performs no identity command, upload, service creation, SMB execution, or remote cleanup.
+- Remote workspaces use a cryptographic 192-bit nonce, restrictive permissions/ACLs, an ownership token, OS-owned validation, and non-recursive cleanup. Links/reparse points, wrong owners, altered paths, and unsafe prior contents fail closed.
+- Terminal stage, execute, and collect failures attempt bounded cleanup. Host status records `cleanup_outcome`, `residue_present`, and `partial_collection` without rewriting the initiating failure.
+- Local directories and files default to 0700/0600 on Unix and a protected owner/Administrators/SYSTEM DACL on Windows. Artifact roots should also use encrypted storage where required.
+
+## Bounds and tuning
+
+Fast defaults are exposed rather than hard-coded. Relevant flags include:
+
+- `--concurrency`, `--retries`, `--retry-backoff-ms`
+- `--discovery-timeout-ms`, `--connect-timeout-ms`, `--inactivity-timeout-ms`
+- `--command-timeout-ms`, `--transfer-timeout-ms`, `--cleanup-timeout-ms`
+- `--host-timeout-ms`, `--mission-timeout-ms`
+- `--max-command-output-bytes`, `--max-download-bytes`, `--max-payload-bytes`
+- profile `ssh_port`/`smb_port`, legacy `--ssh-port`, and repeatable `--discovery-port`
+
+Command output, payloads, downloads, connections, operations, hosts, cleanup, and missions are bounded. Ctrl-C stops new work, lets active bounded operations return, attempts workspace cleanup, and persists interruption outcomes.
+
+## Mission reuse
+
+Mission reuse is never implicit:
+
+- an existing mission ID errors by default;
+- `--resume --mission-id ID` verifies the exact target, non-secret selected credential policy, deadlines, and payload identity before using checkpoints;
+- resumed random workspace descriptors are validated against the exact payload and target contract;
+- `--fresh --mission-id ID` explicitly removes the prior private mission directory and starts over.
+
+A repeated ID cannot silently present prior artifacts as a fresh collection.
+
+## Reports and rendering
+
+Core completion writes:
 
 ```text
 artifacts/<mission-id>/
 ├── mission.json
 ├── summary.json
 ├── asset_inventory.{json,md,csv,pdf}
-├── network_topology.{md,mmd,excalidraw,png}
+├── network_topology.{md,mmd,excalidraw}
 └── hosts/<ip>/
     ├── plan.json
     ├── status.json
+    ├── workspace.json
     ├── exec/
     ├── files/inventory.json
     └── logs/application.log
 ```
 
-Durable JSON is serialized with Serde and replaced atomically. Host status retains the selected transport, attempt count, failure phase/disposition, and completed phases so cleanup or collection partial success remains visible. Chimera's `inventory.json` contains `sectionErrors` when an inventory section could not be collected.
+Aggregate reports expose Chimera `sectionErrors`, partial inventories, cleanup residue, and partial downloads. CSV fields are formula-neutralized.
 
-Treat the artifact root as sensitive: inventories, usernames, topology, command output, and failure details can aid an attacker. Mission manifests exclude the login secret, and secret-bearing types redact `Debug` output, but operators remain responsible for storage and retention controls.
+PNG rendering is off by default. Pandora never searches or executes code under `HOME`, `CODEX_HOME`, or another ambient tool directory. Optional rendering requires both `--topology-renderer PATH` and `--topology-renderer-sha256 DIGEST`; the standalone renderer receives `input.excalidraw output.png`, has no stdin/stdout capture, runs after core mission completion, and is deadline/output bounded. Its independent result is written to `rendering_status.json`.
 
-## Build, test, and provenance
+## Build and evidence
 
-Use the tested locked commands in [`docs/BUILDING.md`](docs/BUILDING.md). Release automation validates and packages first; publishing is a separate, explicit draft-release step that runs only after all gates pass. Binary bundles include checksums, Cargo metadata, and source/toolchain/Smolder provenance.
+See [`docs/BUILDING.md`](docs/BUILDING.md) for locked local gates and exact-artifact qualification. See [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) for trust boundaries and remaining evidence.
 
-All repository documentation and generated documentation are local-only and are excluded from package uploads and release attachments.
-
-The live scripts under [`scripts/`](scripts/README.md) are disposable test infrastructure, not operator tooling. Windows and mixed harnesses can modify a local lab fixture and are not release evidence in this branch.
-
-Historical competition research is preserved under [`docs/archive/`](docs/archive/) with freshness warnings. It is not current product or build guidance.
+Repository documentation is local-only and is not included in release bundles or uploaded as generated documentation.
 
 ## License
 
-Source code in the first-release surface is available under the [MIT License](LICENSE). Removed historical Winexe/runc artifacts were not accepted as release inputs; see [`rustrc/PROVENANCE.md`](rustrc/PROVENANCE.md).
+Source is available under the [MIT License](LICENSE).

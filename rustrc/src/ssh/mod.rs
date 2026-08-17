@@ -1,19 +1,28 @@
 use crate::client::{Command, CommandOutput, Config, Session};
 use russh::client;
+use russh::keys::agent::{
+    client::{AgentClient, AgentStream},
+    AgentIdentity,
+};
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::known_hosts::{
     check_known_hosts, check_known_hosts_path, known_host_keys, known_host_keys_path,
 };
-use russh::keys::{load_secret_key, PublicKey};
+use russh::keys::{load_secret_key, HashAlg, PublicKey};
 use std::{
     borrow::Cow,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
+
+static DOWNLOAD_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 use tokio::time::{timeout, Duration};
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{lookup_host, ToSocketAddrs},
 };
 use tracing::{debug, error, instrument, trace, warn};
@@ -32,6 +41,26 @@ pub struct SSHSession {
 pub enum HostKeyPolicy {
     RequireKnownHosts,
     DangerouslyAcceptUnknown,
+}
+
+/// Per-operation deadlines and byte bounds for SSH/SFTP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SshOperationLimits {
+    pub command_timeout: Duration,
+    pub transfer_timeout: Duration,
+    pub max_command_output_bytes: usize,
+    pub max_download_bytes: u64,
+}
+
+impl Default for SshOperationLimits {
+    fn default() -> Self {
+        Self {
+            command_timeout: Duration::from_secs(300),
+            transfer_timeout: Duration::from_secs(300),
+            max_command_output_bytes: 1024 * 1024,
+            max_download_bytes: 16 * 1024 * 1024,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -74,14 +103,28 @@ pub enum SSHConfig {
         username: String,
         socket: SocketAddr,
         key_path: PathBuf,
+        expected_public_key_sha256: Option<String>,
+        connection_timeout: Duration,
         inactivity_timeout: Duration,
+        operation_limits: SshOperationLimits,
+        host_key_policy: HostKeyPolicy,
+    },
+    Agent {
+        username: String,
+        socket: SocketAddr,
+        public_key_sha256: String,
+        connection_timeout: Duration,
+        inactivity_timeout: Duration,
+        operation_limits: SshOperationLimits,
         host_key_policy: HostKeyPolicy,
     },
     Password {
         username: String,
         socket: SocketAddr,
         password: SecretString,
+        connection_timeout: Duration,
         inactivity_timeout: Duration,
+        operation_limits: SshOperationLimits,
         host_key_policy: HostKeyPolicy,
     },
 }
@@ -121,7 +164,53 @@ impl SSHConfig {
             username: username.into(),
             socket: Self::resolve_socket(socket).await?,
             key_path: key_path.into(),
+            expected_public_key_sha256: None,
+            connection_timeout: Duration::from_secs(10),
             inactivity_timeout,
+            operation_limits: SshOperationLimits::default(),
+            host_key_policy,
+        })
+    }
+
+    pub async fn key_with_policy_and_fingerprint<
+        U: Into<String>,
+        S: ToSocketAddrs,
+        P: Into<PathBuf>,
+        F: Into<String>,
+    >(
+        username: U,
+        socket: S,
+        key_path: P,
+        expected_public_key_sha256: F,
+        inactivity_timeout: Duration,
+        host_key_policy: HostKeyPolicy,
+    ) -> crate::Result<Self> {
+        Ok(SSHConfig::Key {
+            username: username.into(),
+            socket: Self::resolve_socket(socket).await?,
+            key_path: key_path.into(),
+            expected_public_key_sha256: Some(expected_public_key_sha256.into()),
+            connection_timeout: Duration::from_secs(10),
+            inactivity_timeout,
+            operation_limits: SshOperationLimits::default(),
+            host_key_policy,
+        })
+    }
+
+    pub async fn agent_with_policy<U: Into<String>, S: ToSocketAddrs, F: Into<String>>(
+        username: U,
+        socket: S,
+        public_key_sha256: F,
+        inactivity_timeout: Duration,
+        host_key_policy: HostKeyPolicy,
+    ) -> crate::Result<Self> {
+        Ok(SSHConfig::Agent {
+            username: username.into(),
+            socket: Self::resolve_socket(socket).await?,
+            public_key_sha256: public_key_sha256.into(),
+            connection_timeout: Duration::from_secs(10),
+            inactivity_timeout,
+            operation_limits: SshOperationLimits::default(),
             host_key_policy,
         })
     }
@@ -153,10 +242,78 @@ impl SSHConfig {
             username: username.into(),
             socket: Self::resolve_socket(socket).await?,
             password: password.into(),
+            connection_timeout: Duration::from_secs(10),
             inactivity_timeout,
+            operation_limits: SshOperationLimits::default(),
             host_key_policy,
         })
     }
+
+    #[must_use]
+    pub fn with_connection_timeout(mut self, timeout: Duration) -> Self {
+        match &mut self {
+            Self::Key {
+                connection_timeout, ..
+            }
+            | Self::Agent {
+                connection_timeout, ..
+            }
+            | Self::Password {
+                connection_timeout, ..
+            } => *connection_timeout = timeout,
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn with_operation_limits(mut self, limits: SshOperationLimits) -> Self {
+        match &mut self {
+            Self::Key {
+                operation_limits, ..
+            }
+            | Self::Agent {
+                operation_limits, ..
+            }
+            | Self::Password {
+                operation_limits, ..
+            } => *operation_limits = limits,
+        }
+        self
+    }
+
+    fn operation_limits(&self) -> SshOperationLimits {
+        match self {
+            Self::Key {
+                operation_limits, ..
+            }
+            | Self::Agent {
+                operation_limits, ..
+            }
+            | Self::Password {
+                operation_limits, ..
+            } => *operation_limits,
+        }
+    }
+}
+
+fn append_bounded_output(
+    destination: &mut Vec<u8>,
+    incoming: &[u8],
+    other_stream_len: usize,
+    maximum: usize,
+) -> crate::Result<()> {
+    let requested = destination
+        .len()
+        .checked_add(other_stream_len)
+        .and_then(|current| current.checked_add(incoming.len()))
+        .ok_or_else(|| crate::Error::CommandError("SSH output length overflowed usize".into()))?;
+    if requested > maximum {
+        return Err(crate::Error::CommandError(format!(
+            "SSH command output exceeded the {maximum} byte bound"
+        )));
+    }
+    destination.extend_from_slice(incoming);
+    Ok(())
 }
 
 impl Session for SSHSession {
@@ -207,61 +364,107 @@ impl Session for SSHSession {
     }
 
     async fn download_file(&self, remote_path: &str, local_path: &str) -> crate::Result<()> {
-        // Create parent directories if they don't exist
+        let limits = self.config.operation_limits();
         if let Some(parent) = Path::new(local_path).parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
         let sftp = self.create_sftp_session().await?;
-
-        // Create temporary file for download
-        let temp_path = format!("{}.tmp", local_path);
-        let mut local_file = match tokio::fs::File::create(&temp_path).await {
-            Ok(file) => file,
-            Err(e) => {
+        let candidates = if is_windows_remote_path(remote_path) {
+            windows_sftp_path_candidates(remote_path)
+        } else {
+            vec![remote_path.to_string()]
+        };
+        let mut failures = Vec::new();
+        let mut selected_remote_file = None;
+        for candidate in candidates {
+            let metadata = match sftp.symlink_metadata(&candidate).await {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    failures.push(format!("{candidate}: metadata: {error}"));
+                    continue;
+                }
+            };
+            if metadata.is_symlink() || !metadata.is_regular() {
                 return Err(crate::Error::FileTransferError(format!(
-                    "Failed to create local file: {}",
-                    e
+                    "Remote download source must be a regular non-link file: {candidate}"
                 )));
             }
-        };
-
-        // Open remote file with error handling
-        let mut remote_file = match sftp.open(remote_path).await {
-            Ok(file) => file,
-            Err(e) => {
-                let _ = tokio::fs::remove_file(&temp_path).await;
+            if metadata
+                .size
+                .is_some_and(|size| size > limits.max_download_bytes)
+            {
                 return Err(crate::Error::FileTransferError(format!(
-                    "Failed to open remote file: {}",
-                    e
+                    "Remote file exceeds the {} byte download bound: {candidate}",
+                    limits.max_download_bytes
                 )));
             }
-        };
+            match sftp.open(&candidate).await {
+                Ok(file) => {
+                    selected_remote_file = Some(file);
+                    break;
+                }
+                Err(error) => failures.push(format!("{candidate}: open: {error}")),
+            }
+        }
+        let remote_file = selected_remote_file.ok_or_else(|| {
+            crate::Error::FileTransferError(format!(
+                "Failed to open remote file through any safe SFTP path: {}",
+                failures.join(" | ")
+            ))
+        })?;
 
-        // Copy with timeout
+        let sequence = DOWNLOAD_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temp_path = format!("{local_path}.tmp-{}-{sequence}", std::process::id());
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let mut local_file = options.open(&temp_path).await.map_err(|error| {
+            crate::Error::FileTransferError(format!("Failed to create local file: {error}"))
+        })?;
+
+        let mut bounded_remote = remote_file.take(limits.max_download_bytes.saturating_add(1));
+
         match tokio::time::timeout(
-            Duration::from_secs(300), // 5 minute timeout
-            tokio::io::copy(&mut remote_file, &mut local_file),
+            limits.transfer_timeout,
+            tokio::io::copy(&mut bounded_remote, &mut local_file),
         )
         .await
         {
-            Ok(Ok(_)) => {
-                // Ensure file is flushed
-                local_file.sync_all().await?;
-                // Rename temp file to target
-                tokio::fs::rename(temp_path, local_path).await?;
-                Ok(())
+            Ok(Ok(copied)) if copied <= limits.max_download_bytes => {
+                let finalize_result = async {
+                    local_file.sync_all().await?;
+                    tokio::fs::rename(&temp_path, local_path).await?;
+                    Ok::<(), crate::Error>(())
+                }
+                .await;
+                if finalize_result.is_err() {
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                }
+                finalize_result
             }
-            Ok(Err(e)) => {
+            Ok(Ok(_)) => {
                 let _ = tokio::fs::remove_file(&temp_path).await;
                 Err(crate::Error::FileTransferError(format!(
-                    "Copy failed: {}",
-                    e
+                    "Remote file exceeded the {} byte download bound",
+                    limits.max_download_bytes
+                )))
+            }
+            Ok(Err(error)) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                Err(crate::Error::FileTransferError(format!(
+                    "Copy failed: {error}"
                 )))
             }
             Err(_) => {
                 let _ = tokio::fs::remove_file(&temp_path).await;
-                Err(crate::Error::FileTransferError("Download timed out".into()))
+                Err(crate::Error::FileTransferError(format!(
+                    "Download timed out after {:?}",
+                    limits.transfer_timeout
+                )))
             }
         }
     }
@@ -428,12 +631,12 @@ impl SSHSession {
         &self,
         channel: &mut russh::Channel<russh::client::Msg>,
     ) -> crate::Result<CommandOutput> {
-        const TIMEOUT_SECONDS: u64 = 300; // Increased from 120s to 5 minutes for long-running operations
-        const BUFFER_CAPACITY: usize = 1024 * 1024; // 1MB initial capacity
+        let limits = self.config.operation_limits();
+        let initial_capacity = limits.max_command_output_bytes.min(64 * 1024);
 
         let processing = async {
-            let mut stdout = Vec::with_capacity(BUFFER_CAPACITY);
-            let mut stderr = Vec::with_capacity(BUFFER_CAPACITY);
+            let mut stdout = Vec::with_capacity(initial_capacity);
+            let mut stderr = Vec::with_capacity(initial_capacity);
 
             // Track EOF and exit status
             let mut remote_eof_received = false;
@@ -445,13 +648,23 @@ impl SSHSession {
                         match msg {
                             russh::ChannelMsg::Data { ref data } => {
                                 if !data.is_empty() {
-                                    stdout.extend_from_slice(data);
+                                    append_bounded_output(
+                                        &mut stdout,
+                                        data,
+                                        stderr.len(),
+                                        limits.max_command_output_bytes,
+                                    )?;
                                     trace!(bytes = data.len(), "Received stdout data");
                                 }
                             }
                             russh::ChannelMsg::ExtendedData { ref data, .. } => {
                                 if !data.is_empty() {
-                                    stderr.extend_from_slice(data);
+                                    append_bounded_output(
+                                        &mut stderr,
+                                        data,
+                                        stdout.len(),
+                                        limits.max_command_output_bytes,
+                                    )?;
                                     trace!(bytes = data.len(), "Received stderr data");
                                 }
                             }
@@ -508,16 +721,13 @@ impl SSHSession {
         };
 
         // Wrap the processing in a timeout
-        match timeout(Duration::from_secs(TIMEOUT_SECONDS), processing).await {
+        match timeout(limits.command_timeout, processing).await {
             Ok(result) => result,
             Err(_) => {
-                warn!(
-                    "Command execution timed out after {} seconds",
-                    TIMEOUT_SECONDS
-                );
+                warn!(timeout = ?limits.command_timeout, "Command execution timed out");
                 Err(crate::Error::CommandError(format!(
-                    "Command execution timed out after {} seconds",
-                    TIMEOUT_SECONDS
+                    "Command execution timed out after {:?}",
+                    limits.command_timeout
                 )))
             }
         }
@@ -580,18 +790,18 @@ impl SSHSession {
         file_contents: Arc<Vec<u8>>,
         remote_dest: &str,
     ) -> crate::Result<()> {
-        const TRANSFER_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
+        let transfer_timeout = self.config.operation_limits().transfer_timeout;
 
         match tokio::time::timeout(
-            TRANSFER_TIMEOUT,
+            transfer_timeout,
             self.transfer_file_inner(file_contents, remote_dest),
         )
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(crate::Error::FileTransferError(
-                "File transfer operation timed out".into(),
-            )),
+            Err(_) => Err(crate::Error::FileTransferError(format!(
+                "File transfer operation timed out after {transfer_timeout:?}"
+            ))),
         }
     }
 
@@ -814,16 +1024,25 @@ impl Config for SSHConfig {
         match self {
             SSHConfig::Key {
                 key_path,
+                expected_public_key_sha256,
+                connection_timeout,
                 inactivity_timeout,
                 username,
                 socket,
                 host_key_policy,
+                ..
             } => {
-                let mut session =
-                    get_handle(*socket, *inactivity_timeout, *host_key_policy).await?;
-
-                let key_pair = load_secret_key(key_path, None)?;
-                ensure_private_key_algorithm_supported(key_pair.algorithm())?;
+                // Key availability, algorithm policy, and pinned identity are checked
+                // before any connection to the target is opened.
+                let key_pair =
+                    load_validated_private_key(key_path, expected_public_key_sha256.as_deref())?;
+                let mut session = get_handle(
+                    *socket,
+                    *connection_timeout,
+                    *inactivity_timeout,
+                    *host_key_policy,
+                )
+                .await?;
                 let auth_res = session
                     .authenticate_publickey(
                         username,
@@ -842,15 +1061,68 @@ impl Config for SSHConfig {
                     config: self.clone(),
                 })
             }
+            SSHConfig::Agent {
+                username,
+                socket,
+                public_key_sha256,
+                connection_timeout,
+                inactivity_timeout,
+                host_key_policy,
+                ..
+            } => {
+                // Agent availability and exact identity selection happen locally,
+                // before opening a connection to the target.
+                let (mut agent, identity) = configured_agent_identity(public_key_sha256).await?;
+                let mut session = get_handle(
+                    *socket,
+                    *connection_timeout,
+                    *inactivity_timeout,
+                    *host_key_policy,
+                )
+                .await?;
+                let auth_res = match identity {
+                    AgentIdentity::PublicKey { key, .. } => {
+                        session
+                            .authenticate_publickey_with(username, key, None, &mut agent)
+                            .await
+                    }
+                    AgentIdentity::Certificate { certificate, .. } => {
+                        session
+                            .authenticate_certificate_with(username, certificate, None, &mut agent)
+                            .await
+                    }
+                }
+                .map_err(|error| {
+                    crate::Error::AuthenticationError(format!("SSH agent signing failed: {error}"))
+                })?;
+
+                if !auth_res.success() {
+                    return Err(crate::Error::AuthenticationError(
+                        "Failed to authenticate with selected SSH agent identity".to_string(),
+                    ));
+                }
+
+                Ok(SSHSession {
+                    session,
+                    config: self.clone(),
+                })
+            }
             SSHConfig::Password {
                 username,
                 socket,
                 password,
+                connection_timeout,
                 inactivity_timeout,
                 host_key_policy,
+                ..
             } => {
-                let mut session =
-                    get_handle(*socket, *inactivity_timeout, *host_key_policy).await?;
+                let mut session = get_handle(
+                    *socket,
+                    *connection_timeout,
+                    *inactivity_timeout,
+                    *host_key_policy,
+                )
+                .await?;
                 let auth_res = session
                     .authenticate_password(username, password.expose_secret())
                     .await?;
@@ -879,13 +1151,106 @@ fn ensure_private_key_algorithm_supported(algorithm: russh::keys::Algorithm) -> 
     Ok(())
 }
 
+fn load_validated_private_key(
+    key_path: &Path,
+    expected_public_key_sha256: Option<&str>,
+) -> crate::Result<russh::keys::PrivateKey> {
+    let key_pair = load_secret_key(key_path, None).map_err(|error| {
+        crate::Error::ConfigError(format!(
+            "failed to load SSH private key {}: {error}",
+            key_path.display()
+        ))
+    })?;
+    ensure_private_key_algorithm_supported(key_pair.algorithm())?;
+    let actual = key_pair
+        .public_key()
+        .fingerprint(HashAlg::Sha256)
+        .to_string();
+    if expected_public_key_sha256.is_some_and(|expected| expected != actual) {
+        return Err(crate::Error::ConfigError(format!(
+            "SSH private key {} does not match the pinned public-key fingerprint",
+            key_path.display()
+        )));
+    }
+    Ok(key_pair)
+}
+
+pub fn preflight_private_key(
+    key_path: &Path,
+    expected_public_key_sha256: &str,
+) -> crate::Result<()> {
+    load_validated_private_key(key_path, Some(expected_public_key_sha256)).map(drop)
+}
+
+type DynamicAgentClient = AgentClient<Box<dyn AgentStream + Send + Unpin>>;
+
+#[cfg(unix)]
+async fn connect_configured_agent() -> crate::Result<DynamicAgentClient> {
+    AgentClient::connect_env()
+        .await
+        .map(AgentClient::dynamic)
+        .map_err(|error| crate::Error::ConfigError(format!("SSH agent is unavailable: {error}")))
+}
+
+#[cfg(windows)]
+async fn connect_configured_agent() -> crate::Result<DynamicAgentClient> {
+    let pipe = std::env::var_os("SSH_AUTH_SOCK")
+        .unwrap_or_else(|| std::ffi::OsString::from(r"\\.\pipe\openssh-ssh-agent"));
+    AgentClient::<tokio::net::windows::named_pipe::NamedPipeClient>::connect_named_pipe(pipe)
+        .await
+        .map(AgentClient::dynamic)
+        .map_err(|error| crate::Error::ConfigError(format!("SSH agent is unavailable: {error}")))
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn connect_configured_agent() -> crate::Result<DynamicAgentClient> {
+    Err(crate::Error::ConfigError(
+        "SSH agent authentication is unavailable on this operator platform".to_string(),
+    ))
+}
+
+async fn configured_agent_identity(
+    expected_public_key_sha256: &str,
+) -> crate::Result<(DynamicAgentClient, AgentIdentity)> {
+    let mut agent = connect_configured_agent().await?;
+    let identities = agent.request_identities().await.map_err(|error| {
+        crate::Error::ConfigError(format!("failed to enumerate SSH agent identities: {error}"))
+    })?;
+    let mut matching = identities.into_iter().filter(|identity| {
+        identity
+            .public_key()
+            .fingerprint(HashAlg::Sha256)
+            .to_string()
+            == expected_public_key_sha256
+    });
+    let identity = matching.next().ok_or_else(|| {
+        crate::Error::ConfigError(format!(
+            "SSH agent does not contain pinned identity {expected_public_key_sha256}"
+        ))
+    })?;
+    if matching.next().is_some() {
+        return Err(crate::Error::ConfigError(format!(
+            "SSH agent identity {expected_public_key_sha256} is ambiguous"
+        )));
+    }
+    ensure_private_key_algorithm_supported(identity.public_key().algorithm())?;
+    Ok((agent, identity))
+}
+
+pub async fn preflight_agent_identity(expected_public_key_sha256: &str) -> crate::Result<()> {
+    configured_agent_identity(expected_public_key_sha256)
+        .await
+        .map(drop)
+}
+
 async fn get_handle(
     socket: SocketAddr,
-    timeout: Duration,
+    connection_timeout: Duration,
+    inactivity_timeout: Duration,
     host_key_policy: HostKeyPolicy,
 ) -> crate::Result<russh::client::Handle<Handler>> {
     let config = client::Config {
-        inactivity_timeout: Some(timeout),
+        inactivity_timeout: Some(inactivity_timeout),
         ..Default::default()
     };
 
@@ -894,7 +1259,12 @@ async fn get_handle(
         socket,
         host_key_policy,
     };
-    Ok(client::connect(config, socket, sh).await?)
+    match timeout(connection_timeout, client::connect(config, socket, sh)).await {
+        Ok(result) => Ok(result?),
+        Err(_) => Err(crate::Error::ConnectionError(format!(
+            "SSH connection to {socket} timed out after {connection_timeout:?}"
+        ))),
+    }
 }
 
 struct Handler {
@@ -1000,8 +1370,9 @@ impl client::Handler for Handler {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_private_key_algorithm_supported, normalized_sftp_path, verify_server_key,
-        windows_parent_directories, windows_sftp_path_candidates, HostKeyPolicy,
+        append_bounded_output, ensure_private_key_algorithm_supported, normalized_sftp_path,
+        verify_server_key, windows_parent_directories, windows_sftp_path_candidates, HostKeyPolicy,
+        SshOperationLimits,
     };
     use russh::keys::{Algorithm, PublicKey};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -1028,6 +1399,86 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         PublicKey::from_openssh(&without_comment).expect("test public key should parse")
+    }
+
+    #[test]
+    fn command_output_buffer_rejects_bytes_beyond_the_exact_bound() {
+        let mut stdout = b"1234".to_vec();
+        append_bounded_output(&mut stdout, b"56", 2, 8).expect("exact bound");
+        let error = append_bounded_output(&mut stdout, b"7", 2, 8)
+            .expect_err("one byte beyond the bound must fail");
+        assert!(error.to_string().contains("8 byte bound"));
+    }
+
+    #[tokio::test]
+    async fn operation_limits_are_separate_from_inactivity_and_connection_deadlines() {
+        let limits = SshOperationLimits {
+            command_timeout: Duration::from_secs(11),
+            transfer_timeout: Duration::from_secs(12),
+            max_command_output_bytes: 13,
+            max_download_bytes: 14,
+        };
+        let config = super::SSHConfig::password(
+            "operator",
+            "secret",
+            "127.0.0.1:22",
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("config")
+        .with_connection_timeout(Duration::from_secs(5))
+        .with_operation_limits(limits);
+        assert_eq!(config.operation_limits(), limits);
+        match config {
+            super::SSHConfig::Password {
+                connection_timeout,
+                inactivity_timeout,
+                ..
+            } => {
+                assert_eq!(connection_timeout, Duration::from_secs(5));
+                assert_eq!(inactivity_timeout, Duration::from_secs(30));
+            }
+            _ => panic!("password config expected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_config_pins_one_identity_and_preserves_operation_bounds() {
+        let limits = SshOperationLimits {
+            command_timeout: Duration::from_secs(11),
+            transfer_timeout: Duration::from_secs(12),
+            max_command_output_bytes: 13,
+            max_download_bytes: 14,
+        };
+        let fingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let config = super::SSHConfig::agent_with_policy(
+            "operator",
+            "127.0.0.1:22",
+            fingerprint,
+            Duration::from_secs(30),
+            HostKeyPolicy::RequireKnownHosts,
+        )
+        .await
+        .expect("agent config")
+        .with_connection_timeout(Duration::from_secs(5))
+        .with_operation_limits(limits);
+
+        assert_eq!(config.operation_limits(), limits);
+        match config {
+            super::SSHConfig::Agent {
+                public_key_sha256,
+                connection_timeout,
+                inactivity_timeout,
+                host_key_policy,
+                ..
+            } => {
+                assert_eq!(public_key_sha256, fingerprint);
+                assert_eq!(connection_timeout, Duration::from_secs(5));
+                assert_eq!(inactivity_timeout, Duration::from_secs(30));
+                assert_eq!(host_key_policy, HostKeyPolicy::RequireKnownHosts);
+            }
+            _ => panic!("agent config expected"),
+        }
     }
 
     #[test]

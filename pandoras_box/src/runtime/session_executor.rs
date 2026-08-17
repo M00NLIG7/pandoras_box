@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
-use super::mission::{HostPlan, HostState};
+use super::mission::{DeadlinePolicy, HostPlan, HostState, ResourceLimits};
 use super::policy::{ExecutionPolicy, OperationMutability};
 use super::scheduler::{FailureDisposition, FailurePhase, HostExecutionReport, HostExecutor};
 use super::session_factory::{BoxedHostSession, SessionFactory};
@@ -222,10 +223,18 @@ impl SessionOperation {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct SessionExecutionBounds {
+    deadlines: DeadlinePolicy,
+    limits: ResourceLimits,
+    absolute_deadline: Option<tokio::time::Instant>,
+}
+
 pub struct SessionExecutor<F> {
     factory: Arc<F>,
     policy: ExecutionPolicy,
     operations: Vec<SessionOperation>,
+    bounds: SessionExecutionBounds,
 }
 
 impl<F> SessionExecutor<F> {
@@ -239,7 +248,44 @@ impl<F> SessionExecutor<F> {
             factory,
             policy,
             operations,
+            bounds: SessionExecutionBounds::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_bounds(
+        mut self,
+        deadlines: DeadlinePolicy,
+        limits: ResourceLimits,
+        absolute_deadline: Option<tokio::time::Instant>,
+    ) -> Self {
+        self.bounds = SessionExecutionBounds {
+            deadlines,
+            limits,
+            absolute_deadline,
+        };
+        self
+    }
+
+    fn effective_timeout(&self, requested: Duration) -> Duration {
+        self.bounds.absolute_deadline.map_or(requested, |deadline| {
+            requested.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        })
+    }
+
+    fn operation_timeout(&self, operation: &SessionOperation) -> Duration {
+        let requested = match operation {
+            SessionOperation::PutFile { .. } | SessionOperation::GetFile { .. } => {
+                self.bounds.deadlines.transfer
+            }
+            SessionOperation::CleanupExec { .. } | SessionOperation::CleanupCaptureExec { .. } => {
+                self.bounds.deadlines.cleanup
+            }
+            SessionOperation::Exec { .. }
+            | SessionOperation::CaptureExec { .. }
+            | SessionOperation::EnsureDir { .. } => self.bounds.deadlines.command,
+        };
+        self.effective_timeout(requested)
     }
 
     pub(crate) async fn connect_session(
@@ -268,8 +314,21 @@ impl<F> SessionExecutor<F> {
                 continue;
             }
 
-            match self.factory.connect(plan, transport).await {
+            match bounded_call(
+                self.effective_timeout(self.bounds.deadlines.connect),
+                "transport connection",
+                self.factory.connect(plan, transport),
+            )
+            .await
+            {
                 Ok(session) => return Ok(ConnectedSession { transport, session }),
+                Err(err) if err.blocks_retry_or_fallback() => {
+                    return Err(classify_typed_connect_failure(
+                        plan.force_state(HostState::Failed),
+                        transport,
+                        err,
+                    ));
+                }
                 Err(err) => errors.push(format!("{transport:?}: {err}")),
             }
         }
@@ -326,6 +385,7 @@ impl<F> SessionExecutor<F> {
             }
 
             let phase = operation.phase();
+            let operation_timeout = self.operation_timeout(operation);
             plan = match plan.transition(HostState::Executing) {
                 Ok(plan) => plan,
                 Err(err) => return transition_failure(plan, phase, err),
@@ -336,15 +396,25 @@ impl<F> SessionExecutor<F> {
                     request,
                     idempotency,
                     ..
-                } => match session.exec(request.clone()).await {
+                } => match bounded_call(
+                    operation_timeout,
+                    "remote command",
+                    session.exec(request.clone()),
+                )
+                .await
+                {
                     Ok(response) => {
+                        if let Err(err) = validate_exec_output_bound(
+                            &response,
+                            self.bounds.limits.max_command_output_bytes,
+                        ) {
+                            return terminal_phase_failure(plan, phase, "exec failed", err);
+                        }
                         if let Err(err) = validate_exec_response(request, &response) {
-                            let _ = session.cleanup().await;
                             return terminal_phase_failure(plan, phase, "exec failed", err);
                         }
                     }
                     Err(err) => {
-                        let _ = session.cleanup().await;
                         return operation_transport_failure(
                             plan,
                             phase,
@@ -359,10 +429,26 @@ impl<F> SessionExecutor<F> {
                     local_path,
                     idempotency,
                     ..
-                } => match session.exec(request.clone()).await {
+                } => match bounded_call(
+                    operation_timeout,
+                    "captured remote command",
+                    session.exec(request.clone()),
+                )
+                .await
+                {
                     Ok(response) => {
+                        if let Err(err) = validate_exec_output_bound(
+                            &response,
+                            self.bounds.limits.max_command_output_bytes,
+                        ) {
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                capture_context(phase),
+                                err,
+                            );
+                        }
                         if let Err(err) = write_exec_capture(local_path, request, &response).await {
-                            let _ = session.cleanup().await;
                             return terminal_phase_failure(
                                 plan,
                                 phase,
@@ -371,7 +457,6 @@ impl<F> SessionExecutor<F> {
                             );
                         }
                         if let Err(err) = validate_exec_response(request, &response) {
-                            let _ = session.cleanup().await;
                             return terminal_phase_failure(
                                 plan,
                                 phase,
@@ -381,7 +466,6 @@ impl<F> SessionExecutor<F> {
                         }
                     }
                     Err(err) => {
-                        let _ = session.cleanup().await;
                         return operation_transport_failure(
                             plan,
                             phase,
@@ -394,10 +478,26 @@ impl<F> SessionExecutor<F> {
                 SessionOperation::CleanupCaptureExec {
                     request,
                     local_path,
-                } => match session.exec(request.clone()).await {
+                } => match bounded_call(
+                    operation_timeout,
+                    "captured cleanup command",
+                    session.exec(request.clone()),
+                )
+                .await
+                {
                     Ok(response) => {
+                        if let Err(err) = validate_exec_output_bound(
+                            &response,
+                            self.bounds.limits.max_command_output_bytes,
+                        ) {
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                capture_context(phase),
+                                err,
+                            );
+                        }
                         if let Err(err) = write_exec_capture(local_path, request, &response).await {
-                            let _ = session.cleanup().await;
                             return terminal_phase_failure(
                                 plan,
                                 phase,
@@ -406,7 +506,6 @@ impl<F> SessionExecutor<F> {
                             );
                         }
                         if let Err(err) = validate_exec_response(request, &response) {
-                            let _ = session.cleanup().await;
                             return terminal_phase_failure(
                                 plan,
                                 phase,
@@ -416,7 +515,6 @@ impl<F> SessionExecutor<F> {
                         }
                     }
                     Err(err) => {
-                        let _ = session.cleanup().await;
                         return operation_transport_failure(
                             plan,
                             phase,
@@ -427,13 +525,22 @@ impl<F> SessionExecutor<F> {
                     }
                 },
                 SessionOperation::PutFile { transfer } => {
+                    if let Err(err) = validate_local_upload(
+                        &transfer.local_path,
+                        self.bounds.limits.max_payload_bytes,
+                    )
+                    .await
+                    {
+                        return terminal_phase_failure(plan, phase, "put failed", err);
+                    }
                     if let Err(err) = validate_remote_path(&transfer.remote_path) {
-                        let _ = session.cleanup().await;
                         return terminal_phase_failure(plan, phase, "put failed", err);
                     }
 
-                    if let Err(err) = session.put(transfer).await {
-                        let _ = session.cleanup().await;
+                    if let Err(err) =
+                        bounded_call(operation_timeout, "remote upload", session.put(transfer))
+                            .await
+                    {
                         return operation_transport_failure(
                             plan,
                             phase,
@@ -445,12 +552,13 @@ impl<F> SessionExecutor<F> {
                 }
                 SessionOperation::GetFile { transfer } => {
                     if let Err(err) = validate_remote_path(&transfer.remote_path) {
-                        let _ = session.cleanup().await;
                         return terminal_phase_failure(plan, phase, "get failed", err);
                     }
 
-                    if let Err(err) = session.get(transfer).await {
-                        let _ = session.cleanup().await;
+                    if let Err(err) =
+                        bounded_call(operation_timeout, "remote download", session.get(transfer))
+                            .await
+                    {
                         return operation_transport_failure(
                             plan,
                             phase,
@@ -459,15 +567,28 @@ impl<F> SessionExecutor<F> {
                             err,
                         );
                     }
+                    if let Err(err) = validate_local_download(
+                        &transfer.local_path,
+                        self.bounds.limits.max_download_bytes,
+                    )
+                    .await
+                    {
+                        let _ = tokio::fs::remove_file(&transfer.local_path).await;
+                        return terminal_phase_failure(plan, phase, "get failed", err);
+                    }
                 }
                 SessionOperation::EnsureDir { remote_dir } => {
                     if let Err(err) = validate_remote_path(remote_dir) {
-                        let _ = session.cleanup().await;
                         return terminal_phase_failure(plan, phase, "ensure_dir failed", err);
                     }
 
-                    if let Err(err) = session.ensure_dir(remote_dir).await {
-                        let _ = session.cleanup().await;
+                    if let Err(err) = bounded_call(
+                        operation_timeout,
+                        "remote directory creation",
+                        session.ensure_dir(remote_dir),
+                    )
+                    .await
+                    {
                         return operation_transport_failure(
                             plan,
                             phase,
@@ -478,10 +599,26 @@ impl<F> SessionExecutor<F> {
                     }
                 }
                 SessionOperation::CleanupExec { request } => {
-                    match session.exec(request.clone()).await {
+                    match bounded_call(
+                        operation_timeout,
+                        "remote cleanup command",
+                        session.exec(request.clone()),
+                    )
+                    .await
+                    {
                         Ok(response) => {
+                            if let Err(err) = validate_exec_output_bound(
+                                &response,
+                                self.bounds.limits.max_command_output_bytes,
+                            ) {
+                                return terminal_phase_failure(
+                                    plan,
+                                    phase,
+                                    "cleanup_exec failed",
+                                    err,
+                                );
+                            }
                             if let Err(err) = validate_exec_response(request, &response) {
-                                let _ = session.cleanup().await;
                                 return terminal_phase_failure(
                                     plan,
                                     phase,
@@ -491,7 +628,6 @@ impl<F> SessionExecutor<F> {
                             }
                         }
                         Err(err) => {
-                            let _ = session.cleanup().await;
                             return operation_transport_failure(
                                 plan,
                                 phase,
@@ -511,7 +647,13 @@ impl<F> SessionExecutor<F> {
         };
 
         if disconnect_on_success {
-            if let Err(err) = session.cleanup().await {
+            if let Err(err) = bounded_call(
+                self.bounds.deadlines.cleanup,
+                "session disconnect",
+                session.cleanup(),
+            )
+            .await
+            {
                 return terminal_phase_failure(
                     complete_plan,
                     FailurePhase::Cleanup,
@@ -521,7 +663,12 @@ impl<F> SessionExecutor<F> {
             }
         }
 
-        HostExecutionReport::success(complete_plan, HostState::Complete)
+        let report = HostExecutionReport::success(complete_plan, HostState::Complete);
+        if disconnect_on_success {
+            report.with_cleanup_outcome(super::scheduler::CleanupOutcome::Complete, false)
+        } else {
+            report
+        }
     }
 
     pub(crate) async fn run_connected_session_with_fallback(
@@ -556,6 +703,21 @@ impl<F> SessionExecutor<F> {
                 return report;
             };
 
+            if let Err(error) = bounded_call(
+                self.bounds.deadlines.cleanup,
+                "session disconnect before transport fallback",
+                connected.session_mut().cleanup(),
+            )
+            .await
+            {
+                report.error = Some(format!(
+                    "{}; fallback blocked because prior transport cleanup failed: {error}",
+                    report.error.unwrap_or_default()
+                ));
+                report.failure_disposition = Some(FailureDisposition::Terminal);
+                return report;
+            }
+
             match fallback {
                 Ok(next_session) => *connected = next_session,
                 Err(fallback_report) => {
@@ -574,6 +736,20 @@ impl<F> SessionExecutor<F> {
     }
 }
 
+async fn bounded_call<T, F>(deadline: Duration, context: &str, future: F) -> crate::Result<T>
+where
+    F: std::future::Future<Output = crate::Result<T>>,
+{
+    if deadline.is_zero() {
+        return Err(crate::Error::DeadlineExceeded(format!(
+            "{context} reached the host or mission deadline"
+        )));
+    }
+    tokio::time::timeout(deadline, future)
+        .await
+        .map_err(|_| crate::Error::DeadlineExceeded(format!("{context} exceeded {deadline:?}")))?
+}
+
 async fn write_exec_capture(
     local_path: &Path,
     request: &ExecRequest,
@@ -581,6 +757,11 @@ async fn write_exec_capture(
 ) -> Result<(), std::io::Error> {
     if let Some(parent) = local_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await?;
+        }
     }
 
     let contents = format!(
@@ -594,7 +775,71 @@ async fn write_exec_capture(
         String::from_utf8_lossy(&response.stderr),
     );
 
-    tokio::fs::write(local_path, contents).await
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut file = options.open(local_path).await?;
+    use tokio::io::AsyncWriteExt;
+    file.write_all(contents.as_bytes()).await?;
+    file.flush().await
+}
+
+fn validate_exec_output_bound(response: &ExecResponse, maximum: usize) -> Result<(), String> {
+    let actual = response
+        .stdout
+        .len()
+        .checked_add(response.stderr.len())
+        .ok_or_else(|| "command output length overflowed usize".to_string())?;
+    if actual > maximum {
+        return Err(format!(
+            "command output was {actual} bytes, exceeding the {maximum} byte bound"
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_local_upload(path: &Path, maximum: u64) -> Result<(), String> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "upload source must be a regular non-link file: {}",
+            path.display()
+        ));
+    }
+    if metadata.len() > maximum {
+        return Err(format!(
+            "upload source is {} bytes, exceeding the {maximum} byte bound",
+            metadata.len()
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_local_download(path: &Path, maximum: u64) -> Result<(), String> {
+    let metadata = tokio::fs::symlink_metadata(path).await.map_err(|error| {
+        format!(
+            "failed to inspect downloaded file {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "download destination must be a regular non-link file: {}",
+            path.display()
+        ));
+    }
+    if metadata.len() > maximum {
+        return Err(format!(
+            "downloaded file is {} bytes, exceeding the {maximum} byte bound",
+            metadata.len()
+        ));
+    }
+    Ok(())
 }
 
 fn validate_exec_response(request: &ExecRequest, response: &ExecResponse) -> Result<(), String> {
@@ -669,10 +914,15 @@ fn operation_transport_failure(
     phase: FailurePhase,
     idempotency: OperationIdempotency,
     context: &str,
-    err: impl std::fmt::Display,
+    err: crate::Error,
 ) -> HostExecutionReport {
+    let terminal = err.blocks_retry_or_fallback();
     let rendered = format!("{context}: {err}");
-    let disposition = operation_failure_disposition(idempotency, &rendered);
+    let disposition = if terminal {
+        FailureDisposition::Terminal
+    } else {
+        operation_failure_disposition(idempotency, &rendered)
+    };
     HostExecutionReport::failure_with_disposition(plan, phase, disposition, rendered)
 }
 
@@ -685,6 +935,24 @@ fn operation_failure_disposition(
     } else {
         FailureDisposition::Retryable
     }
+}
+
+fn classify_typed_connect_failure(
+    plan: HostPlan,
+    transport: super::mission::TransportKind,
+    error: crate::Error,
+) -> HostExecutionReport {
+    let phase = if matches!(&error, crate::Error::CredentialProfileFailure(_)) {
+        FailurePhase::Credentials
+    } else {
+        FailurePhase::Connect
+    };
+    HostExecutionReport::failure_with_disposition(
+        plan,
+        phase,
+        FailureDisposition::Terminal,
+        format!("{}: {error}", transport.as_str()),
+    )
 }
 
 fn classify_connect_failure(plan: HostPlan, error: impl std::fmt::Display) -> HostExecutionReport {
@@ -707,6 +975,11 @@ fn is_terminal_error(error: &str) -> bool {
     [
         "auth failed",
         "authentication failed",
+        "credential profile error",
+        "authentication error",
+        "failed to authenticate",
+        "logon failure",
+        "account locked",
         "permission denied",
         "access denied",
         "access is denied",
@@ -744,15 +1017,36 @@ where
             Err(report) => return report,
         };
 
-        self.run_connected_session_with_fallback(plan, &mut session, true)
+        let mut report = self
+            .run_connected_session_with_fallback(plan, &mut session, true)
+            .await;
+        if report.final_state == HostState::Failed {
+            if let Err(error) = bounded_call(
+                self.bounds.deadlines.cleanup,
+                "session disconnect after failure",
+                session.session_mut().cleanup(),
+            )
             .await
+            {
+                report.error = Some(format!(
+                    "{}; session disconnect after failure: {error}",
+                    report
+                        .error
+                        .unwrap_or_else(|| "host operation failed".into())
+                ));
+            }
+        }
+        report
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{SessionExecutor, SessionOperation};
-    use crate::runtime::mission::{HostPlan, HostState, HostTarget, PlatformHint, TransportKind};
+    use crate::runtime::mission::{
+        CpuArchitecture, DeadlinePolicy, HostPlan, HostState, HostTarget, OperatingSystem,
+        PlatformHint, ResourceLimits, TargetContract, TransportKind,
+    };
     use crate::runtime::policy::ExecutionPolicy;
     use crate::runtime::scheduler::{FailureDisposition, FailurePhase, HostExecutor, Scheduler};
     use crate::runtime::session_factory::{BoxedHostSession, SessionFactory};
@@ -770,6 +1064,9 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConnectBehavior {
         AuthFail,
+        ActualAuthWording,
+        CredentialProfileFail,
+        HostIdentityFail,
         TransientFail,
         Success,
     }
@@ -952,6 +1249,15 @@ mod tests {
                 ConnectBehavior::AuthFail => {
                     Err(Error::CommunicatorError("auth failed".to_string()))
                 }
+                ConnectBehavior::ActualAuthWording => Err(Error::CommunicatorError(
+                    "Authentication error: Failed to authenticate with password".to_string(),
+                )),
+                ConnectBehavior::CredentialProfileFail => Err(Error::CredentialProfileFailure(
+                    "selected profile is unavailable".to_string(),
+                )),
+                ConnectBehavior::HostIdentityFail => Err(Error::HostIdentityFailure(
+                    "host key verification failed for fixture".to_string(),
+                )),
                 ConnectBehavior::TransientFail => Err(Error::CommunicatorError(
                     "connection reset by peer".to_string(),
                 )),
@@ -970,12 +1276,19 @@ mod tests {
     }
 
     fn host_plan(ip: IpAddr, chain: Vec<TransportKind>) -> HostPlan {
+        let contract = if chain.contains(&TransportKind::WindowsSmb) {
+            TargetContract::windows(CpuArchitecture::X86_64, true)
+        } else {
+            TargetContract::ssh(OperatingSystem::Linux, CpuArchitecture::X86_64)
+        };
         HostPlan {
             target: HostTarget {
                 ip,
                 platform: PlatformHint::Unknown,
                 open_ports: vec![22, 445],
             },
+            contract,
+            payload: None,
             state: HostState::Queued,
             transport_chain: chain,
         }
@@ -1009,7 +1322,7 @@ mod tests {
         let session_template = template(0, false);
         let calls = Arc::clone(&session_template.ensure_dir_calls);
         let factory = Arc::new(FakeSessionFactory::new(vec![(
-            (ip, TransportKind::UnixSsh),
+            (ip, TransportKind::SshSftp),
             ConnectBehavior::Success,
             session_template,
         )]));
@@ -1023,7 +1336,7 @@ mod tests {
         );
 
         let report = executor
-            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
             .await;
 
         assert_eq!(report.final_state, HostState::Complete);
@@ -1060,7 +1373,7 @@ mod tests {
             b"{\"host\":\"lab\"}\n".to_vec(),
         )]));
         let factory = Arc::new(FakeSessionFactory::new(vec![(
-            (ip, TransportKind::UnixSsh),
+            (ip, TransportKind::SshSftp),
             ConnectBehavior::Success,
             session_template,
         )]));
@@ -1089,7 +1402,7 @@ mod tests {
         );
 
         let report = executor
-            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
             .await;
 
         assert_eq!(report.final_state, HostState::Complete);
@@ -1145,7 +1458,7 @@ mod tests {
             br#"{"host":"10.0.0.14"}"#.to_vec(),
         )]));
         let factory = Arc::new(FakeSessionFactory::new(vec![(
-            (ip, TransportKind::UnixSsh),
+            (ip, TransportKind::SshSftp),
             ConnectBehavior::Success,
             session_template,
         )]));
@@ -1160,7 +1473,7 @@ mod tests {
         );
 
         let report = executor
-            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
             .await;
 
         assert_eq!(report.final_state, HostState::Complete);
@@ -1227,7 +1540,7 @@ mod tests {
             ),
         ]));
         let factory = Arc::new(FakeSessionFactory::new(vec![(
-            (ip, TransportKind::UnixSsh),
+            (ip, TransportKind::SshSftp),
             ConnectBehavior::Success,
             session_template,
         )]));
@@ -1246,7 +1559,7 @@ mod tests {
         );
 
         let report = executor
-            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
             .await;
 
         assert_eq!(report.final_state, HostState::Complete);
@@ -1298,7 +1611,7 @@ mod tests {
         let session_template = template(0, false);
         let events = Arc::clone(&session_template.events);
         let factory = Arc::new(FakeSessionFactory::new(vec![(
-            (ip, TransportKind::UnixSsh),
+            (ip, TransportKind::SshSftp),
             ConnectBehavior::Success,
             session_template,
         )]));
@@ -1312,7 +1625,7 @@ mod tests {
         );
 
         let report = executor
-            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
             .await;
 
         assert_eq!(report.final_state, HostState::Complete);
@@ -1329,14 +1642,14 @@ mod tests {
     async fn session_executor_surfaces_cleanup_failure() {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
         let factory = Arc::new(FakeSessionFactory::new(vec![(
-            (ip, TransportKind::UnixSsh),
+            (ip, TransportKind::SshSftp),
             ConnectBehavior::Success,
             template(0, true),
         )]));
         let executor = SessionExecutor::new(factory, ExecutionPolicy::default(), Vec::new());
 
         let report = executor
-            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
             .await;
 
         assert_eq!(report.final_state, HostState::Failed);
@@ -1365,7 +1678,7 @@ mod tests {
             },
         )]));
         let factory = Arc::new(FakeSessionFactory::new(vec![(
-            (ip, TransportKind::UnixSsh),
+            (ip, TransportKind::SshSftp),
             ConnectBehavior::Success,
             session_template,
         )]));
@@ -1376,7 +1689,7 @@ mod tests {
         );
 
         let report = executor
-            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
             .await;
 
         assert_eq!(report.final_state, HostState::Failed);
@@ -1407,7 +1720,7 @@ mod tests {
             },
         )]));
         let factory = Arc::new(FakeSessionFactory::new(vec![(
-            (ip, TransportKind::UnixSsh),
+            (ip, TransportKind::SshSftp),
             ConnectBehavior::Success,
             session_template,
         )]));
@@ -1418,7 +1731,7 @@ mod tests {
         );
 
         let report = executor
-            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
             .await;
 
         assert_eq!(report.final_state, HostState::Failed);
@@ -1452,7 +1765,7 @@ mod tests {
             .expect("local file should exist");
         let session_template = template(0, false);
         let factory = Arc::new(FakeSessionFactory::new(vec![(
-            (ip, TransportKind::UnixSsh),
+            (ip, TransportKind::SshSftp),
             ConnectBehavior::Success,
             session_template,
         )]));
@@ -1463,7 +1776,7 @@ mod tests {
         );
 
         let report = executor
-            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
             .await;
 
         assert_eq!(report.final_state, HostState::Failed);
@@ -1487,7 +1800,7 @@ mod tests {
         let collect_path = root.join("files").join("inventory.json");
         let session_template = template(0, false);
         let factory = Arc::new(FakeSessionFactory::new(vec![(
-            (ip, TransportKind::UnixSsh),
+            (ip, TransportKind::SshSftp),
             ConnectBehavior::Success,
             session_template,
         )]));
@@ -1501,7 +1814,7 @@ mod tests {
         );
 
         let report = executor
-            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
             .await;
 
         assert_eq!(report.final_state, HostState::Failed);
@@ -1522,14 +1835,14 @@ mod tests {
     async fn session_executor_classifies_auth_connect_failures_as_terminal() {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 30));
         let factory = Arc::new(FakeSessionFactory::new(vec![(
-            (ip, TransportKind::UnixSsh),
+            (ip, TransportKind::SshSftp),
             ConnectBehavior::AuthFail,
             template(0, false),
         )]));
         let executor = SessionExecutor::new(factory, ExecutionPolicy::default(), Vec::new());
 
         let report = executor
-            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
             .await;
 
         assert_eq!(report.final_state, HostState::Failed);
@@ -1541,17 +1854,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actual_rustrc_auth_wording_is_terminal_and_blocks_every_fallback() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 34));
+        let factory = Arc::new(FakeSessionFactory::new(vec![
+            (
+                (ip, TransportKind::SshSftp),
+                ConnectBehavior::ActualAuthWording,
+                template(0, false),
+            ),
+            (
+                (ip, TransportKind::WindowsSmb),
+                ConnectBehavior::Success,
+                template(0, false),
+            ),
+        ]));
+        let executor = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy {
+                dry_run: false,
+                allow_smb_fallback: true,
+            },
+            Vec::new(),
+        );
+
+        let report = executor
+            .run(host_plan(
+                ip,
+                vec![TransportKind::SshSftp, TransportKind::WindowsSmb],
+            ))
+            .await;
+
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+        assert_eq!(factory.attempts(), vec![(ip, TransportKind::SshSftp)]);
+        assert!(report
+            .error
+            .expect("auth error")
+            .contains("Failed to authenticate with password"));
+    }
+
+    #[tokio::test]
+    async fn credential_profile_failure_is_terminal_and_blocks_every_fallback() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 36));
+        let factory = Arc::new(FakeSessionFactory::new(vec![
+            (
+                (ip, TransportKind::SshSftp),
+                ConnectBehavior::CredentialProfileFail,
+                template(0, false),
+            ),
+            (
+                (ip, TransportKind::WindowsSmb),
+                ConnectBehavior::Success,
+                template(0, false),
+            ),
+        ]));
+        let executor = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy {
+                dry_run: false,
+                allow_smb_fallback: true,
+            },
+            Vec::new(),
+        );
+
+        let report = executor
+            .run(host_plan(
+                ip,
+                vec![TransportKind::SshSftp, TransportKind::WindowsSmb],
+            ))
+            .await;
+
+        assert_eq!(report.failure_phase, Some(FailurePhase::Credentials));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+        assert_eq!(factory.attempts(), vec![(ip, TransportKind::SshSftp)]);
+    }
+
+    #[tokio::test]
+    async fn host_identity_failure_blocks_smb_fallback() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 35));
+        let factory = Arc::new(FakeSessionFactory::new(vec![
+            (
+                (ip, TransportKind::SshSftp),
+                ConnectBehavior::HostIdentityFail,
+                template(0, false),
+            ),
+            (
+                (ip, TransportKind::WindowsSmb),
+                ConnectBehavior::Success,
+                template(0, false),
+            ),
+        ]));
+        let executor = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy {
+                dry_run: false,
+                allow_smb_fallback: true,
+            },
+            Vec::new(),
+        );
+        let report = executor
+            .run(host_plan(
+                ip,
+                vec![TransportKind::SshSftp, TransportKind::WindowsSmb],
+            ))
+            .await;
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+        assert_eq!(factory.attempts(), vec![(ip, TransportKind::SshSftp)]);
+    }
+
+    #[tokio::test]
     async fn session_executor_classifies_transient_connect_failures_as_retryable() {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 31));
         let factory = Arc::new(FakeSessionFactory::new(vec![(
-            (ip, TransportKind::UnixSsh),
+            (ip, TransportKind::SshSftp),
             ConnectBehavior::TransientFail,
             template(0, false),
         )]));
         let executor = SessionExecutor::new(factory, ExecutionPolicy::default(), Vec::new());
 
         let report = executor
-            .run(host_plan(ip, vec![TransportKind::UnixSsh]))
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
             .await;
 
         assert_eq!(report.final_state, HostState::Failed);
@@ -1560,6 +1990,113 @@ mod tests {
             report.failure_disposition,
             Some(FailureDisposition::Retryable)
         );
+    }
+
+    #[tokio::test]
+    async fn command_output_is_rejected_at_the_configured_bound() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 36));
+        let mut session_template = template(0, false);
+        session_template.exec_outputs = Arc::new(HashMap::from([(
+            "noisy".to_string(),
+            ExecResponse {
+                stdout: vec![b'x'; 32],
+                stderr: Vec::new(),
+                status_code: Some(0),
+            },
+        )]));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![SessionOperation::read_only_exec("noisy")],
+        )
+        .with_bounds(
+            DeadlinePolicy::default(),
+            ResourceLimits {
+                max_command_output_bytes: 8,
+                ..ResourceLimits::default()
+            },
+            None,
+        );
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+        assert_eq!(report.final_state, HostState::Failed);
+        assert!(report.error.expect("bound error").contains("8 byte bound"));
+    }
+
+    #[tokio::test]
+    async fn command_deadline_stops_a_slow_operation() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 37));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            template(200, false),
+        )]));
+        let deadlines = DeadlinePolicy {
+            command: Duration::from_millis(20),
+            cleanup: Duration::from_millis(20),
+            ..DeadlinePolicy::default()
+        };
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![SessionOperation::ensure_dir("/tmp/bounded")],
+        )
+        .with_bounds(deadlines, ResourceLimits::default(), None);
+        let started = Instant::now();
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+        assert_eq!(report.final_state, HostState::Failed);
+        assert!(report.error.expect("deadline").contains("exceeded"));
+        assert!(started.elapsed() < Duration::from_millis(150));
+    }
+
+    #[tokio::test]
+    async fn download_larger_than_the_bound_is_removed_and_reported() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 38));
+        let root = temp_dir("bounded-download");
+        let destination = root.join("inventory.json");
+        let mut session_template = template(0, false);
+        session_template.downloads = Arc::new(HashMap::from([(
+            "/tmp/inventory.json".to_string(),
+            vec![b'x'; 32],
+        )]));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![SessionOperation::get_file(
+                "/tmp/inventory.json",
+                &destination,
+            )],
+        )
+        .with_bounds(
+            DeadlinePolicy::default(),
+            ResourceLimits {
+                max_download_bytes: 8,
+                ..ResourceLimits::default()
+            },
+            None,
+        );
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+        assert_eq!(report.final_state, HostState::Failed);
+        assert!(!destination.exists());
+        assert!(report.error.expect("bound").contains("8 byte bound"));
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[tokio::test]
@@ -1582,7 +2119,7 @@ mod tests {
         let smb_uploads = Arc::clone(&smb_template.uploads);
         let factory = Arc::new(FakeSessionFactory::new(vec![
             (
-                (ip, TransportKind::WindowsSsh),
+                (ip, TransportKind::SshSftp),
                 ConnectBehavior::Success,
                 ssh_template,
             ),
@@ -1594,7 +2131,10 @@ mod tests {
         ]));
         let executor = SessionExecutor::new(
             Arc::clone(&factory),
-            ExecutionPolicy::default(),
+            ExecutionPolicy {
+                dry_run: false,
+                allow_smb_fallback: true,
+            },
             vec![
                 SessionOperation::ensure_dir(r"C:\Temp\pandoras-box"),
                 SessionOperation::put_file(&payload, r"C:\Temp\pandoras-box\chimera.exe"),
@@ -1604,7 +2144,7 @@ mod tests {
         let report = executor
             .run(host_plan(
                 ip,
-                vec![TransportKind::WindowsSsh, TransportKind::WindowsSmb],
+                vec![TransportKind::SshSftp, TransportKind::WindowsSmb],
             ))
             .await;
 
@@ -1614,7 +2154,7 @@ mod tests {
         assert_eq!(
             factory.attempts(),
             vec![
-                (ip, TransportKind::WindowsSsh),
+                (ip, TransportKind::SshSftp),
                 (ip, TransportKind::WindowsSmb)
             ]
         );
@@ -1663,7 +2203,7 @@ mod tests {
         )]));
         let factory = Arc::new(FakeSessionFactory::new(vec![
             (
-                (ip, TransportKind::WindowsSsh),
+                (ip, TransportKind::SshSftp),
                 ConnectBehavior::Success,
                 ssh_template,
             ),
@@ -1682,17 +2222,17 @@ mod tests {
         let report = executor
             .run(host_plan(
                 ip,
-                vec![TransportKind::WindowsSsh, TransportKind::WindowsSmb],
+                vec![TransportKind::SshSftp, TransportKind::WindowsSmb],
             ))
             .await;
 
         assert_eq!(report.final_state, HostState::Failed);
-        assert_eq!(report.selected_transport, Some(TransportKind::WindowsSsh));
+        assert_eq!(report.selected_transport, Some(TransportKind::SshSftp));
         assert_eq!(
             report.failure_disposition,
             Some(FailureDisposition::Terminal)
         );
-        assert_eq!(factory.attempts(), vec![(ip, TransportKind::WindowsSsh)]);
+        assert_eq!(factory.attempts(), vec![(ip, TransportKind::SshSftp)]);
         assert_eq!(
             ssh_events
                 .lock()
@@ -1703,12 +2243,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_executor_respects_smb_fallback_policy() {
+    async fn session_executor_never_falls_back_after_authentication_failure() {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10));
         let smb_template = template(0, false);
         let factory = Arc::new(FakeSessionFactory::new(vec![
             (
-                (ip, TransportKind::WindowsSsh),
+                (ip, TransportKind::SshSftp),
                 ConnectBehavior::AuthFail,
                 template(0, false),
             ),
@@ -1727,17 +2267,25 @@ mod tests {
             },
             Vec::new(),
         );
-        let allowed = SessionExecutor::new(factory, ExecutionPolicy::default(), Vec::new());
-        let plan = host_plan(
-            ip,
-            vec![TransportKind::WindowsSsh, TransportKind::WindowsSmb],
+        let allowed = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy {
+                dry_run: false,
+                allow_smb_fallback: true,
+            },
+            Vec::new(),
         );
+        let plan = host_plan(ip, vec![TransportKind::SshSftp, TransportKind::WindowsSmb]);
 
         let denied_report = denied.run(plan.clone()).await;
         let allowed_report = allowed.run(plan).await;
 
         assert_eq!(denied_report.final_state, HostState::Failed);
-        assert_eq!(allowed_report.final_state, HostState::Complete);
+        assert_eq!(allowed_report.final_state, HostState::Failed);
+        assert_eq!(
+            factory.attempts(),
+            vec![(ip, TransportKind::SshSftp), (ip, TransportKind::SshSftp)]
+        );
     }
 
     #[tokio::test]
@@ -1748,17 +2296,17 @@ mod tests {
 
         let factory = Arc::new(FakeSessionFactory::new(vec![
             (
-                (slow_ip, TransportKind::UnixSsh),
+                (slow_ip, TransportKind::SshSftp),
                 ConnectBehavior::Success,
                 template(200, false),
             ),
             (
-                (failed_ip, TransportKind::UnixSsh),
+                (failed_ip, TransportKind::SshSftp),
                 ConnectBehavior::AuthFail,
                 template(0, false),
             ),
             (
-                (fast_ip, TransportKind::UnixSsh),
+                (fast_ip, TransportKind::SshSftp),
                 ConnectBehavior::Success,
                 template(10, false),
             ),
@@ -1774,9 +2322,9 @@ mod tests {
         let reports = scheduler
             .execute(
                 vec![
-                    host_plan(slow_ip, vec![TransportKind::UnixSsh]),
-                    host_plan(failed_ip, vec![TransportKind::UnixSsh]),
-                    host_plan(fast_ip, vec![TransportKind::UnixSsh]),
+                    host_plan(slow_ip, vec![TransportKind::SshSftp]),
+                    host_plan(failed_ip, vec![TransportKind::SshSftp]),
+                    host_plan(fast_ip, vec![TransportKind::SshSftp]),
                 ],
                 executor,
             )

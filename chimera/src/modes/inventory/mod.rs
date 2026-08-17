@@ -9,12 +9,15 @@ use crate::types::{
 use crate::utils::CommandExecutor;
 use platform::conn_info;
 
-use futures::future::join_all;
+use futures::{stream, StreamExt};
 use local_ip_address::local_ip;
 use log::{debug, error};
 use serde_json::{Map, Value};
 use std::net::{IpAddr, Ipv4Addr};
 use sysinfo::{CpuExt, DiskExt, System, SystemExt, UserExt};
+
+const MAX_CONTAINER_INSPECTIONS: usize = 256;
+const CONTAINER_INSPECTION_CONCURRENCY: usize = 8;
 
 pub struct InventoryMode {
     system: System,
@@ -202,7 +205,7 @@ impl InventoryMode {
     }
 
     async fn get_generic_containers(&self, command: &str) -> (Vec<Container>, Vec<String>) {
-        let container_ids = match self.get_container_ids(command).await {
+        let mut container_ids = match self.get_container_ids(command).await {
             Ok(container_ids) => container_ids,
             Err(error) => {
                 return (
@@ -212,8 +215,16 @@ impl InventoryMode {
             }
         };
         debug!("Found {} containers for {}", container_ids.len(), command);
+        let mut errors = Vec::new();
+        if container_ids.len() > MAX_CONTAINER_INSPECTIONS {
+            errors.push(format!(
+                "{command} returned {} containers; inspecting only the bounded first {MAX_CONTAINER_INSPECTIONS}",
+                container_ids.len()
+            ));
+            container_ids.truncate(MAX_CONTAINER_INSPECTIONS);
+        }
 
-        let inspect_futures = container_ids.iter().map(|id| async move {
+        let inspect_futures = stream::iter(container_ids.iter()).map(|id| async move {
             let output = CommandExecutor::execute_command(command, Some(&["inspect", id]), None)
                 .await
                 .map_err(|error| {
@@ -225,8 +236,8 @@ impl InventoryMode {
         });
 
         let mut containers = Vec::new();
-        let mut errors = Vec::new();
-        for result in join_all(inspect_futures).await {
+        let mut results = inspect_futures.buffer_unordered(CONTAINER_INSPECTION_CONCURRENCY);
+        while let Some(result) = results.next().await {
             match result {
                 Ok(container) => containers.push(container),
                 Err(error) => errors.push(error.to_string()),

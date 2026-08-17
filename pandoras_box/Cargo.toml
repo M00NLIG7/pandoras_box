@@ -14,18 +14,27 @@ clap = {version = "4.5.17", features = ["cargo"]}
 futures = "0.3.30"
 libc = "0.2.177"
 thiserror = "1.0.63"
-tokio = {version = "1.48.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"]}
+tokio = {version = "1.48.0", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"]}
 rustrc = { path = "../rustrc" }
 log = "0.4.22"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+sha2 = "0.10.8"
+getrandom = "0.2.15"
 zeroize = "1.8.1"
 # Exact crates.io release keeps clean checkouts independent of sibling repositories.
 smolder_tools = { package = "smolder", version = "=0.4.0" }
+smolder_core = { package = "smolder-smb-core", version = "=0.4.0" }
+smolder_proto = { package = "smolder-proto", version = "=0.4.0" }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59.0", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.59.0", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+] }
 
 [dev-dependencies]
 env_logger = "0.11.5"

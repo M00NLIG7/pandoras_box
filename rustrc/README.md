@@ -5,8 +5,10 @@ RustRC is the SSH execution and SFTP transport adapter used by Pandora's Box. Th
 ## Security boundary
 
 - Command execution and file transfer stay inside one authenticated SSH session.
-- File upload and download use SFTP. A failed Windows SFTP operation is returned to the caller so Pandora can apply its authenticated SMB fallback policy.
-- `SSHConfig::key` and `SSHConfig::password` require an enrolled `known_hosts` key by default.
+- File upload and download use SFTP, including drive-aware Windows path candidates. Authentication and host-key failures remain typed terminal outcomes; Pandora never converts them into transport fallback.
+- Connection and inactivity deadlines are separate from configurable command/transfer deadlines. Command output and downloads are byte-bounded while streaming.
+- `SSHConfig::key`, `SSHConfig::agent_with_policy`, and `SSHConfig::password` require an enrolled `known_hosts` key by default.
+- Pandora's named-profile adapter preflights private keys and exact SHA-256 fingerprints or selects one exact existing SSH-agent identity before opening a target connection. Missing/duplicate identities and agent signing errors fail terminally without trying another key.
 - `HostKeyPolicy::DangerouslyAcceptUnknown` is an explicit first-contact escape hatch. It does not enroll or persist the key, and it still rejects a changed enrolled key.
 - RustRC does not download tools or payloads during compilation.
 
@@ -18,7 +20,7 @@ Set `RUSTRC_SOCKET`, `RUSTRC_PASSWORD`, and optionally `RUSTRC_USERNAME`, enroll
 cargo run --locked -p rustrc --example ssh_client
 ```
 
-The example reads the secret from the environment rather than a process argument. Pandora provides stronger stdin/file-based secret input for operator use.
+The example reads the secret from the environment rather than a process argument. Pandora adds named runtime profiles for external environment/file secrets, pinned keys, and existing agents; see [`../docs/CREDENTIAL_PROFILES.md`](../docs/CREDENTIAL_PROFILES.md).
 
 ## Validation
 

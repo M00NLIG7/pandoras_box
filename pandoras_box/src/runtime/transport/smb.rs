@@ -1,7 +1,9 @@
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use smolder_proto::smb::smb2::{Dialect, SigningMode};
 use smolder_tools::prelude::{
     ExecMode, ExecRequest as SmolderExecRequest, NtlmCredentials, RemoteExecClient, Share,
     SmbClientBuilder,
@@ -15,13 +17,37 @@ use crate::{Error, Result};
 const ADMIN_SHARE_ROOT: &str = r"C:\Windows";
 const ADMIN_SHARE_NAME: &str = "ADMIN$";
 
+/// Smolder 0.4.0 exposes encryption-required file shares, but its public
+/// remote-exec builder cannot yet apply `SecurityPolicy::pandora()` to the
+/// separate SCMR sessions it creates. Pandora therefore keeps SMB as an
+/// explicit target contract while refusing to authenticate through it.
+pub const ENCRYPTION_REQUIRED_REMOTE_EXEC_QUALIFIED: bool = false;
+
+pub fn require_encryption_qualified_remote_exec() -> Result<()> {
+    if ENCRYPTION_REQUIRED_REMOTE_EXEC_QUALIFIED {
+        Ok(())
+    } else {
+        Err(Error::UnsupportedTarget(
+            "Windows SMB fallback requires encryption for every file and remote-execution request; pinned Smolder 0.4.0 cannot enforce that policy on remote-exec sessions, so authentication was not attempted"
+                .into(),
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmbSessionConfig {
     pub socket: SocketAddr,
     pub username: String,
     pub password: SecretString,
+    pub domain: Option<String>,
+    pub workstation: Option<String>,
     pub staging_directory: String,
     pub exec_mode: WindowsSmbExecMode,
+    pub connect_timeout: Duration,
+    pub command_timeout: Duration,
+    pub transfer_timeout: Duration,
+    pub max_command_output_bytes: usize,
+    pub max_download_bytes: u64,
 }
 
 #[async_trait]
@@ -40,6 +66,7 @@ trait AdminShareHandle: Send {
 pub(crate) struct SmolderExecHandle {
     client: RemoteExecClient,
     socket: SocketAddr,
+    max_output_bytes: usize,
 }
 
 #[async_trait]
@@ -55,6 +82,19 @@ impl SmbExecHandle for SmolderExecHandle {
                     self.socket
                 ))
             })?;
+        let output_bytes = result
+            .stdout
+            .len()
+            .checked_add(result.stderr.len())
+            .ok_or_else(|| {
+                Error::ResourceLimit("SMB command output length overflowed usize".into())
+            })?;
+        if output_bytes > self.max_output_bytes {
+            return Err(Error::ResourceLimit(format!(
+                "SMB command output was {output_bytes} bytes, exceeding the {} byte bound",
+                self.max_output_bytes
+            )));
+        }
         Ok(ExecResponse {
             stdout: result.stdout,
             stderr: result.stderr,
@@ -99,18 +139,79 @@ impl AdminShareHandle for SmolderAdminShareHandle {
                 self.socket
             ))
         })?;
-        share
-            .get(remote_relative_path, local_path)
-            .await
-            .map_err(|err| {
-                Error::FileTransferError(format!(
-                    "smb download {} -> {} via {} failed: {err}",
+        let metadata = share.stat(remote_relative_path).await.map_err(|err| {
+            Error::FileTransferError(format!(
+                "smb metadata check for {} via {} failed: {err}",
+                remote_relative_path, self.socket
+            ))
+        })?;
+        if !metadata.is_file() {
+            return Err(Error::UnsafeWorkspace(format!(
+                "SMB download source {} must be a regular non-reparse file",
+                remote_relative_path
+            )));
+        }
+        if metadata.size > self.config.max_download_bytes {
+            return Err(Error::ResourceLimit(format!(
+                "SMB download {} is {} bytes, exceeding the {} byte bound",
+                remote_relative_path, metadata.size, self.config.max_download_bytes
+            )));
+        }
+        let mut nonce = [0_u8; 8];
+        getrandom::getrandom(&mut nonce).map_err(|error| {
+            Error::FileTransferError(format!("SMB download randomness unavailable: {error}"))
+        })?;
+        let nonce = nonce
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let temporary_path = local_path.with_extension(format!("pandora-download-{nonce}"));
+        let downloaded = match tokio::time::timeout(
+            self.config.transfer_timeout,
+            share.get(remote_relative_path, &temporary_path),
+        )
+        .await
+        {
+            Ok(Ok(downloaded)) => downloaded,
+            Ok(Err(error)) => {
+                let _ = tokio::fs::remove_file(&temporary_path).await;
+                return Err(Error::FileTransferError(format!(
+                    "smb download {} -> {} via {} failed: {error}",
                     remote_relative_path,
                     local_path.display(),
                     self.socket
-                ))
-            })?;
-        Ok(())
+                )));
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&temporary_path).await;
+                return Err(Error::DeadlineExceeded(format!(
+                    "SMB download exceeded {:?}",
+                    self.config.transfer_timeout
+                )));
+            }
+        };
+        if downloaded > self.config.max_download_bytes {
+            let _ = tokio::fs::remove_file(&temporary_path).await;
+            return Err(Error::ResourceLimit(format!(
+                "SMB download exceeded the {} byte bound",
+                self.config.max_download_bytes
+            )));
+        }
+        let finalize_result = async {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                tokio::fs::set_permissions(&temporary_path, std::fs::Permissions::from_mode(0o600))
+                    .await?;
+            }
+            tokio::fs::rename(&temporary_path, local_path).await?;
+            Ok::<(), Error>(())
+        }
+        .await;
+        if finalize_result.is_err() {
+            let _ = tokio::fs::remove_file(&temporary_path).await;
+        }
+        finalize_result
     }
 
     async fn reconnect(&mut self) -> Result<()> {
@@ -167,19 +268,16 @@ impl SmbSession<SmolderExecHandle, SmolderAdminShareHandle> {
         let exec_client = RemoteExecClient::builder()
             .server(server.clone())
             .port(config.socket.port())
+            .dialects(vec![Dialect::Smb311])
+            .signing_mode(SigningMode::ENABLED | SigningMode::REQUIRED)
+            .timeout(config.command_timeout)
             .mode(smolder_exec_mode(config.exec_mode))
-            .credentials(NtlmCredentials::new(
-                config.username.clone(),
-                config.password.expose_secret().to_string(),
-            ))
+            .credentials(ntlm_credentials(config))
             .staging_directory(config.staging_directory.clone())
             .connect()
             .await
             .map_err(|err| {
-                Error::CommunicatorError(format!(
-                    "smb exec connect to {} failed: {err}",
-                    config.socket
-                ))
+                classify_smb_connect_error(config.socket, format!("smb exec connect failed: {err}"))
             })?;
         let admin_share = connect_admin_share(config).await?;
 
@@ -187,6 +285,7 @@ impl SmbSession<SmolderExecHandle, SmolderAdminShareHandle> {
             exec: SmolderExecHandle {
                 client: exec_client,
                 socket: config.socket,
+                max_output_bytes: config.max_command_output_bytes,
             },
             admin_share: SmolderAdminShareHandle {
                 share: Some(admin_share),
@@ -195,6 +294,26 @@ impl SmbSession<SmolderExecHandle, SmolderAdminShareHandle> {
             },
             socket: config.socket,
         })
+    }
+}
+
+fn classify_smb_connect_error(socket: SocketAddr, message: String) -> Error {
+    let lower = message.to_ascii_lowercase();
+    if [
+        "logon failure",
+        "status_logon_failure",
+        "0xc000006d",
+        "authentication",
+        "account locked",
+        "account restriction",
+        "access denied",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        Error::AuthenticationFailure(format!("SMB authentication to {socket} failed: {message}"))
+    } else {
+        Error::CommunicatorError(format!("SMB connection to {socket} failed: {message}"))
     }
 }
 
@@ -331,27 +450,43 @@ fn require_success_status(
     }
 }
 
+fn ntlm_credentials(config: &SmbSessionConfig) -> NtlmCredentials {
+    let mut credentials = NtlmCredentials::new(
+        config.username.clone(),
+        config.password.expose_secret().to_string(),
+    );
+    if let Some(domain) = &config.domain {
+        credentials = credentials.with_domain(domain.clone());
+    }
+    if let Some(workstation) = &config.workstation {
+        credentials = credentials.with_workstation(workstation.clone());
+    }
+    credentials
+}
+
 async fn connect_admin_share(config: &SmbSessionConfig) -> Result<Share> {
     let smb_client = SmbClientBuilder::new()
         .server(config.socket.ip().to_string())
         .port(config.socket.port())
-        .credentials(NtlmCredentials::new(
-            config.username.clone(),
-            config.password.expose_secret().to_string(),
-        ))
+        .dialects(vec![Dialect::Smb311])
+        .signing_mode(SigningMode::ENABLED | SigningMode::REQUIRED)
+        .require_encryption(true)
+        .credentials(ntlm_credentials(config))
         .connect()
         .await
         .map_err(|err| {
-            Error::CommunicatorError(format!(
-                "smb session connect to {} failed: {err}",
-                config.socket
-            ))
+            classify_smb_connect_error(
+                config.socket,
+                format!("SMB 3.1.1 encryption-required session failed: {err}"),
+            )
         })?;
     smb_client.share(ADMIN_SHARE_NAME).await.map_err(|err| {
-        Error::CommunicatorError(format!(
-            "smb share connect to {} on {} failed: {err}",
-            ADMIN_SHARE_NAME, config.socket
-        ))
+        classify_smb_connect_error(
+            config.socket,
+            format!(
+                "SMB 3.1.1 encryption-required share connect to {ADMIN_SHARE_NAME} failed: {err}"
+            ),
+        )
     })
 }
 
@@ -448,7 +583,8 @@ fn should_ignore_disconnect_error(error: &Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_share_relative_path, normalize_windows_exec_command, should_ignore_disconnect_error,
+        admin_share_relative_path, normalize_windows_exec_command,
+        require_encryption_qualified_remote_exec, should_ignore_disconnect_error,
         should_retry_admin_share_error, AdminShareHandle, SmbExecHandle, SmbSession,
     };
     use crate::runtime::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
@@ -459,6 +595,16 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn smb_fallback_fails_before_auth_when_remote_exec_encryption_cannot_be_enforced() {
+        let error = require_encryption_qualified_remote_exec()
+            .expect_err("unqualified SMB remote exec must fail closed");
+        assert!(error
+            .to_string()
+            .contains("authentication was not attempted"));
+        assert!(error.to_string().contains("encryption for every"));
+    }
 
     fn socket() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 445)

@@ -1,5 +1,6 @@
 use pandoras_box::runtime::{
-    DiscoveryConfig, MissionSpec, PandorasBoxRunner, RetryPolicy, TcpDiscovery,
+    CpuArchitecture, DeadlinePolicy, DiscoveryConfig, MissionSpec, OperatingSystem,
+    PandorasBoxRunner, RetryPolicy, TargetContract, TcpDiscovery,
 };
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -7,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod support;
 
-use support::wait_for_discovery;
+use support::{qualified_payload, wait_for_discovery};
 
 fn required_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for live interop tests"))
@@ -54,9 +55,15 @@ async fn live_windows_ssh_target_collects_inventory_and_cleans_up() {
     let mission_id = "live-windows-ssh".to_string();
     let retry_policy = RetryPolicy {
         max_attempts: 3,
-        connect_timeout: Duration::from_secs(5),
         backoff: Duration::from_millis(500),
     };
+    let payload = qualified_payload(
+        chimera_path,
+        OperatingSystem::Windows,
+        CpuArchitecture::X86_64,
+        "explicit live Windows SSH fixture",
+    )
+    .await;
 
     let spec = MissionSpec {
         targets: vec![target_ip],
@@ -66,8 +73,14 @@ async fn live_windows_ssh_target_collects_inventory_and_cleans_up() {
         password: password.into(),
         ssh_port,
         discovery_ports: vec![ssh_port, smb_port],
-        chimera_windows_path: chimera_path,
+        default_target_contract: TargetContract::windows(CpuArchitecture::X86_64, false),
+        payload_catalog: vec![payload],
         retry_policy,
+        deadlines: DeadlinePolicy {
+            connect: Duration::from_secs(5),
+            inactivity: Duration::from_secs(30),
+            ..DeadlinePolicy::default()
+        },
         ..MissionSpec::default()
     };
 

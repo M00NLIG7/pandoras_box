@@ -13,12 +13,14 @@ LIVE_ARTIFACT_DIR="/workspace/target/live-alpine-ssh-artifacts/$(date +%s%N)"
 KNOWN_HOSTS_DIR="$ROOT_DIR/target/live-alpine-known-hosts-$$"
 PASSWORD_FILE="$ROOT_DIR/target/live-alpine-password-$$"
 CHIMERA_TARGET="${PANDORAS_BOX_LIVE_ALPINE_CHIMERA_UNIX_PATH:-${PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH:-}}"
+OPERATOR_TARGET="${PANDORAS_BOX_LIVE_OPERATOR_PATH:-}"
+PAYLOAD_MANIFEST="$ROOT_DIR/target/live-alpine-payloads-$$.json"
 
 cleanup() {
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
     docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
     rm -rf "$KNOWN_HOSTS_DIR"
-    rm -f "$PASSWORD_FILE"
+    rm -f "$PASSWORD_FILE" "$PAYLOAD_MANIFEST"
 }
 
 show_logs_on_failure() {
@@ -70,6 +72,22 @@ case "$CHIMERA_TARGET" in
         exit 1
         ;;
 esac
+if [[ -n "$OPERATOR_TARGET" ]]; then
+    if [[ "$OPERATOR_TARGET" != /* ]]; then
+        OPERATOR_TARGET="$ROOT_DIR/$OPERATOR_TARGET"
+    fi
+    case "$OPERATOR_TARGET" in
+        "$ROOT_DIR"/*) ;;
+        *)
+            printf 'Pandora operator binary must be inside %s\n' "$ROOT_DIR" >&2
+            exit 1
+            ;;
+    esac
+    if [[ ! -x "$OPERATOR_TARGET" ]]; then
+        printf 'Pandora operator binary is not executable at %s\n' "$OPERATOR_TARGET" >&2
+        exit 1
+    fi
+fi
 
 BUILD_SECRETS=(--secret "id=root_password,src=$PASSWORD_FILE")
 if [[ -n "${NODE_EXTRA_CA_CERTS:-}" && -f "$NODE_EXTRA_CA_CERTS" ]]; then
@@ -121,3 +139,35 @@ docker run --rm \
     -e PANDORAS_BOX_LIVE_ALPINE_SSH_PASSWORD \
     "$RUNNER_IMAGE" \
     bash -lc '/usr/local/cargo/bin/cargo test -j 1 --locked --offline -p pandoras_box --test live_unix_ssh live_alpine_ssh_target_collects_inventory_and_cleans_up -- --ignored --nocapture'
+
+if [[ -n "$OPERATOR_TARGET" ]]; then
+    OPERATOR_CONTAINER="/workspace/${OPERATOR_TARGET#"$ROOT_DIR/"}"
+    CHIMERA_CONTAINER="/workspace/${CHIMERA_TARGET#"$ROOT_DIR/"}"
+    PASSWORD_CONTAINER="/workspace/${PASSWORD_FILE#"$ROOT_DIR/"}"
+    MANIFEST_CONTAINER="/workspace/${PAYLOAD_MANIFEST#"$ROOT_DIR/"}"
+    EXACT_ARTIFACT_DIR="/workspace/target/exact-alpine-operator-artifacts/$(date +%s%N)"
+    CHIMERA_SHA256="$(sha256sum "$CHIMERA_TARGET" | awk '{print $1}')"
+    cat > "$PAYLOAD_MANIFEST" <<JSON
+{"payloads":[{"operating_system":"linux","architecture":"x86_64","path":"$CHIMERA_CONTAINER","version":"exact-candidate","sha256":"$CHIMERA_SHA256","qualification":"live_qualified","evidence":["exact packaged operator Alpine SSH/SFTP gate"]}]}
+JSON
+    chmod 600 "$PAYLOAD_MANIFEST"
+
+    docker run --rm \
+        --network "$NETWORK_NAME" \
+        -v "$ROOT_DIR:/workspace" \
+        -v "$KNOWN_HOSTS_DIR:/tmp/pandoras-box-home/.ssh:ro" \
+        -w /workspace \
+        -e HOME=/tmp/pandoras-box-home \
+        -e "OPERATOR_CONTAINER=$OPERATOR_CONTAINER" \
+        -e "TARGET_IP=$TARGET_IP" \
+        -e "PASSWORD_CONTAINER=$PASSWORD_CONTAINER" \
+        -e "MANIFEST_CONTAINER=$MANIFEST_CONTAINER" \
+        -e "EXACT_ARTIFACT_DIR=$EXACT_ARTIFACT_DIR" \
+        "$RUNNER_IMAGE" \
+        bash -lc '"$OPERATOR_CONTAINER" --range "$TARGET_IP/32" --password-file "$PASSWORD_CONTAINER" --profile linux-x86_64 --payload-manifest "$MANIFEST_CONTAINER" --mission-id exact-alpine-ssh --artifact-root "$EXACT_ARTIFACT_DIR" --connect-timeout-ms 5000 --inactivity-timeout-ms 30000; test -s "$EXACT_ARTIFACT_DIR/exact-alpine-ssh/summary.json"; grep -Eq "\"completed_hosts\"[[:space:]]*:[[:space:]]*1" "$EXACT_ARTIFACT_DIR/exact-alpine-ssh/summary.json"; grep -Eq "\"failed_hosts\"[[:space:]]*:[[:space:]]*0" "$EXACT_ARTIFACT_DIR/exact-alpine-ssh/summary.json"'
+
+    if docker exec "$CONTAINER_NAME" sh -c 'find /tmp -maxdepth 1 -name ".pandora-*" -print -quit | grep -q .'; then
+        printf 'exact operator gate left a remote Pandora workspace\n' >&2
+        exit 1
+    fi
+fi

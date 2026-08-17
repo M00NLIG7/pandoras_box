@@ -73,15 +73,18 @@ impl ArtifactStore {
         root: impl Into<PathBuf>,
     ) -> io::Result<ArtifactRootLock> {
         let root = root.into();
-        tokio::fs::create_dir_all(&root).await?;
+        secure_create_dir_all(&root).await?;
         let lock_path = root.join(".pandoras_box.lock");
+        let lock_path_for_task = lock_path.clone();
         let file = tokio::task::spawn_blocking(move || {
-            let file = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&lock_path)?;
+            let mut options = OpenOptions::new();
+            options.create(true).truncate(false).read(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let file = options.open(&lock_path_for_task)?;
             file.try_lock().map_err(|err| match err {
                 std::fs::TryLockError::WouldBlock => io::Error::new(
                     io::ErrorKind::AlreadyExists,
@@ -93,6 +96,8 @@ impl ArtifactStore {
         })
         .await
         .map_err(|err| io::Error::other(format!("artifact lock task failed: {err}")))??;
+        #[cfg(windows)]
+        harden_windows_path(&lock_path).await?;
 
         Ok(ArtifactRootLock {
             root,
@@ -161,6 +166,11 @@ impl ArtifactStore {
     }
 
     #[must_use]
+    pub fn rendering_status_path(&self) -> PathBuf {
+        self.mission_dir().join("rendering_status.json")
+    }
+
+    #[must_use]
     pub fn hosts_dir(&self) -> PathBuf {
         self.mission_dir().join("hosts")
     }
@@ -178,6 +188,11 @@ impl ArtifactStore {
     #[must_use]
     pub fn host_status_path(&self, ip: IpAddr) -> PathBuf {
         self.host_dir(ip).join("status.json")
+    }
+
+    #[must_use]
+    pub fn host_workspace_path(&self, ip: IpAddr) -> PathBuf {
+        self.host_dir(ip).join("workspace.json")
     }
 
     #[must_use]
@@ -209,12 +224,14 @@ impl ArtifactStore {
     where
         I: IntoIterator<Item = IpAddr>,
     {
-        tokio::fs::create_dir_all(self.hosts_dir()).await?;
+        secure_create_dir_all(&self.mission_dir()).await?;
+        secure_create_dir_all(&self.hosts_dir()).await?;
 
         for host in hosts {
-            tokio::fs::create_dir_all(self.host_exec_dir(host)).await?;
-            tokio::fs::create_dir_all(self.host_files_dir(host)).await?;
-            tokio::fs::create_dir_all(self.host_logs_dir(host)).await?;
+            secure_create_dir_all(&self.host_dir(host)).await?;
+            secure_create_dir_all(&self.host_exec_dir(host)).await?;
+            secure_create_dir_all(&self.host_files_dir(host)).await?;
+            secure_create_dir_all(&self.host_logs_dir(host)).await?;
         }
 
         Ok(())
@@ -222,6 +239,10 @@ impl ArtifactStore {
 
     pub async fn write_mission_manifest(&self, contents: &str) -> io::Result<()> {
         atomic_write(self.mission_manifest_path(), contents.as_bytes()).await
+    }
+
+    pub async fn read_mission_manifest(&self) -> io::Result<String> {
+        read_bounded_regular_text(&self.mission_manifest_path(), 64 * 1024 * 1024).await
     }
 
     pub async fn write_summary(&self, contents: &str) -> io::Result<()> {
@@ -260,6 +281,10 @@ impl ArtifactStore {
         atomic_write(self.network_topology_png_path(), contents).await
     }
 
+    pub async fn write_rendering_status(&self, contents: &str) -> io::Result<()> {
+        atomic_write(self.rendering_status_path(), contents.as_bytes()).await
+    }
+
     pub async fn write_host_plan(&self, ip: IpAddr, contents: &str) -> io::Result<()> {
         atomic_write(self.host_plan_path(ip), contents.as_bytes()).await
     }
@@ -268,15 +293,23 @@ impl ArtifactStore {
         atomic_write(self.host_status_path(ip), contents.as_bytes()).await
     }
 
+    pub async fn write_host_workspace(&self, ip: IpAddr, contents: &str) -> io::Result<()> {
+        atomic_write(self.host_workspace_path(ip), contents.as_bytes()).await
+    }
+
+    pub async fn read_host_workspace(&self, ip: IpAddr) -> io::Result<String> {
+        read_bounded_regular_text(&self.host_workspace_path(ip), 64 * 1024).await
+    }
+
     pub async fn read_host_status(&self, ip: IpAddr) -> io::Result<String> {
-        tokio::fs::read_to_string(self.host_status_path(ip)).await
+        read_bounded_regular_text(&self.host_status_path(ip), 1024 * 1024).await
     }
 
     pub(crate) async fn read_active_mission(
         root_lock: &ArtifactRootLock,
     ) -> io::Result<Option<ActiveMissionRecord>> {
         let path = Self::active_mission_path(&root_lock.root);
-        match tokio::fs::read_to_string(&path).await {
+        match read_bounded_regular_text(&path, 64 * 1024).await {
             Ok(raw) => {
                 let record: ActiveMissionRecord =
                     serde_json::from_str(&raw).map_err(io::Error::other)?;
@@ -350,6 +383,71 @@ pub fn validate_mission_id(mission_id: &str) -> io::Result<()> {
     }
 }
 
+async fn read_bounded_regular_text(path: &Path, maximum: u64) -> io::Result<String> {
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "state path must be a regular non-link file: {}",
+                path.display()
+            ),
+        ));
+    }
+    if metadata.len() > maximum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "state file {} is {} bytes, exceeding the {maximum} byte bound",
+                path.display(),
+                metadata.len()
+            ),
+        ));
+    }
+    tokio::fs::read_to_string(path).await
+}
+
+async fn secure_create_dir_all(path: &Path) -> io::Result<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "artifact directory must be a non-link directory: {}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            tokio::fs::create_dir_all(path).await?;
+        }
+        Err(error) => return Err(error),
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
+        let metadata = tokio::fs::symlink_metadata(path).await?;
+        let effective_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_uid || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "artifact directory has unsafe ownership or permissions: {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    #[cfg(windows)]
+    harden_windows_path(path).await?;
+
+    Ok(())
+}
+
 async fn atomic_write(path: PathBuf, contents: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
@@ -357,7 +455,7 @@ async fn atomic_write(path: PathBuf, contents: &[u8]) -> io::Result<()> {
             format!("atomic write path has no parent: {}", path.display()),
         )
     })?;
-    tokio::fs::create_dir_all(parent).await?;
+    secure_create_dir_all(parent).await?;
 
     let file_name = path
         .file_name()
@@ -379,12 +477,13 @@ async fn atomic_write(path: PathBuf, contents: &[u8]) -> io::Result<()> {
             ".{file_name}.tmp-{}-{sequence}",
             std::process::id()
         ));
-        match tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary_path)
-            .await
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
         {
+            options.mode(0o600);
+        }
+        match options.open(&temporary_path).await {
             Ok(file) => {
                 temporary_file = file;
                 break;
@@ -400,6 +499,8 @@ async fn atomic_write(path: PathBuf, contents: &[u8]) -> io::Result<()> {
         temporary_file.sync_all().await?;
         drop(temporary_file);
         replace_file(&temporary_path, &path).await?;
+        #[cfg(windows)]
+        harden_windows_path(&path).await?;
         sync_parent_directory(parent).await
     }
     .await;
@@ -408,6 +509,62 @@ async fn atomic_write(path: PathBuf, contents: &[u8]) -> io::Result<()> {
         let _ = tokio::fs::remove_file(&temporary_path).await;
     }
     write_result
+}
+
+#[cfg(windows)]
+async fn harden_windows_path(path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let wide_path = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        // Protected DACL: object owner, local Administrators, and SYSTEM only.
+        let sddl = std::ffi::OsStr::new("D:P(A;;FA;;;OW)(A;;FA;;;BA)(A;;FA;;;SY)")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if converted == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let applied = unsafe {
+            SetFileSecurityW(
+                wide_path.as_ptr(),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            )
+        };
+        unsafe {
+            LocalFree(descriptor);
+        }
+        if applied == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|error| io::Error::other(format!("Windows ACL task failed: {error}")))?
 }
 
 #[cfg(not(windows))]
@@ -628,6 +785,50 @@ mod tests {
             );
         }
 
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn artifact_store_enforces_private_directory_and_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pandoras-box-private-{unique}"));
+        let store = ArtifactStore::new(&root, "mission-private").expect("store");
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10));
+        store.ensure_layout([ip]).await.expect("layout");
+        store
+            .write_host_status(ip, "{\"state\":\"complete\"}\n")
+            .await
+            .expect("status");
+
+        for directory in [
+            store.mission_dir(),
+            store.hosts_dir(),
+            store.host_dir(ip),
+            store.host_exec_dir(ip),
+            store.host_files_dir(ip),
+            store.host_logs_dir(ip),
+        ] {
+            let mode = tokio::fs::metadata(&directory)
+                .await
+                .expect("directory metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "{}", directory.display());
+        }
+        let file_mode = tokio::fs::metadata(store.host_status_path(ip))
+            .await
+            .expect("file metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 

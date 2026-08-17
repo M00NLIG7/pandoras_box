@@ -71,6 +71,26 @@ impl FailureDisposition {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupOutcome {
+    NotRequired,
+    Pending,
+    Complete,
+    Failed,
+}
+
+impl CleanupOutcome {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequired => "not_required",
+            Self::Pending => "pending",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostExecutionReport {
     pub plan: HostPlan,
@@ -81,6 +101,9 @@ pub struct HostExecutionReport {
     pub selected_transport: Option<TransportKind>,
     pub attempt_count: u8,
     pub completed_phases: Vec<FailurePhase>,
+    pub cleanup_outcome: CleanupOutcome,
+    pub residue_present: bool,
+    pub partial_collection: bool,
 }
 
 impl HostExecutionReport {
@@ -95,6 +118,26 @@ impl HostExecutionReport {
             selected_transport: None,
             attempt_count: 1,
             completed_phases: Vec::new(),
+            cleanup_outcome: CleanupOutcome::Pending,
+            residue_present: false,
+            partial_collection: false,
+        }
+    }
+
+    #[must_use]
+    pub fn planned(plan: HostPlan) -> Self {
+        Self {
+            plan: plan.force_state(HostState::Complete),
+            final_state: HostState::Complete,
+            error: None,
+            failure_phase: None,
+            failure_disposition: None,
+            selected_transport: None,
+            attempt_count: 0,
+            completed_phases: Vec::new(),
+            cleanup_outcome: CleanupOutcome::NotRequired,
+            residue_present: false,
+            partial_collection: false,
         }
     }
 
@@ -123,6 +166,9 @@ impl HostExecutionReport {
             selected_transport: None,
             attempt_count: 0,
             completed_phases: Vec::new(),
+            cleanup_outcome: CleanupOutcome::NotRequired,
+            residue_present: false,
+            partial_collection: false,
         }
     }
 
@@ -151,12 +197,15 @@ impl HostExecutionReport {
             selected_transport: None,
             attempt_count: 1,
             completed_phases: Vec::new(),
+            cleanup_outcome: CleanupOutcome::Pending,
+            residue_present: true,
+            partial_collection: false,
         }
     }
 
     #[must_use]
     pub fn with_attempt_count(mut self, attempt_count: u8) -> Self {
-        self.attempt_count = attempt_count.max(1);
+        self.attempt_count = attempt_count;
         self
     }
 
@@ -176,6 +225,19 @@ impl HostExecutionReport {
     pub fn mark_phase_completed(mut self, phase: FailurePhase) -> Self {
         self.completed_phases.push(phase);
         self.completed_phases = normalize_completed_phases(self.completed_phases);
+        self
+    }
+
+    #[must_use]
+    pub fn with_cleanup_outcome(mut self, outcome: CleanupOutcome, residue_present: bool) -> Self {
+        self.cleanup_outcome = outcome;
+        self.residue_present = residue_present;
+        self
+    }
+
+    #[must_use]
+    pub fn with_partial_collection(mut self, partial: bool) -> Self {
+        self.partial_collection = partial;
         self
     }
 
@@ -261,7 +323,10 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::{HostExecutionReport, HostExecutor, Scheduler};
-    use crate::runtime::mission::{HostPlan, HostState, HostTarget, PlatformHint};
+    use crate::runtime::mission::{
+        CpuArchitecture, HostPlan, HostState, HostTarget, OperatingSystem, PlatformHint,
+        TargetContract,
+    };
     use async_trait::async_trait;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
@@ -303,6 +368,8 @@ mod tests {
                 platform: PlatformHint::Unknown,
                 open_ports: vec![22],
             },
+            contract: TargetContract::ssh(OperatingSystem::Linux, CpuArchitecture::X86_64),
+            payload: None,
             state: HostState::Queued,
             transport_chain: vec![],
         }

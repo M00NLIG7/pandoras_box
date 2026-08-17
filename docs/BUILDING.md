@@ -1,75 +1,36 @@
 # Building and validating Pandora's Box
 
-These are the current repository-local build instructions. Historical commands under `docs/archive/` are intentionally non-authoritative.
+Historical material under `docs/archive/` is non-authoritative. A compile check, emulation, skipped fixture, or hand-written manifest is not live support evidence.
 
 ## Pinned inputs
 
-- Rust `1.94.1` from `rust-toolchain.toml`
+- Rust `1.94.1` (`rust-toolchain.toml`)
 - Cross `0.2.5`
 - cargo-audit `0.22.1`
 - cargo-deny `0.20.2`
-- OCI build images by digest in `Cross.toml` and the live harness scripts
-- Smolder crates.io releases `smolder =0.4.0`, `smolder-smb-core =0.4.0`, and `smolder-proto =0.4.0` in `pandoras_box/Cargo.toml` and `Cargo.lock`
-- Registry checksums `0b315789f82c66d4a30e80a0fa8182427e938c2c0ebf03951dc54282aee24338` (Smolder), `3aab6dd20ecda51a542cc99829ac08a79725636ad39adf6848bf85c2caa81940` (core), and `66b5efa58838c8f674c43b8f01ace543c88f4487b72a589af5e2d3b79c44ba28` (protocol)
+- digest-pinned Cross/live images in `Cross.toml`, workflow, and fixture scripts
+- exact crates.io `smolder`, `smolder-smb-core`, and `smolder-proto` `0.4.0` releases and lockfile checksums
 
-Do not replace exact versions, checksums, or image/source revisions with floating inputs in release validation.
+Do not replace release inputs with floating versions, Git/path overrides, or sibling checkouts.
 
-## Tool setup
-
-```sh
-rustup toolchain install 1.94.1 \
-  --profile minimal \
-  --component clippy,rustfmt \
-  --target x86_64-unknown-linux-musl,i686-pc-windows-gnu
-cargo install cross --version 0.2.5 --locked
-cargo install cargo-audit --version 0.22.1 --locked
-cargo install cargo-deny --version 0.20.2 --locked
-```
-
-Docker or another Cross-compatible container engine is required for canonical cross-builds and live Linux fixtures.
-
-## Clean-checkout dependency proof
-
-Run this from a clean checkout with no sibling Smolder directory:
+## Local source gates
 
 ```sh
 cargo fetch --locked
 cargo metadata --locked --offline --format-version 1 >/dev/null
-```
-
-Cargo must resolve the exact Smolder release set and checksums from crates.io. A local path, Git override, or sibling checkout is not a release input.
-
-## Mandatory source gates
-
-```sh
 cargo fmt --all -- --check
 cargo clippy --locked --offline --workspace --all-targets -- -D warnings
-cross clippy --locked --offline --workspace --all-targets \
-  --target x86_64-unknown-linux-musl -- -D warnings
 cargo test --locked --offline --workspace
 cargo test --locked --offline -p rustrc --doc
-cargo clippy --locked --offline --workspace --all-targets \
-  --target i686-pc-windows-gnu -- -D warnings
-```
-
-The Windows command is a source compile-check only. It is not a live gate and does not make Windows a release target.
-
-Refresh the advisory database over verified TLS, then run both dependency policies:
-
-```sh
-cargo audit -D warnings
-cargo deny --locked check advisories sources
-```
-
-For an offline repeat using an already-fetched, sufficiently fresh advisory database:
-
-```sh
 cargo audit --no-fetch --stale -D warnings
+cargo deny --locked --offline check advisories sources
+bash -n scripts/*.sh
+shellcheck scripts/*.sh
 ```
 
-`deny.toml` has no blanket advisory waiver. Any future exception requires specific reachability and remediation evidence.
+Refresh advisory data over verified TLS before a release and rerun `cargo audit -D warnings` plus `cargo deny --locked check advisories sources`.
 
-## Canonical first-release binaries
+## Canonical Linux artifact
 
 ```sh
 cross build --locked --offline --release \
@@ -80,48 +41,68 @@ cross build --locked --offline --release \
   --target x86_64-unknown-linux-musl
 ```
 
-Expected paths:
+Expected files:
 
 ```text
 target/x86_64-unknown-linux-musl/release/pandoras_box
 target/x86_64-unknown-linux-musl/release/chimera
 ```
 
-Inspect and smoke-test the exact files rather than a separately rebuilt copy:
+Inspect static linkage and smoke-test those exact files. Do not substitute a debug or separately rebuilt binary.
+
+## Exact packaged-operator gates
+
+The release workflow passes both exact release files to each fixture:
 
 ```sh
-file target/x86_64-unknown-linux-musl/release/pandoras_box \
-     target/x86_64-unknown-linux-musl/release/chimera
-
-for image in \
-  ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea \
-  alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
-do
-  docker run --rm --platform linux/amd64 \
-    -v "$PWD:/workspace:ro" "$image" \
-    /workspace/target/x86_64-unknown-linux-musl/release/pandoras_box --help
-  docker run --rm --platform linux/amd64 \
-    -v "$PWD:/workspace:ro" "$image" \
-    /workspace/target/x86_64-unknown-linux-musl/release/chimera --help
-done
-```
-
-## Mandatory exact-artifact interoperability
-
-The same musl Chimera file selected above must pass both authenticated SSH/SFTP fixtures:
-
-```sh
+PANDORAS_BOX_LIVE_OPERATOR_PATH="$PWD/target/x86_64-unknown-linux-musl/release/pandoras_box" \
 PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH="$PWD/target/x86_64-unknown-linux-musl/release/chimera" \
   scripts/run-unix-ssh-interop.sh
 
+PANDORAS_BOX_LIVE_OPERATOR_PATH="$PWD/target/x86_64-unknown-linux-musl/release/pandoras_box" \
 PANDORAS_BOX_LIVE_ALPINE_CHIMERA_UNIX_PATH="$PWD/target/x86_64-unknown-linux-musl/release/chimera" \
   scripts/run-alpine-ssh-interop.sh
 ```
 
-The scripts create disposable local targets, generate ephemeral fixture credentials, enroll the fixture host key, run one exact ignored test, and remove their containers. See `scripts/README.md`. Do not run the Windows or mixed harness against anything except an explicitly authorized disposable lab.
+Each script still runs its source integration fixture, then runs a complete mission through the exact operator with an exact SHA-256 payload manifest. It independently checks summary creation and remote workspace absence. Only after both gates pass may packaging generate a Linux `live_qualified` entry.
 
-## Packaging boundary
+The generated bundle contains:
 
-`.github/workflows/build.yml` validates before packaging and creates one `pandoras-box-<version>-x86_64-linux-musl.tar.gz` bundle with SHA-256 checksums, locked Cargo metadata, and machine-readable provenance. GNU/glibc binaries are not release inputs. Draft publication is a separate explicit input and must remain after every mandatory gate.
+```text
+bin/pandoras_box
+release/chimera
+release/payloads.json
+LICENSE
+provenance.json
+```
 
-Repository documentation and generated documentation are local-only. Packaging and release steps must not upload or attach `README.md`, `docs/`, rendered documentation, or documentation archives.
+`release/payloads.json` contains the exact Chimera SHA-256, product version, target key, and both gate identifiers. Packaging verifies the manifest digest against the copied payload before creating the deterministic archive. Checksums and Cargo metadata remain adjacent validated release assets, not tar members.
+
+## Cross-platform evidence ladder
+
+| Target | Required gate before `live_qualified` | Current automation status |
+| --- | --- | --- |
+| Linux x86_64 musl | Exact packaged operator + payload on pinned Ubuntu and Alpine SSH/SFTP fixtures | Defined in release workflow; must pass for each artifact |
+| Windows x86_64 SSH/SFTP | Exact x86_64 operator/payload compile, package, OpenSSH transfer/execution, capability identity, cleanup, hostile-path, timeout, and wrong-auth tests | x86_64 source compile-check and optional lab script only; no package/live claim |
+| Windows SMB | All Windows artifact gates plus packet/server evidence that every ADMIN$/IPC$/SCMR request is encrypted | Runtime fails before authentication with Smolder 0.4.0; no live claim |
+| FreeBSD/BSD x86_64 | Exact native payload build/package plus SSH/SFTP live fixture and hostile-path cleanup | Optional external fixture only; no artifact/live claim |
+| pfSense x86_64 | Exact compatible payload plus controlled pfSense fixture, package provenance, and cleanup evidence | Not available; no artifact/live claim |
+| x86, aarch64, armv7 | Exact OS/architecture artifact and corresponding live gate | Contract only |
+
+The optional Windows/BSD/mixed scripts are controlled-lab infrastructure. They must not be run against real CCDC targets, and unavailable infrastructure must be recorded as unavailable rather than converted into support evidence.
+
+## Windows source check
+
+The release workflow uses `x86_64-pc-windows-gnu` for source linting because the represented Windows payload key is x86_64:
+
+```sh
+rustup target add x86_64-pc-windows-gnu --toolchain 1.94.1
+cargo clippy --locked --offline --workspace --all-targets \
+  --target x86_64-pc-windows-gnu -- -D warnings
+```
+
+This is compile-only evidence. It does not qualify Windows SSH or SMB.
+
+## Documentation boundary
+
+Repository documentation and generated documentation are local-only. Packaging and release steps must not upload or include `README.md`, `docs/`, rendered documentation, or documentation archives.

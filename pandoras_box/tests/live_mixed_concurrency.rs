@@ -1,6 +1,8 @@
 use pandoras_box::runtime::{
-    DiscoveryConfig, MissionSpec, PandorasBoxRunner, RetryPolicy, TcpDiscovery,
+    CpuArchitecture, DeadlinePolicy, DiscoveryConfig, MissionSpec, OperatingSystem,
+    PandorasBoxRunner, RetryPolicy, TargetContract, TcpDiscovery,
 };
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -10,6 +12,9 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+
+mod support;
+use support::qualified_payload;
 
 fn required_env(name: &str) -> String {
     std::env::var(name)
@@ -227,13 +232,13 @@ async fn live_mixed_concurrency_keeps_hosts_moving_until_end_reconciliation() {
         .probe_ip(unix_ip)
         .await
         .unwrap_or_else(|| panic!("expected discovery to reach {unix_ip}:{ssh_port}"));
-    assert_eq!(unix_record.host.platform.as_str(), "unix");
+    assert_eq!(unix_record.host.platform.as_str(), "unix_like");
 
     let alpine_record = discovery
         .probe_ip(alpine_ip)
         .await
         .unwrap_or_else(|| panic!("expected discovery to reach {alpine_ip}:{ssh_port}"));
-    assert_eq!(alpine_record.host.platform.as_str(), "unix");
+    assert_eq!(alpine_record.host.platform.as_str(), "unix_like");
 
     let windows_record = discovery
         .probe_ip(windows_ip)
@@ -247,6 +252,39 @@ async fn live_mixed_concurrency_keeps_hosts_moving_until_end_reconciliation() {
         Some(SlowSshTarget::bind(SocketAddr::new(slow_ip, ssh_port)).await)
     };
 
+    let unix_payload = qualified_payload(
+        chimera_unix_path,
+        OperatingSystem::Linux,
+        CpuArchitecture::X86_64,
+        "explicit mixed Linux fixture",
+    )
+    .await;
+    let windows_payload = qualified_payload(
+        chimera_windows_path,
+        OperatingSystem::Windows,
+        CpuArchitecture::X86_64,
+        "explicit mixed Windows fixture",
+    )
+    .await;
+    let target_contracts = BTreeMap::from([
+        (
+            unix_ip,
+            TargetContract::ssh(OperatingSystem::Linux, CpuArchitecture::X86_64),
+        ),
+        (
+            alpine_ip,
+            TargetContract::ssh(OperatingSystem::Linux, CpuArchitecture::X86_64),
+        ),
+        (
+            windows_ip,
+            TargetContract::windows(CpuArchitecture::X86_64, true),
+        ),
+        (
+            slow_ip,
+            TargetContract::ssh(OperatingSystem::Linux, CpuArchitecture::X86_64),
+        ),
+    ]);
+
     let spec = MissionSpec {
         targets: vec![unix_ip, alpine_ip, windows_ip, slow_ip],
         artifact_root: artifact_root.clone(),
@@ -256,13 +294,18 @@ async fn live_mixed_concurrency_keeps_hosts_moving_until_end_reconciliation() {
         password: password.into(),
         ssh_port,
         discovery_ports: vec![ssh_port, smb_port],
-        chimera_unix_path,
-        chimera_windows_path,
+        target_contracts,
+        payload_catalog: vec![unix_payload, windows_payload],
         concurrency_limit: 4,
+        allow_smb_fallback: true,
         retry_policy: RetryPolicy {
             max_attempts: 3,
-            connect_timeout,
             backoff: Duration::from_millis(500),
+        },
+        deadlines: DeadlinePolicy {
+            connect: connect_timeout,
+            inactivity: Duration::from_secs(30),
+            ..DeadlinePolicy::default()
         },
         ..MissionSpec::default()
     };

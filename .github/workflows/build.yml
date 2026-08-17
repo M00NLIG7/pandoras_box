@@ -23,7 +23,7 @@ env:
   CARGO_INCREMENTAL: "0"
   CI: "true"
   LINUX_TARGET: x86_64-unknown-linux-musl
-  WINDOWS_CHECK_TARGET: i686-pc-windows-gnu
+  WINDOWS_CHECK_TARGET: x86_64-pc-windows-gnu
   LINUX_CROSS_IMAGE: ghcr.io/cross-rs/x86_64-unknown-linux-musl@sha256:77db671d8356a64ae72a3e1415e63f547f26d374fbe3c4762c1cd36c7eac7b99
   UBUNTU_TEST_IMAGE: ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
   ALPINE_TEST_IMAGE: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
@@ -163,11 +163,13 @@ jobs:
 
       - name: Run mandatory Ubuntu SSH gate with the release payload
         env:
+          PANDORAS_BOX_LIVE_OPERATOR_PATH: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/pandoras_box
           PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/chimera
         run: scripts/run-unix-ssh-interop.sh
 
       - name: Run mandatory Alpine SSH gate with the release payload
         env:
+          PANDORAS_BOX_LIVE_OPERATOR_PATH: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/pandoras_box
           PANDORAS_BOX_LIVE_ALPINE_CHIMERA_UNIX_PATH: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/chimera
         run: scripts/run-alpine-ssh-interop.sh
 
@@ -192,6 +194,26 @@ jobs:
           operator_sha256="$(sha256sum "$operator_path" | awk '{print $1}')"
           collector_sha256="$(sha256sum "$collector_path" | awk '{print $1}')"
           jq -n \
+            --arg version "$version" \
+            --arg sha256 "$collector_sha256" \
+            --arg revision "$GITHUB_SHA" \
+            --arg ubuntu_image "$UBUNTU_TEST_IMAGE" \
+            --arg alpine_image "$ALPINE_TEST_IMAGE" \
+            '{payloads: [{
+              operating_system: "linux",
+              architecture: "x86_64",
+              path: "chimera",
+              version: $version,
+              sha256: $sha256,
+              qualification: "live_qualified",
+              evidence: [
+                ("exact packaged operator Ubuntu SSH/SFTP gate at " + $revision + " using " + $ubuntu_image),
+                ("exact packaged operator Alpine SSH/SFTP gate at " + $revision + " using " + $alpine_image)
+              ]
+            }]}' > "dist/$bundle_root/release/payloads.json"
+          chmod 0644 "dist/$bundle_root/release/payloads.json"
+
+          jq -n \
             --arg version "$RELEASE_VERSION" \
             --arg source_revision "$GITHUB_SHA" \
             --arg source_ref "$GITHUB_REF" \
@@ -207,7 +229,7 @@ jobs:
             --arg smolder_source "$smolder_source" \
             --arg ubuntu_test_image "$UBUNTU_TEST_IMAGE" \
             --arg alpine_test_image "$ALPINE_TEST_IMAGE" \
-            --argjson live_gates '["Ubuntu 24.04 SSH/SFTP", "Alpine 3.21 SSH/SFTP"]' \
+            --argjson live_gates '["exact packaged operator Ubuntu 24.04 SSH/SFTP", "exact packaged operator Alpine 3.21 SSH/SFTP"]' \
             '{
               version: $version,
               source_revision: $source_revision,
@@ -224,9 +246,12 @@ jobs:
               smolder_source: $smolder_source,
               smoke_test_images: {ubuntu: $ubuntu_test_image, alpine: $alpine_test_image},
               live_gates: $live_gates,
-              windows_release: "not published; Windows SSH and SMB require separate mandatory live gates"
+              windows_release: "not published; Windows SSH requires exact artifact gates and SMB remains pre-auth blocked pending encryption-required remote exec"
             }' > dist/provenance.json
           install -m 0644 dist/provenance.json "dist/$bundle_root/provenance.json"
+          test "$(jq -r '.payloads[0].sha256' "dist/$bundle_root/release/payloads.json")" = \
+            "$(sha256sum "dist/$bundle_root/release/chimera" | awk '{print $1}')"
+          test "$(jq -r '.payloads[0].qualification' "dist/$bundle_root/release/payloads.json")" = live_qualified
 
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
             -C dist -cf - "$bundle_root" | gzip -n > "dist/$bundle_name"

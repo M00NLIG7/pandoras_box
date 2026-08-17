@@ -21,6 +21,11 @@ pub enum SshAuth {
     Key {
         username: String,
         key_path: PathBuf,
+        public_key_sha256: String,
+    },
+    Agent {
+        username: String,
+        public_key_sha256: String,
     },
 }
 
@@ -28,7 +33,12 @@ pub enum SshAuth {
 pub struct SshSessionConfig {
     pub socket: SocketAddr,
     pub auth: SshAuth,
+    pub connect_timeout: Duration,
     pub inactivity_timeout: Duration,
+    pub command_timeout: Duration,
+    pub transfer_timeout: Duration,
+    pub max_command_output_bytes: usize,
+    pub max_download_bytes: u64,
     pub shell: RemoteShell,
     pub host_key_policy: HostKeyPolicy,
 }
@@ -91,26 +101,48 @@ impl SshSession<RustrcSshClient> {
                 )
                 .await?
             }
-            SshAuth::Key { username, key_path } => {
-                SSHConfig::key_with_policy(
+            SshAuth::Key {
+                username,
+                key_path,
+                public_key_sha256,
+            } => {
+                SSHConfig::key_with_policy_and_fingerprint(
                     username.clone(),
                     config.socket,
                     key_path.clone(),
+                    public_key_sha256.clone(),
                     config.inactivity_timeout,
                     config.host_key_policy,
                 )
                 .await?
             }
-        };
+            SshAuth::Agent {
+                username,
+                public_key_sha256,
+            } => {
+                SSHConfig::agent_with_policy(
+                    username.clone(),
+                    config.socket,
+                    public_key_sha256.clone(),
+                    config.inactivity_timeout,
+                    config.host_key_policy,
+                )
+                .await?
+            }
+        }
+        .with_connection_timeout(config.connect_timeout)
+        .with_operation_limits(rustrc::ssh::SshOperationLimits {
+            command_timeout: config.command_timeout,
+            transfer_timeout: config.transfer_timeout,
+            max_command_output_bytes: config.max_command_output_bytes,
+            max_download_bytes: config.max_download_bytes,
+        });
 
         Ok(Self {
             client: RustrcSshClient {
-                client: Client::connect(ssh_config).await.map_err(|err| {
-                    Error::CommunicatorError(format!(
-                        "ssh connect to {} failed under {:?}: {err}",
-                        config.socket, config.host_key_policy
-                    ))
-                })?,
+                client: Client::connect(ssh_config)
+                    .await
+                    .map_err(|err| map_ssh_connect_error(config, err))?,
             },
             socket: config.socket,
             shell: config.shell,
@@ -207,6 +239,34 @@ where
     }
 }
 
+fn map_ssh_connect_error(config: &SshSessionConfig, error: rustrc::Error) -> Error {
+    match error {
+        rustrc::Error::AuthenticationError(message) => Error::AuthenticationFailure(format!(
+            "SSH authentication to {} failed: {message}",
+            config.socket
+        )),
+        rustrc::Error::ConfigError(message) => Error::CredentialProfileFailure(format!(
+            "SSH credential configuration for {} failed: {message}",
+            config.socket
+        )),
+        other => {
+            let rendered = other.to_string();
+            let lower = rendered.to_ascii_lowercase();
+            if lower.contains("host key") || lower.contains("unknown server key") {
+                Error::HostIdentityFailure(format!(
+                    "SSH host key for {} was rejected under {:?}: {rendered}",
+                    config.socket, config.host_key_policy
+                ))
+            } else {
+                Error::CommunicatorError(format!(
+                    "ssh connect to {} failed under {:?}: {rendered}",
+                    config.socket, config.host_key_policy
+                ))
+            }
+        }
+    }
+}
+
 fn quote_for_shell(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -218,7 +278,7 @@ fn quote_for_cmd(value: &str) -> String {
 fn ensure_dir_command(shell: RemoteShell, remote_dir: &str) -> String {
     match shell {
         RemoteShell::Posix => format!("mkdir -p {}", quote_for_shell(remote_dir)),
-        RemoteShell::Cmd => {
+        RemoteShell::PowerShell => {
             let quoted = quote_for_cmd(remote_dir);
             format!(r#"cmd.exe /C if not exist "{quoted}" md "{quoted}""#)
         }
@@ -360,7 +420,7 @@ mod tests {
         let mut session = SshSession::for_test(
             client,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 22),
-            RemoteShell::Cmd,
+            RemoteShell::PowerShell,
         );
 
         session

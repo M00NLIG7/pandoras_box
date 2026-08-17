@@ -165,7 +165,7 @@ pub fn infer_platform(
     }
 
     match ttl.map(classify_ttl).unwrap_or(TtlSignature::Unknown) {
-        TtlSignature::Unix => PlatformHint::Unix,
+        TtlSignature::Unix => PlatformHint::UnixLike,
         TtlSignature::Windows => PlatformHint::Windows,
         TtlSignature::Unknown => {
             if has_windows_rpc || has_smb {
@@ -173,7 +173,7 @@ pub fn infer_platform(
             }
 
             if has_ssh {
-                return PlatformHint::Unix;
+                return PlatformHint::UnixLike;
             }
 
             PlatformHint::Unknown
@@ -242,7 +242,7 @@ mod tests {
                 22,
                 &[1445],
             ),
-            PlatformHint::Unix
+            PlatformHint::UnixLike
         );
     }
 
@@ -270,7 +270,7 @@ mod tests {
                 22,
                 &[1445],
             ),
-            PlatformHint::Unix
+            PlatformHint::UnixLike
         );
     }
 
@@ -298,7 +298,7 @@ mod tests {
                 2222,
                 &[1445],
             ),
-            PlatformHint::Unix
+            PlatformHint::UnixLike
         );
     }
 

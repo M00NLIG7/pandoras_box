@@ -1,11 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::fmt::Write as _;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -25,18 +22,33 @@ pub struct AssetInventoryBundle {
     pub discovered_hosts: usize,
     pub completed_hosts: usize,
     pub failed_hosts: usize,
+    pub partial_hosts: usize,
     pub hosts: Vec<AssetInventoryHost>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AssetInventorySectionError {
+    pub section: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AssetInventoryHost {
     pub ip: String,
     pub final_state: String,
+    pub collection_state: String,
+    pub section_errors: Vec<AssetInventorySectionError>,
     pub platform: String,
+    pub architecture: String,
+    pub payload_version: Option<String>,
+    pub payload_sha256: Option<String>,
     pub transport_chain: Vec<String>,
     pub selected_transport: Option<String>,
     pub failure_phase: Option<String>,
     pub failure_disposition: Option<String>,
+    pub cleanup_outcome: String,
+    pub residue_present: bool,
+    pub partial_collection: bool,
     pub hostname: Option<String>,
     pub os: Option<String>,
     pub open_ports: Vec<u16>,
@@ -147,12 +159,6 @@ const TOPOLOGY_HOST_GAP_Y: f64 = 14.0;
 const TOPOLOGY_FAILED_SECTION_GAP: f64 = 24.0;
 const TOPOLOGY_LEGEND_WIDTH: f64 = 268.0;
 
-#[derive(Debug, Clone)]
-struct ExcalidrawRenderer {
-    python: PathBuf,
-    script: PathBuf,
-}
-
 #[derive(Debug, Clone, Copy)]
 enum PdfFont {
     Regular,
@@ -182,6 +188,14 @@ struct InventoryArtifact {
     users: Vec<InventoryUser>,
     shares: Vec<InventoryShare>,
     containers: Vec<InventoryContainer>,
+    section_errors: Vec<InventorySectionError>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct InventorySectionError {
+    section: String,
+    message: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -265,10 +279,6 @@ pub async fn write_asset_inventory_bundle(
     store
         .write_network_topology_excalidraw(&topology_excalidraw)
         .await?;
-    if let Some(topology_png) = maybe_render_network_topology_png(&topology_excalidraw).await? {
-        store.write_network_topology_png(&topology_png).await?;
-    }
-
     Ok(())
 }
 
@@ -311,6 +321,10 @@ async fn build_inventory_report(
             .iter()
             .filter(|report| report.final_state.as_str() == "failed")
             .count(),
+        partial_hosts: records
+            .iter()
+            .filter(|record| record.host.collection_state == "partial")
+            .count(),
         hosts: records.iter().map(|record| record.host.clone()).collect(),
     };
 
@@ -327,6 +341,16 @@ async fn read_inventory_artifact(
     let path = store
         .host_files_dir(report.plan.target.ip)
         .join("inventory.json");
+    let metadata = tokio::fs::symlink_metadata(&path)
+        .await
+        .map_err(|err| format!("failed to inspect {}: {err}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 16 * 1024 * 1024
+    {
+        return Err(format!(
+            "inventory must be a regular non-link file no larger than 16777216 bytes: {}",
+            path.display()
+        ));
+    }
     let raw = tokio::fs::read_to_string(&path)
         .await
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
@@ -341,65 +365,125 @@ fn record_from_report(
     let base_error = report.error.clone();
 
     match inventory {
-        Ok(inventory) => InventoryRecord {
-            observed_peer_ips: inventory
-                .connections
+        Ok(mut inventory) => {
+            let section_errors = std::mem::take(&mut inventory.section_errors)
                 .into_iter()
-                .filter_map(|connection| connection.remote_address)
-                .filter_map(|address| parse_remote_ip(&address))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-            host: AssetInventoryHost {
-                ip: report.plan.target.ip.to_string(),
-                final_state: report.final_state.as_str().to_string(),
-                platform: report.plan.target.platform.as_str().to_string(),
-                transport_chain: report
-                    .plan
-                    .transport_chain
-                    .iter()
-                    .map(|kind| kind.as_str().to_string())
+                .map(|error| AssetInventorySectionError {
+                    section: error.section,
+                    message: error.message,
+                })
+                .collect::<Vec<_>>();
+            let collection_state = if section_errors.is_empty() {
+                "complete"
+            } else {
+                "partial"
+            };
+            let partial_summary = (!section_errors.is_empty()).then(|| {
+                format!(
+                    "partial inventory: {}",
+                    section_errors
+                        .iter()
+                        .map(|error| format!("{}: {}", error.section, error.message))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            });
+            let aggregate_error = match (base_error, partial_summary) {
+                (Some(base), Some(partial)) => Some(format!("{base}; {partial}")),
+                (Some(base), None) => Some(base),
+                (None, Some(partial)) => Some(partial),
+                (None, None) => None,
+            };
+
+            InventoryRecord {
+                observed_peer_ips: inventory
+                    .connections
+                    .into_iter()
+                    .filter_map(|connection| connection.remote_address)
+                    .filter_map(|address| parse_remote_ip(&address))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
                     .collect(),
-                selected_transport: report
-                    .selected_transport
-                    .map(|kind| kind.as_str().to_string()),
-                failure_phase: report.failure_phase.map(|phase| phase.as_str().to_string()),
-                failure_disposition: report
-                    .failure_disposition
-                    .map(|disposition| disposition.as_str().to_string()),
-                hostname: non_empty(inventory.hostname),
-                os: non_empty(inventory.os),
-                open_ports: if inventory.ports.is_empty() {
-                    fallback_ports
-                } else {
-                    inventory.ports.into_iter().map(|port| port.port).collect()
+                host: AssetInventoryHost {
+                    ip: report.plan.target.ip.to_string(),
+                    final_state: report.final_state.as_str().to_string(),
+                    collection_state: collection_state.to_string(),
+                    section_errors,
+                    platform: report.plan.contract.operating_system.as_str().to_string(),
+                    architecture: report.plan.contract.architecture.as_str().to_string(),
+                    payload_version: report
+                        .plan
+                        .payload
+                        .as_ref()
+                        .map(|payload| payload.version.clone()),
+                    payload_sha256: report
+                        .plan
+                        .payload
+                        .as_ref()
+                        .map(|payload| payload.sha256.clone()),
+                    transport_chain: report
+                        .plan
+                        .transport_chain
+                        .iter()
+                        .map(|kind| kind.as_str().to_string())
+                        .collect(),
+                    selected_transport: report
+                        .selected_transport
+                        .map(|kind| kind.as_str().to_string()),
+                    failure_phase: report.failure_phase.map(|phase| phase.as_str().to_string()),
+                    failure_disposition: report
+                        .failure_disposition
+                        .map(|disposition| disposition.as_str().to_string()),
+                    cleanup_outcome: report.cleanup_outcome.as_str().to_string(),
+                    residue_present: report.residue_present,
+                    partial_collection: report.partial_collection,
+                    hostname: non_empty(inventory.hostname),
+                    os: non_empty(inventory.os),
+                    open_ports: if inventory.ports.is_empty() {
+                        fallback_ports
+                    } else {
+                        inventory.ports.into_iter().map(|port| port.port).collect()
+                    },
+                    admin_users: inventory
+                        .users
+                        .into_iter()
+                        .filter(|user| user.is_admin)
+                        .filter_map(|user| non_empty(user.name))
+                        .collect(),
+                    services: inventory
+                        .services
+                        .into_iter()
+                        .filter_map(|service| non_empty(service.name))
+                        .collect(),
+                    shares: inventory
+                        .shares
+                        .into_iter()
+                        .filter_map(|share| non_empty(share.network_path))
+                        .collect(),
+                    container_count: inventory.containers.len(),
+                    error: aggregate_error,
                 },
-                admin_users: inventory
-                    .users
-                    .into_iter()
-                    .filter(|user| user.is_admin)
-                    .filter_map(|user| non_empty(user.name))
-                    .collect(),
-                services: inventory
-                    .services
-                    .into_iter()
-                    .filter_map(|service| non_empty(service.name))
-                    .collect(),
-                shares: inventory
-                    .shares
-                    .into_iter()
-                    .filter_map(|share| non_empty(share.network_path))
-                    .collect(),
-                container_count: inventory.containers.len(),
-                error: base_error,
-            },
-        },
+            }
+        }
         Err(inventory_error) => InventoryRecord {
             observed_peer_ips: Vec::new(),
             host: AssetInventoryHost {
                 ip: report.plan.target.ip.to_string(),
                 final_state: report.final_state.as_str().to_string(),
-                platform: report.plan.target.platform.as_str().to_string(),
+                collection_state: "unavailable".to_string(),
+                section_errors: Vec::new(),
+                platform: report.plan.contract.operating_system.as_str().to_string(),
+                architecture: report.plan.contract.architecture.as_str().to_string(),
+                payload_version: report
+                    .plan
+                    .payload
+                    .as_ref()
+                    .map(|payload| payload.version.clone()),
+                payload_sha256: report
+                    .plan
+                    .payload
+                    .as_ref()
+                    .map(|payload| payload.sha256.clone()),
                 transport_chain: report
                     .plan
                     .transport_chain
@@ -413,6 +497,9 @@ fn record_from_report(
                 failure_disposition: report
                     .failure_disposition
                     .map(|disposition| disposition.as_str().to_string()),
+                cleanup_outcome: report.cleanup_outcome.as_str().to_string(),
+                residue_present: report.residue_present,
+                partial_collection: report.partial_collection,
                 hostname: None,
                 os: None,
                 open_ports: fallback_ports,
@@ -484,7 +571,8 @@ fn render_asset_inventory_markdown(bundle: &AssetInventoryBundle) -> String {
             "Skipped targets: {}  \n",
             "Attempted targets: {}  \n",
             "Completed hosts: {}  \n",
-            "Failed hosts: {}\n\n"
+            "Failed hosts: {}  \n",
+            "Partial inventories: {}\n\n"
         ),
         bundle.requested_targets,
         bundle.reachable_targets,
@@ -492,22 +580,32 @@ fn render_asset_inventory_markdown(bundle: &AssetInventoryBundle) -> String {
         bundle.skipped_targets,
         bundle.attempted_targets,
         bundle.completed_hosts,
-        bundle.failed_hosts
+        bundle.failed_hosts,
+        bundle.partial_hosts
     ));
     markdown.push_str(
-        "| IP | State | Platform | Selected transport | Failure disposition | Hostname | OS | Ports | Admin Users | Services | Shares | Error |\n",
+        "| IP | State | Collection | Section failures | Platform | Architecture | Payload version | Payload SHA-256 | Selected transport | Failure disposition | Cleanup | Residue | Partial download | Hostname | OS | Ports | Admin Users | Services | Shares | Error |\n",
     );
-    markdown
-        .push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    markdown.push_str(
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+    );
 
     for host in &bundle.hosts {
         markdown.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             markdown_cell(&host.ip),
             markdown_cell(&host.final_state),
+            markdown_cell(&host.collection_state),
+            markdown_cell(&section_errors_display(&host.section_errors)),
             markdown_cell(&host.platform),
+            markdown_cell(&host.architecture),
+            markdown_cell(optional_display(host.payload_version.as_deref())),
+            markdown_cell(optional_display(host.payload_sha256.as_deref())),
             markdown_cell(optional_display(host.selected_transport.as_deref())),
             markdown_cell(optional_display(host.failure_disposition.as_deref())),
+            markdown_cell(&host.cleanup_outcome),
+            markdown_cell(if host.residue_present { "yes" } else { "no" }),
+            markdown_cell(if host.partial_collection { "yes" } else { "no" }),
             markdown_cell(optional_display(host.hostname.as_deref())),
             markdown_cell(optional_display(host.os.as_deref())),
             markdown_cell(&join_ports(&host.open_ports)),
@@ -523,7 +621,7 @@ fn render_asset_inventory_markdown(bundle: &AssetInventoryBundle) -> String {
 
 fn render_asset_inventory_csv(bundle: &AssetInventoryBundle) -> String {
     let mut csv = String::from(
-        "ip,state,platform,selected_transport,failure_phase,failure_disposition,hostname,os,ports,admin_users,services,shares,error\n",
+        "ip,state,collection_state,section_failures,platform,architecture,payload_version,payload_sha256,selected_transport,failure_phase,failure_disposition,cleanup_outcome,residue_present,partial_collection,hostname,os,ports,admin_users,services,shares,error\n",
     );
 
     for host in &bundle.hosts {
@@ -531,13 +629,30 @@ fn render_asset_inventory_csv(bundle: &AssetInventoryBundle) -> String {
         let admin_users = join_or_dash(&host.admin_users);
         let services = join_or_dash(&host.services);
         let shares = join_or_dash(&host.shares);
+        let section_failures = section_errors_display(&host.section_errors);
         let row = [
             host.ip.as_str(),
             host.final_state.as_str(),
+            host.collection_state.as_str(),
+            section_failures.as_str(),
             host.platform.as_str(),
+            host.architecture.as_str(),
+            optional_display(host.payload_version.as_deref()),
+            optional_display(host.payload_sha256.as_deref()),
             optional_display(host.selected_transport.as_deref()),
             optional_display(host.failure_phase.as_deref()),
             optional_display(host.failure_disposition.as_deref()),
+            host.cleanup_outcome.as_str(),
+            if host.residue_present {
+                "true"
+            } else {
+                "false"
+            },
+            if host.partial_collection {
+                "true"
+            } else {
+                "false"
+            },
             optional_display(host.hostname.as_deref()),
             optional_display(host.os.as_deref()),
             ports.as_str(),
@@ -1918,87 +2033,142 @@ fn section_edge_anchor(box_frame: &ExcalidrawBox, side: &str) -> ExcalidrawPoint
     }
 }
 
-async fn maybe_render_network_topology_png(excalidraw_source: &str) -> io::Result<Option<Vec<u8>>> {
-    let Some(renderer) = resolve_excalidraw_renderer() else {
-        return Ok(None);
-    };
-    let excalidraw_source = excalidraw_source.to_string();
-    let render_result = tokio::task::spawn_blocking(move || {
-        render_network_topology_png_with(&renderer, &excalidraw_source)
-    })
-    .await;
-
-    match render_result {
-        Ok(Ok(bytes)) => Ok(Some(bytes)),
-        Ok(Err(_)) | Err(_) => Ok(None),
+pub async fn render_network_topology_png_explicit(
+    store: &ArtifactStore,
+    renderer: &super::mission::RendererSpec,
+) -> Result<(), String> {
+    let expected = super::payloads::normalize_sha256(&renderer.sha256)?;
+    let metadata = tokio::fs::symlink_metadata(&renderer.executable)
+        .await
+        .map_err(|error| {
+            format!(
+                "explicit renderer {} is unavailable: {error}",
+                renderer.executable.display()
+            )
+        })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > 128 * 1024 * 1024
+    {
+        return Err(format!(
+            "explicit renderer must be a bounded regular non-link file: {}",
+            renderer.executable.display()
+        ));
     }
-}
 
-fn resolve_excalidraw_renderer() -> Option<ExcalidrawRenderer> {
-    let env_python = env::var_os("PANDORAS_BOX_EXCALIDRAW_PYTHON").map(PathBuf::from);
-    let env_script = env::var_os("PANDORAS_BOX_EXCALIDRAW_RENDERER").map(PathBuf::from);
-    if let (Some(python), Some(script)) = (env_python, env_script) {
-        if python.is_file() && script.is_file() {
-            return Some(ExcalidrawRenderer { python, script });
+    let source = store.network_topology_excalidraw_path();
+    let source_metadata = tokio::fs::symlink_metadata(&source)
+        .await
+        .map_err(|error| format!("topology source is unavailable: {error}"))?;
+    if source_metadata.file_type().is_symlink()
+        || !source_metadata.is_file()
+        || source_metadata.len() > 16 * 1024 * 1024
+    {
+        return Err("topology source must be a bounded regular non-link file".into());
+    }
+
+    let mut random = [0_u8; 16];
+    getrandom::getrandom(&mut random)
+        .map_err(|error| format!("renderer workspace randomness unavailable: {error}"))?;
+    let suffix = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let workdir = store.mission_dir().join(format!(".renderer-{suffix}"));
+    tokio::fs::create_dir(&workdir)
+        .await
+        .map_err(|error| format!("failed to create renderer workspace: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&workdir, std::fs::Permissions::from_mode(0o700))
+            .await
+            .map_err(|error| format!("failed to restrict renderer workspace: {error}"))?;
+    }
+    let renderer_copy = workdir.join(if cfg!(windows) {
+        "pinned-renderer.exe"
+    } else {
+        "pinned-renderer"
+    });
+    if let Err(error) = tokio::fs::copy(&renderer.executable, &renderer_copy).await {
+        let _ = tokio::fs::remove_dir_all(&workdir).await;
+        return Err(format!("failed to copy explicit renderer: {error}"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) =
+            tokio::fs::set_permissions(&renderer_copy, std::fs::Permissions::from_mode(0o700)).await
+        {
+            let _ = tokio::fs::remove_dir_all(&workdir).await;
+            return Err(format!("failed to restrict renderer copy: {error}"));
         }
     }
-
-    let codex_home = env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?;
-    let references_dir = codex_home.join("skills/excalidraw-diagram/references");
-    let python = references_dir.join(".venv/bin/python");
-    let script = references_dir.join("render_excalidraw.py");
-    if python.is_file() && script.is_file() {
-        Some(ExcalidrawRenderer { python, script })
-    } else {
-        None
-    }
-}
-
-fn render_network_topology_png_with(
-    renderer: &ExcalidrawRenderer,
-    excalidraw_source: &str,
-) -> io::Result<Vec<u8>> {
-    let workdir = temp_render_dir()?;
-    let input = workdir.join("network_topology.excalidraw");
-    let output = workdir.join("network_topology.png");
-    std::fs::write(&input, excalidraw_source)?;
-
-    let output_result = Command::new(&renderer.python)
-        .arg(&renderer.script)
-        .arg(&input)
-        .arg("--output")
-        .arg(&output)
-        .arg("--scale")
-        .arg("2")
-        .arg("--width")
-        .arg("1920")
-        .output();
-
-    let render_bytes = match output_result {
-        Ok(command_output) if command_output.status.success() => std::fs::read(&output),
-        Ok(command_output) => Err(io::Error::other(format!(
-            "excalidraw renderer failed: {}",
-            String::from_utf8_lossy(&command_output.stderr).trim()
-        ))),
-        Err(err) => Err(io::Error::other(format!(
-            "failed to invoke excalidraw renderer: {err}"
-        ))),
+    let actual = match super::payloads::sha256_file_bounded(&renderer_copy, 128 * 1024 * 1024).await
+    {
+        Ok(actual) => actual,
+        Err(error) => {
+            let _ = tokio::fs::remove_dir_all(&workdir).await;
+            return Err(error);
+        }
     };
+    if actual != expected {
+        let _ = tokio::fs::remove_dir_all(&workdir).await;
+        return Err(format!(
+            "explicit renderer digest mismatch: expected {expected}, got {actual}"
+        ));
+    }
+    let output = workdir.join("network_topology.png");
 
-    let _ = std::fs::remove_dir_all(&workdir);
-    render_bytes
-}
+    let render_result = async {
+        let mut child = tokio::process::Command::new(&renderer_copy)
+            .arg(&source)
+            .arg(&output)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| format!("failed to launch explicit renderer: {error}"))?;
+        let status = match tokio::time::timeout(renderer.timeout, child.wait()).await {
+            Ok(result) => result.map_err(|error| format!("renderer wait failed: {error}"))?,
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(format!("renderer exceeded {:?}", renderer.timeout));
+            }
+        };
+        if !status.success() {
+            return Err(format!("renderer exited with status {status}"));
+        }
+        let output_metadata = tokio::fs::symlink_metadata(&output)
+            .await
+            .map_err(|error| format!("renderer output is unavailable: {error}"))?;
+        if output_metadata.file_type().is_symlink() || !output_metadata.is_file() {
+            return Err("renderer output must be a regular non-link file".into());
+        }
+        if output_metadata.len() > renderer.max_output_bytes {
+            return Err(format!(
+                "renderer output was {} bytes, exceeding the {} byte bound",
+                output_metadata.len(),
+                renderer.max_output_bytes
+            ));
+        }
+        let bytes = tokio::fs::read(&output)
+            .await
+            .map_err(|error| format!("failed to read renderer output: {error}"))?;
+        store
+            .write_network_topology_png(&bytes)
+            .await
+            .map_err(|error| format!("failed to persist renderer output: {error}"))
+    }
+    .await;
 
-fn temp_render_dir() -> io::Result<PathBuf> {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| io::Error::other(format!("clock drift while preparing png render: {err}")))?
-        .as_nanos();
-    let path = env::temp_dir().join(format!("pandoras-box-topology-render-{unique}"));
-    std::fs::create_dir_all(&path)?;
-    Ok(path)
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::fs::remove_dir_all(&workdir),
+    )
+    .await;
+    render_result
 }
 
 fn topology_host_lookup(topology: &NetworkTopology) -> BTreeMap<&str, &TopologyHost> {
@@ -2037,6 +2207,17 @@ fn join_ports(ports: &[u16]) -> String {
     }
 }
 
+fn section_errors_display(errors: &[AssetInventorySectionError]) -> String {
+    if errors.is_empty() {
+        return "-".to_string();
+    }
+    errors
+        .iter()
+        .map(|error| format!("{}: {}", error.section, error.message))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn join_or_dash(values: &[String]) -> String {
     if values.is_empty() {
         "-".to_string()
@@ -2050,10 +2231,19 @@ fn markdown_cell(value: &str) -> String {
 }
 
 fn csv_escape(value: &str) -> String {
-    if value.contains([',', '"', '\n']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
+    let neutralized = if value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| matches!(byte, b'=' | b'+' | b'-' | b'@' | b'\t' | b'\r'))
+    {
+        format!("'{value}")
     } else {
         value.to_string()
+    };
+    if neutralized.contains([',', '"', '\n']) {
+        format!("\"{}\"", neutralized.replace('"', "\"\""))
+    } else {
+        neutralized
     }
 }
 
@@ -2197,10 +2387,19 @@ fn host_card_lines(host: &AssetInventoryHost) -> Vec<PdfTextLine> {
         host.transport_chain.join(" -> ")
     };
 
+    let payload_digest = host
+        .payload_sha256
+        .as_deref()
+        .map(|digest| &digest[..digest.len().min(12)])
+        .unwrap_or("-");
     lines.extend(wrap_pdf_value_line(
         "Access",
         &format!(
-            "selected {}; chain {transports}; ports {}",
+            "{}/{}; payload {}@{}; selected {}; chain {transports}; ports {}",
+            host.platform,
+            host.architecture,
+            optional_display(host.payload_version.as_deref()),
+            payload_digest,
             optional_display(host.selected_transport.as_deref()),
             join_ports(&host.open_ports)
         ),
@@ -2645,20 +2844,23 @@ fn stream_object_bytes(id: usize, stream: Vec<u8>) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_remote_ip, render_asset_inventory_csv, render_asset_inventory_markdown,
-        render_asset_inventory_pdf, render_network_topology_excalidraw,
-        render_network_topology_markdown, render_network_topology_mermaid, AssetInventoryBundle,
-        AssetInventoryHost, InventoryArtifact, NetworkTopology, TopologyEdge, TopologyHost,
-    };
     #[cfg(unix)]
-    use super::{render_network_topology_png_with, ExcalidrawRenderer};
+    use super::render_network_topology_png_explicit;
+    use super::{
+        parse_remote_ip, record_from_report, render_asset_inventory_csv,
+        render_asset_inventory_markdown, render_asset_inventory_pdf,
+        render_network_topology_excalidraw, render_network_topology_markdown,
+        render_network_topology_mermaid, AssetInventoryBundle, AssetInventoryHost,
+        InventoryArtifact, NetworkTopology, TopologyEdge, TopologyHost,
+    };
+    use crate::runtime::{
+        CpuArchitecture, HostExecutionReport, HostPlan, HostTarget, OperatingSystem, PlatformHint,
+        TargetContract, TransportKind,
+    };
     #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    #[cfg(unix)]
-    use std::path::PathBuf;
     #[cfg(unix)]
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2674,14 +2876,23 @@ mod tests {
             discovered_hosts: 1,
             completed_hosts: 1,
             failed_hosts: 0,
+            partial_hosts: 0,
             hosts: vec![AssetInventoryHost {
                 ip: "10.0.0.10".to_string(),
                 final_state: "complete".to_string(),
-                platform: "unix".to_string(),
+                collection_state: "complete".to_string(),
+                section_errors: Vec::new(),
+                platform: "linux".to_string(),
+                architecture: "x86_64".to_string(),
+                payload_version: Some("fixture-v1".to_string()),
+                payload_sha256: Some("a".repeat(64)),
                 transport_chain: vec!["unix_ssh".to_string()],
                 selected_transport: Some("unix_ssh".to_string()),
                 failure_phase: None,
                 failure_disposition: None,
+                cleanup_outcome: "complete".to_string(),
+                residue_present: false,
+                partial_collection: false,
                 hostname: Some("lab".to_string()),
                 os: Some("Ubuntu".to_string()),
                 open_ports: vec![22, 80],
@@ -2693,11 +2904,14 @@ mod tests {
             }],
         };
 
-        assert!(render_asset_inventory_markdown(&bundle).contains(
-            "| 10.0.0.10 | complete | unix | unix_ssh | - | lab | Ubuntu | 22,80 | root | sshd | - |  |"
-        ));
-        assert!(render_asset_inventory_csv(&bundle)
-            .contains("10.0.0.10,complete,unix,unix_ssh,-,-,lab,Ubuntu,\"22,80\",root,sshd,-,"));
+        let markdown = render_asset_inventory_markdown(&bundle);
+        assert!(markdown.contains("| 10.0.0.10 | complete | complete | - | linux |"));
+        assert!(markdown.contains("| complete | no | no | lab | Ubuntu | 22,80 | root | sshd |"));
+        let csv = render_asset_inventory_csv(&bundle);
+        assert!(csv.contains("10.0.0.10,complete,complete"));
+        assert!(csv.contains(",linux,x86_64,fixture-v1,"));
+        assert!(csv.contains(",unix_ssh,"));
+        assert!(csv.contains("complete,false,false,lab,Ubuntu,\"22,80\",root,sshd"));
         let pdf = render_asset_inventory_pdf(&bundle);
         assert!(pdf.starts_with(b"%PDF-1.4"));
         let pdf_text = String::from_utf8_lossy(&pdf);
@@ -2834,9 +3048,66 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn topology_png_renderer_contract_accepts_external_renderer() {
+    fn aggregate_reports_surface_section_level_partial_inventory() {
+        let inventory: InventoryArtifact = serde_json::from_str(
+            r#"{
+  "hostname":"partial-host",
+  "os":"Linux",
+  "ports":[],
+  "connections":[],
+  "services":[],
+  "users":[],
+  "shares":[],
+  "containers":[],
+  "sectionErrors":[{"section":"services","message":"systemctl timed out"}]
+}"#,
+        )
+        .expect("partial inventory");
+        let plan = HostPlan::queued(
+            HostTarget {
+                ip: "192.0.2.10".parse().expect("ip"),
+                platform: PlatformHint::UnixLike,
+                open_ports: vec![22],
+            },
+            TargetContract::ssh(OperatingSystem::Linux, CpuArchitecture::X86_64),
+            vec![TransportKind::SshSftp],
+        );
+        let report = HostExecutionReport::success(plan, crate::runtime::HostState::Complete);
+        let record = record_from_report(&report, Ok(inventory));
+        assert_eq!(record.host.collection_state, "partial");
+        assert_eq!(record.host.section_errors.len(), 1);
+        assert!(record
+            .host
+            .error
+            .as_deref()
+            .expect("partial error")
+            .contains("services: systemctl timed out"));
+
+        let bundle = AssetInventoryBundle {
+            mission_id: "partial".into(),
+            requested_targets: 1,
+            reachable_targets: 1,
+            unreachable_targets: 0,
+            skipped_targets: 0,
+            attempted_targets: 1,
+            discovered_hosts: 1,
+            completed_hosts: 1,
+            failed_hosts: 0,
+            partial_hosts: 1,
+            hosts: vec![record.host],
+        };
+        assert!(render_asset_inventory_markdown(&bundle).contains("systemctl timed out"));
+        assert!(render_asset_inventory_csv(&bundle).contains("systemctl timed out"));
+        assert!(
+            String::from_utf8_lossy(&render_asset_inventory_pdf(&bundle))
+                .contains("systemctl timed out")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn topology_png_renderer_is_explicit_digest_pinned_and_bounded() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after epoch")
@@ -2845,7 +3116,7 @@ mod tests {
         fs::create_dir_all(&temp_root).expect("temp dir should exist");
 
         let script_path = temp_root.join("fake-renderer.sh");
-        fs::write(&script_path, "#!/bin/sh\nprintf 'fake-png' > \"$3\"\n")
+        fs::write(&script_path, "#!/bin/sh\nprintf 'fake-png' > \"$2\"\n")
             .expect("stub renderer should exist");
         let mut permissions = fs::metadata(&script_path)
             .expect("stub metadata should exist")
@@ -2853,18 +3124,32 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&script_path, permissions).expect("stub script should be executable");
 
-        let renderer = ExcalidrawRenderer {
-            python: PathBuf::from("/bin/sh"),
-            script: script_path.clone(),
+        let renderer = crate::runtime::RendererSpec {
+            executable: script_path.clone(),
+            sha256: crate::runtime::payloads::sha256_file_bounded(&script_path, 4096)
+                .await
+                .expect("renderer digest"),
+            timeout: std::time::Duration::from_secs(2),
+            max_output_bytes: 32,
         };
+        let store =
+            crate::runtime::ArtifactStore::new(&temp_root, "mission").expect("artifact store");
+        store
+            .write_network_topology_excalidraw(
+                r##"{"type":"excalidraw","version":2,"elements":[]}"##,
+            )
+            .await
+            .expect("topology source");
 
-        let png = render_network_topology_png_with(
-            &renderer,
-            r##"{"type":"excalidraw","version":2,"source":"https://excalidraw.com","elements":[{"id":"box","type":"rectangle","x":0,"y":0,"width":120,"height":80,"strokeColor":"#1F3A5F","backgroundColor":"#EAF2FF","fillStyle":"solid","strokeWidth":2,"strokeStyle":"solid","roughness":0,"opacity":100,"angle":0,"seed":1,"version":1,"versionNonce":2,"isDeleted":false,"groupIds":[],"boundElements":[],"link":null,"locked":false}],"appState":{"viewBackgroundColor":"#FFFFFF"}}"##,
-        )
-        .expect("png renderer should return bytes");
-
-        assert_eq!(png, b"fake-png");
+        render_network_topology_png_explicit(&store, &renderer)
+            .await
+            .expect("explicit renderer should run");
+        assert_eq!(
+            tokio::fs::read(store.network_topology_png_path())
+                .await
+                .expect("png"),
+            b"fake-png"
+        );
         let _ = fs::remove_dir_all(temp_root);
     }
 }

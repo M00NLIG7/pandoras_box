@@ -4,6 +4,14 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - Add durable project-specific notes here as they are discovered through real work.
 
+## Cross-platform qualification boundary
+
+Runtime target/payload contracts are authoritative in `pandoras_box/src/runtime/mission.rs` and `payloads.rs`; the evidence ladder is in `docs/BUILDING.md`. Never mark a payload `live_qualified` or expand the support matrix without an exact packaged-artifact gate. Unknown and contract-only targets must remain pre-authentication outcomes.
+
+## Credential and mission identity boundary
+
+Named credential resolution is authoritative in `pandoras_box/src/runtime/credentials.rs`; operator schema and precedence are in `docs/CREDENTIAL_PROFILES.md`. Keep secret values out of durable identity/artifacts, make selection failures host-local and pre-authentication, and preserve explicit mission reuse semantics in `runtime/runner.rs`.
+
 ## Documentation boundary
 
 Documentation and generated documentation are repository-local only. Do not publish, host, upload, or attach them to releases or external documentation channels. Keep release/package automation free of documentation files and documentation-publication steps.

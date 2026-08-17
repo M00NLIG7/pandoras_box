@@ -125,5 +125,5 @@ export PANDORAS_BOX_LIVE_WINDOWS_SMB_ARTIFACT_ROOT="$ARTIFACT_ROOT"
 export PANDORAS_BOX_LIVE_CHIMERA_WINDOWS_PATH="$CHIMERA_PATH"
 cargo test --locked -p pandoras_box \
   --test live_windows_smb \
-  live_windows_smb_target_collects_inventory_and_cleans_up \
+  live_windows_smb_refuses_unencrypted_remote_exec_before_authentication \
   -- --ignored --nocapture

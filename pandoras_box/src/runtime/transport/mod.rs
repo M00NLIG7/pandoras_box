@@ -1,4 +1,4 @@
-pub mod password;
+pub mod profile;
 pub mod smb;
 pub mod ssh;
 

@@ -1,5 +1,6 @@
 use pandoras_box::runtime::{
-    DiscoveryConfig, MissionSpec, PandorasBoxRunner, RetryPolicy, TcpDiscovery,
+    CpuArchitecture, DeadlinePolicy, DiscoveryConfig, MissionSpec, OperatingSystem,
+    PandorasBoxRunner, RetryPolicy, TargetContract, TcpDiscovery,
 };
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -7,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod support;
 
-use support::wait_for_discovery;
+use support::{qualified_payload, wait_for_discovery};
 
 struct LiveUnixCase {
     label: &'static str,
@@ -18,6 +19,7 @@ struct LiveUnixCase {
     password_env: &'static str,
     chimera_env: &'static str,
     artifact_root_env: &'static str,
+    operating_system: OperatingSystem,
 }
 
 fn required_env(name: &str) -> String {
@@ -63,6 +65,13 @@ async fn run_live_unix_case(case: LiveUnixCase) {
     let password = required_env(case.password_env);
     let artifact_root = artifact_root(&case);
     let mission_id = case.label.to_string();
+    let payload = qualified_payload(
+        chimera_path,
+        case.operating_system,
+        CpuArchitecture::X86_64,
+        "explicit live Unix-like SSH fixture",
+    )
+    .await;
 
     let spec = MissionSpec {
         targets: vec![target_ip],
@@ -72,11 +81,19 @@ async fn run_live_unix_case(case: LiveUnixCase) {
         password: password.into(),
         ssh_port,
         discovery_ports: vec![ssh_port],
-        chimera_unix_path: chimera_path,
+        default_target_contract: TargetContract::ssh(
+            case.operating_system,
+            CpuArchitecture::X86_64,
+        ),
+        payload_catalog: vec![payload],
         retry_policy: RetryPolicy {
             max_attempts: 3,
-            connect_timeout: Duration::from_secs(5),
             backoff: Duration::from_millis(500),
+        },
+        deadlines: DeadlinePolicy {
+            connect: Duration::from_secs(5),
+            inactivity: Duration::from_secs(30),
+            ..DeadlinePolicy::default()
         },
         ..MissionSpec::default()
     };
@@ -173,6 +190,7 @@ async fn live_unix_ssh_target_collects_inventory_and_cleans_up() {
         password_env: "PANDORAS_BOX_LIVE_UNIX_SSH_PASSWORD",
         chimera_env: "PANDORAS_BOX_LIVE_CHIMERA_UNIX_PATH",
         artifact_root_env: "PANDORAS_BOX_LIVE_UNIX_SSH_ARTIFACT_ROOT",
+        operating_system: OperatingSystem::Linux,
     })
     .await;
 }
@@ -189,6 +207,7 @@ async fn live_alpine_ssh_target_collects_inventory_and_cleans_up() {
         password_env: "PANDORAS_BOX_LIVE_ALPINE_SSH_PASSWORD",
         chimera_env: "PANDORAS_BOX_LIVE_ALPINE_CHIMERA_UNIX_PATH",
         artifact_root_env: "PANDORAS_BOX_LIVE_ALPINE_SSH_ARTIFACT_ROOT",
+        operating_system: OperatingSystem::Linux,
     })
     .await;
 }
@@ -205,6 +224,7 @@ async fn live_bsd_ssh_target_collects_inventory_and_cleans_up() {
         password_env: "PANDORAS_BOX_LIVE_BSD_SSH_PASSWORD",
         chimera_env: "PANDORAS_BOX_LIVE_CHIMERA_BSD_PATH",
         artifact_root_env: "PANDORAS_BOX_LIVE_BSD_SSH_ARTIFACT_ROOT",
+        operating_system: OperatingSystem::FreeBsd,
     })
     .await;
 }

@@ -1,5 +1,6 @@
 use pandoras_box::runtime::{
-    DiscoveryConfig, MissionSpec, PandorasBoxRunner, RetryPolicy, TcpDiscovery, WindowsSmbExecMode,
+    CpuArchitecture, DeadlinePolicy, DiscoveryConfig, MissionSpec, OperatingSystem,
+    PandorasBoxRunner, RetryPolicy, TargetContract, TcpDiscovery, WindowsSmbExecMode,
 };
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -7,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod support;
 
-use support::wait_for_discovery;
+use support::{qualified_payload, wait_for_discovery};
 
 fn required_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for live interop tests"))
@@ -44,7 +45,7 @@ fn smb_exec_mode() -> WindowsSmbExecMode {
 
 #[tokio::test]
 #[ignore = "requires a local Tiny11 SMB target; run scripts/run-windows-smb-interop.sh"]
-async fn live_windows_smb_target_collects_inventory_and_cleans_up() {
+async fn live_windows_smb_refuses_unencrypted_remote_exec_before_authentication() {
     let chimera_path = PathBuf::from(required_env("PANDORAS_BOX_LIVE_CHIMERA_WINDOWS_PATH"));
     assert!(
         chimera_path.is_file(),
@@ -68,9 +69,15 @@ async fn live_windows_smb_target_collects_inventory_and_cleans_up() {
     let mission_id = "live-windows-smb".to_string();
     let retry_policy = RetryPolicy {
         max_attempts: 3,
-        connect_timeout: Duration::from_secs(5),
         backoff: Duration::from_millis(500),
     };
+    let payload = qualified_payload(
+        chimera_path,
+        OperatingSystem::Windows,
+        CpuArchitecture::X86_64,
+        "explicit live Windows SMB fixture",
+    )
+    .await;
 
     let spec = MissionSpec {
         targets: vec![target_ip],
@@ -80,8 +87,15 @@ async fn live_windows_smb_target_collects_inventory_and_cleans_up() {
         password: password.into(),
         ssh_port: ssh_probe_port,
         discovery_ports: vec![ssh_probe_port, smb_port],
-        chimera_windows_path: chimera_path,
+        default_target_contract: TargetContract::windows(CpuArchitecture::X86_64, true),
+        payload_catalog: vec![payload],
         retry_policy,
+        deadlines: DeadlinePolicy {
+            connect: Duration::from_secs(5),
+            inactivity: Duration::from_secs(30),
+            ..DeadlinePolicy::default()
+        },
+        allow_smb_fallback: true,
         windows_smb_exec_mode: smb_exec_mode(),
         ..MissionSpec::default()
     };
@@ -118,7 +132,7 @@ async fn live_windows_smb_target_collects_inventory_and_cleans_up() {
     let summary = PandorasBoxRunner::new(spec)
         .run()
         .await
-        .expect("live Windows SMB interop run should succeed");
+        .expect("SMB security refusal should be a reconciled host outcome");
 
     let host_dir = artifact_root
         .join(mission_id)
@@ -126,63 +140,33 @@ async fn live_windows_smb_target_collects_inventory_and_cleans_up() {
         .join(target_ip.to_string());
     let plan_path = host_dir.join("plan.json");
     let status_path = host_dir.join("status.json");
-    let status_snapshot = std::fs::read_to_string(&status_path)
-        .unwrap_or_else(|err| format!("missing status at {}: {err}", status_path.display()));
-
-    assert_eq!(
-        summary.discovered_hosts, 1,
-        "summary: {summary:?}\nstatus: {status_snapshot}"
-    );
-    assert_eq!(
-        summary.completed_hosts, 1,
-        "summary: {summary:?}\nstatus: {status_snapshot}"
-    );
-    assert_eq!(
-        summary.failed_hosts, 0,
-        "summary: {summary:?}\nstatus: {status_snapshot}"
-    );
+    assert_eq!(summary.discovered_hosts, 1, "summary: {summary:?}");
+    assert_eq!(summary.attempted_targets, 0, "summary: {summary:?}");
+    assert_eq!(summary.completed_hosts, 0, "summary: {summary:?}");
+    assert_eq!(summary.failed_hosts, 1, "summary: {summary:?}");
 
     let plan = std::fs::read_to_string(&plan_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", plan_path.display()));
+    assert!(plan.contains("\"operating_system\": \"windows\""), "{plan}");
     assert!(
-        plan.contains("\"platform\": \"windows\""),
-        "plan should classify the fixture as Windows: {plan}"
+        plan.contains("windows_smb_encryption_required"),
+        "requested SMB contract should remain visible: {plan}"
     );
     assert!(
-        plan.contains("\"transport_chain\": [\"windows_smb\"]"),
-        "plan should use the SMB fallback path only: {plan}"
-    );
-
-    let inventory_path = host_dir.join("files").join("inventory.json");
-    let log_path = host_dir.join("logs").join("application.log");
-    let cleanup_path = host_dir.join("exec").join("collector_cleanup.txt");
-
-    let inventory = std::fs::read_to_string(&inventory_path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", inventory_path.display()));
-    assert!(
-        inventory.trim_start().starts_with('{'),
-        "expected inventory JSON payload, got: {inventory}"
-    );
-
-    let log = std::fs::read_to_string(&log_path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", log_path.display()));
-    assert!(
-        !log.trim().is_empty(),
-        "application.log should not be empty"
+        plan.contains("\"transport_chain\": []"),
+        "unqualified SMB adapter must not enter execution: {plan}"
     );
 
     let status = std::fs::read_to_string(&status_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", status_path.display()));
+    assert!(status.contains("\"attempt_count\": 0"), "{status}");
     assert!(
-        status.contains("\"final_state\": \"complete\""),
-        "host status should be complete: {status}"
+        status.contains("authentication was not attempted"),
+        "{status}"
     );
-    let cleanup = std::fs::read_to_string(&cleanup_path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", cleanup_path.display()));
-    assert!(
-        cleanup.contains("status: 0"),
-        "cleanup should succeed: {cleanup}"
-    );
+    assert!(status.contains("cannot enforce encryption"), "{status}");
+    assert!(!host_dir.join("files/inventory.json").exists());
+    assert!(!host_dir.join("exec/collector_cleanup.txt").exists());
 
     let _ = std::fs::remove_dir_all(artifact_root);
 }

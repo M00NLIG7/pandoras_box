@@ -6,19 +6,10 @@ pub enum OperationMutability {
     Mutating,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExecutionPolicy {
     pub dry_run: bool,
     pub allow_smb_fallback: bool,
-}
-
-impl Default for ExecutionPolicy {
-    fn default() -> Self {
-        Self {
-            dry_run: false,
-            allow_smb_fallback: true,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +36,11 @@ impl std::error::Error for PolicyViolation {}
 
 impl ExecutionPolicy {
     pub fn allow_transport(&self, transport: TransportKind) -> Result<(), PolicyViolation> {
+        if self.dry_run && transport == TransportKind::WindowsSmb {
+            return Err(PolicyViolation::new(
+                "dry-run blocks SMB because remote command execution creates files and services",
+            ));
+        }
         if transport == TransportKind::WindowsSmb && !self.allow_smb_fallback {
             return Err(PolicyViolation::new(
                 "SMB fallback is disabled by transport policy",
@@ -93,6 +89,6 @@ mod tests {
         };
 
         assert!(policy.allow_transport(TransportKind::WindowsSmb).is_err());
-        assert!(policy.allow_transport(TransportKind::WindowsSsh).is_ok());
+        assert!(policy.allow_transport(TransportKind::SshSftp).is_ok());
     }
 }
