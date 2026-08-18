@@ -18,6 +18,7 @@ Do not replace release inputs with floating versions, Git/path overrides, or sib
 ```sh
 cargo fetch --locked
 cargo metadata --locked --offline --format-version 1 >/dev/null
+python3 scripts/check-rust-source-size.py
 cargo fmt --all -- --check
 cargo clippy --locked --offline --workspace --all-targets -- -D warnings
 cargo test --locked --offline --workspace
@@ -27,6 +28,8 @@ cargo deny --locked --offline check advisories sources
 bash -n scripts/*.sh
 shellcheck scripts/*.sh
 ```
+
+The source-size check uses the committed, source-pinned Tokio inventory and never fetches its reference during normal validation. See [`RUST_SOURCE_SIZE.md`](RUST_SOURCE_SIZE.md) for the 2699-line convention, exclusions, evidence, and explicit update process.
 
 Refresh advisory data over verified TLS before a release and rerun `cargo audit -D warnings` plus `cargo deny --locked check advisories sources`.
 

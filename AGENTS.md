@@ -12,6 +12,10 @@ Runtime target/payload contracts are authoritative in `pandoras_box/src/runtime/
 
 Named credential resolution is authoritative in `pandoras_box/src/runtime/credentials.rs`; operator schema and precedence are in `docs/CREDENTIAL_PROFILES.md`. Keep secret values out of durable identity/artifacts, make selection failures host-local and pre-authentication, and preserve explicit mission reuse semantics in `runtime/runner.rs`.
 
+## Rust source-size boundary
+
+Run `python3 scripts/check-rust-source-size.py` for every Rust change. The pinned Tokio reference, 2699-line hard limit, exact exclusions, and reviewable update process are authoritative in `docs/RUST_SOURCE_SIZE.md` and `docs/reference/rust-source-size-policy.json`.
+
 ## Documentation boundary
 
 Documentation and generated documentation are repository-local only. Do not publish, host, upload, or attach them to releases or external documentation channels. Keep release/package automation free of documentation files and documentation-publication steps.

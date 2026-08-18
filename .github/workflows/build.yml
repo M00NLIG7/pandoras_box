@@ -99,6 +99,9 @@ jobs:
           cargo fetch --locked
           cargo metadata --locked --offline --format-version 1 > /tmp/locked-metadata.json
 
+      - name: Enforce the source-pinned Tokio Rust file-size limit
+        run: python3 scripts/check-rust-source-size.py
+
       - name: Format, lint, and test the workspace
         run: |
           set -euo pipefail
