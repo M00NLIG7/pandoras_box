@@ -1,0 +1,23 @@
+name: Chimera inventory filename
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  filename:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: /chimera/src/inventory_path.rs
+      - name: Test inventory filenames
+        run: |
+          set -eu
+          tmp=$(mktemp -d "${TMPDIR:-/tmp}/chimera-check.XXXXXXXX")
+          trap 'rm -rf "$tmp"' EXIT
+          rustc --test chimera/src/inventory_path.rs -o "$tmp/check"
+          "$tmp/check"

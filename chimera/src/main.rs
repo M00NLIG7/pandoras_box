@@ -1,4 +1,5 @@
 mod error;
+mod inventory_path;
 mod logging;
 mod modes;
 mod types;
@@ -8,7 +9,7 @@ use crate::modes::collector::{CollectorConfig, CollectorMode};
 use crate::modes::inventory::InventoryMode;
 use crate::modes::ModeExecutor;
 use crate::types::{ExecutionMode, ExecutionResult};
-use crate::utils::{get_default_output_dir, set_output_root, INVENTORY_FILENAME};
+use crate::utils::{get_default_output_dir, set_output_root};
 use clap::{arg, command, value_parser, Command};
 use log::{error, info};
 use std::fs::{self, File};
@@ -24,15 +25,9 @@ async fn run_inventory_mode(output_dir: &Path, use_hostname_for_output: bool) ->
 
     let result = mode.execute(None).await;
 
-    let filename = if use_hostname_for_output {
-        let s = System::new();
-        let host_name = s.host_name().unwrap_or_else(|| "<unknown>".to_owned());
-        format!("{}.json", host_name)
-    } else {
-        String::from(INVENTORY_FILENAME)
-    };
-
-    let output_path = output_dir.join(filename);
+    let host_name = use_hostname_for_output
+        .then(|| System::new().host_name().unwrap_or_else(|| "<unknown>".to_owned()));
+    let output_path = inventory_path::inventory_path(output_dir, host_name.as_deref());
     match File::create(&output_path) {
         Ok(mut file) => {
             if let Err(e) = writeln!(file, "{}", result.message) {
