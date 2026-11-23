@@ -20,6 +20,10 @@ Run `python3 scripts/check-rust-source-size.py` for every Rust change. The pinne
 
 Documentation and generated documentation are repository-local only. Do not publish, host, upload, or attach them to releases or external documentation channels. Keep release/package automation free of documentation files and documentation-publication steps.
 
+## Offline inventory tests
+
+Use invented saved inventory documents only in isolated offline tests of Smolder’s inventory decoding and reporting functions. These tests must not use real data, run the collector, or invoke operational tests.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
