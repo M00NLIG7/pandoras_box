@@ -164,7 +164,25 @@ struct InventoryArtifact {
     users: Vec<InventoryUser>,
     shares: Vec<InventoryShare>,
     containers: Vec<InventoryContainer>,
-    section_errors: Vec<InventorySectionError>,
+    #[serde(deserialize_with = "recorded_section_errors")]
+    section_errors: Option<Vec<InventorySectionError>>,
+}
+
+// A missing field predates diagnostics; an explicit null is not a recorded list.
+fn recorded_section_errors<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<InventorySectionError>>, D::Error> {
+    Vec::deserialize(deserializer).map(Some)
+}
+
+impl InventoryArtifact {
+    fn collection_state(&self) -> &'static str {
+        match self.section_errors.as_deref() {
+            None => "not recorded",
+            Some([]) => "complete",
+            Some(_) => "partial",
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -190,6 +208,17 @@ struct InventoryConnection {
 #[serde(default)]
 struct InventoryService {
     name: String,
+}
+
+impl InventoryService {
+    fn report_name(self) -> Option<String> {
+        // Keep the prefix that the spreadsheet exporter must neutralize.
+        if self.name.starts_with(['\r', '\t']) && !self.name.trim().is_empty() {
+            Some(self.name)
+        } else {
+            non_empty(self.name)
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -342,18 +371,17 @@ fn record_from_report(
 
     match inventory {
         Ok(mut inventory) => {
-            let section_errors = std::mem::take(&mut inventory.section_errors)
+            let collection_state = inventory.collection_state();
+            let section_errors = inventory
+                .section_errors
+                .take()
+                .unwrap_or_default()
                 .into_iter()
                 .map(|error| AssetInventorySectionError {
                     section: error.section,
                     message: error.message,
                 })
                 .collect::<Vec<_>>();
-            let collection_state = if section_errors.is_empty() {
-                "complete"
-            } else {
-                "partial"
-            };
             let partial_summary = (!section_errors.is_empty()).then(|| {
                 format!(
                     "partial inventory: {}",
@@ -429,7 +457,7 @@ fn record_from_report(
                     services: inventory
                         .services
                         .into_iter()
-                        .filter_map(|service| non_empty(service.name))
+                        .filter_map(|service| service.report_name())
                         .collect(),
                     shares: inventory
                         .shares
@@ -2011,7 +2039,7 @@ fn csv_escape(value: &str) -> String {
     } else {
         value.to_string()
     };
-    if neutralized.contains([',', '"', '\n']) {
+    if neutralized.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", neutralized.replace('"', "\"\""))
     } else {
         neutralized

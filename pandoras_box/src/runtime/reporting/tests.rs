@@ -301,3 +301,38 @@ async fn topology_png_renderer_is_explicit_digest_pinned_and_bounded() {
     );
     let _ = fs::remove_dir_all(temp_root);
 }
+
+#[test]
+fn saved_diagnostics_distinguish_absent_empty_and_populated() {
+    for (raw, state) in [
+        ("{}", "not recorded"),
+        (r#"{"sectionErrors":[]}"#, "complete"),
+        (
+            r#"{"sectionErrors":[{"section":"shares","message":" missing\nshare "}]}"#,
+            "partial",
+        ),
+    ] {
+        let artifact: InventoryArtifact = serde_json::from_str(raw).unwrap();
+        assert_eq!(artifact.collection_state(), state);
+        if let Some([error]) = artifact.section_errors.as_deref() {
+            assert_eq!(error.message, " missing\nshare ");
+        }
+    }
+    assert!(serde_json::from_str::<InventoryArtifact>(r#"{"sectionErrors":null}"#).is_err());
+}
+
+#[test]
+fn csv_cells_quote_record_separators_after_neutralization() {
+    for (value, encoded) in [
+        ("ordinary", "ordinary"),
+        ("a\rb", "\"a\rb\""),
+        ("a\nb", "\"a\nb\""),
+        ("a\r\nb", "\"a\r\nb\""),
+        ("a,b", "\"a,b\""),
+        ("a\"b", "\"a\"\"b\""),
+        ("\rlead", "\"'\rlead\""),
+    ] {
+        let service = super::InventoryService { name: value.into() };
+        assert_eq!(super::csv_escape(&service.report_name().unwrap()), encoded);
+    }
+}

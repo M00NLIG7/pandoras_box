@@ -128,9 +128,9 @@ pub struct Disk {
     pub(crate) mount_point: String,
     /// Type of filesystem (e.g., ext4, ntfs)
     pub(crate) filesystem: String,
-    /// Total disk capacity in bytes
+    /// Total disk capacity in whole MiB
     pub(crate) total_space: u64,
-    /// Currently available space in bytes
+    /// Currently available space in whole MiB
     pub(crate) available_space: u64,
 }
 
@@ -322,10 +322,10 @@ pub struct OpenPort {
 #[serde(rename_all = "camelCase")]
 pub enum ShareType {
     /// Network File System
-    #[serde(rename = "NFS")]
+    #[serde(rename = "NFS", alias = "nFS")]
     Nfs,
     /// Server Message Block
-    #[serde(rename = "SMB")]
+    #[serde(rename = "SMB", alias = "sMB")]
     Smb,
 }
 
@@ -386,7 +386,7 @@ pub struct Host {
     pub(crate) cores: u8,
     /// CPU model name
     pub(crate) cpu: String,
-    /// Total memory in bytes
+    /// Total memory in whole MiB
     pub(crate) memory: u64,
     /// Disk configurations
     pub(crate) disks: Vec<Disk>,
@@ -405,6 +405,7 @@ pub struct Host {
     /// Container configurations
     pub(crate) containers: Vec<Container>,
     /// Collection failures that left one or more sections incomplete
+    #[serde(default)]
     pub(crate) section_errors: Vec<InventorySectionError>,
 }
 
@@ -424,3 +425,6 @@ pub trait UserInfo {
     /// * `false` if domain account
     fn is_local(&self) -> bool;
 }
+
+#[cfg(test)]
+mod saved_inventory_tests;
