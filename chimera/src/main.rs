@@ -1,4 +1,5 @@
 mod error;
+mod inventory_path;
 mod logging;
 mod modes;
 mod server;
@@ -147,15 +148,11 @@ async fn run_inventory_mode(output_dir: &Path, use_hostname_for_output: bool) ->
 
     let result = mode.execute(None).await;
 
-    let filename = if use_hostname_for_output {
+    let host_name = use_hostname_for_output.then(|| {
         let s = System::new();
-        let host_name = s.host_name().unwrap_or_else(|| "<unknown>".to_owned());
-        format!("{}.json", host_name)
-    } else {
-        String::from("inventory.json")
-    };
-
-    let output_path = output_dir.join(filename);
+        s.host_name().unwrap_or_else(|| "<unknown>".to_owned())
+    });
+    let output_path = inventory_path::inventory_path(output_dir, host_name.as_deref());
     match File::create(&output_path) {
         Ok(mut file) => {
             if let Err(e) = writeln!(file, "{}", result.message) {
