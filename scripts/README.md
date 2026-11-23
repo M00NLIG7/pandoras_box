@@ -1,3 +1,9 @@
+# Offline saved-inventory CSV check
+
+From the project root, run `python3 scripts/check-saved-csv.py`. It requires Python 3, Rust/Cargo, and the serde dependencies in `scripts/saved-csv/Cargo.lock` already cached. It builds only the reporting data types and pure functions in a temporary crate, with inert report context. It does not build the application, collect inventory, or fetch packages.
+
+The check sends seven variations of the invented saved-host fixture through the report projection and CSV renderer. Python independently parses each export: expect one header and one 21-column host row with the original service text, including the protective apostrophe before a leading carriage return. A failure names the case and the unexpected widths or cell value.
+
 # Live interop harnesses (test-only)
 
 These scripts are controlled integration infrastructure, not operator commands. They create disposable Docker targets and artifacts under `target/`. Windows, BSD, and mixed harnesses may depend on or modify an explicitly configured local lab fixture. Never point them at production or real CCDC targets.
