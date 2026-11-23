@@ -1,6 +1,6 @@
 # Pandora's Box
 
-Pandora's Box is an authorized, cross-platform fleet-inventory orchestrator. One CLI discovers a requested range, applies explicit target and payload contracts, uses authenticated transports, runs the Chimera collector, and writes durable local reports.
+Pandora's Box is an experimental inventory tool for authorized fleet administration. The default `detect-only` profile records reachability and open ports locally and stops before authentication. With an explicit target profile, a live inventory run can continue from discovery to authentication and run the Chimera collector on a host. A dry run previews the collection plan; a live run does not require approval of that plan.
 
 > **Authorization required.** Discovery, authentication, command execution, staging, and collection can be disruptive. Use Pandora only on systems you own or are explicitly authorized to administer.
 
