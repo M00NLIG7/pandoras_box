@@ -1,0 +1,2354 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+
+use super::mission::{DeadlinePolicy, HostPlan, HostState, ResourceLimits};
+use super::policy::{ExecutionPolicy, OperationMutability};
+use super::scheduler::{FailureDisposition, FailurePhase, HostExecutionReport, HostExecutor};
+use super::session_factory::{BoxedHostSession, SessionFactory};
+use super::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationIdempotency {
+    Idempotent,
+    NonIdempotent,
+}
+
+pub(crate) struct ConnectedSession {
+    transport: super::mission::TransportKind,
+    session: BoxedHostSession,
+}
+
+impl ConnectedSession {
+    #[must_use]
+    pub(crate) fn transport(&self) -> super::mission::TransportKind {
+        self.transport
+    }
+
+    pub(crate) fn session_mut(&mut self) -> &mut dyn HostSession {
+        &mut *self.session
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionOperation {
+    Exec {
+        request: ExecRequest,
+        mutability: OperationMutability,
+        idempotency: OperationIdempotency,
+    },
+    CaptureExec {
+        request: ExecRequest,
+        local_path: PathBuf,
+        mutability: OperationMutability,
+        idempotency: OperationIdempotency,
+    },
+    CleanupCaptureExec {
+        request: ExecRequest,
+        local_path: PathBuf,
+    },
+    PutFile {
+        transfer: FileTransfer,
+    },
+    GetFile {
+        transfer: FileTransfer,
+    },
+    EnsureDir {
+        remote_dir: String,
+    },
+    CleanupExec {
+        request: ExecRequest,
+    },
+}
+
+impl SessionOperation {
+    #[must_use]
+    pub fn ensure_dir(remote_dir: impl Into<String>) -> Self {
+        Self::EnsureDir {
+            remote_dir: remote_dir.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn exec(command: impl Into<String>) -> Self {
+        Self::exec_with_semantics(
+            command,
+            OperationMutability::Mutating,
+            OperationIdempotency::NonIdempotent,
+        )
+    }
+
+    #[must_use]
+    pub fn read_only_exec(command: impl Into<String>) -> Self {
+        Self::exec_with_semantics(
+            command,
+            OperationMutability::ReadOnly,
+            OperationIdempotency::Idempotent,
+        )
+    }
+
+    #[must_use]
+    pub fn idempotent_exec(command: impl Into<String>) -> Self {
+        Self::exec_with_semantics(
+            command,
+            OperationMutability::Mutating,
+            OperationIdempotency::Idempotent,
+        )
+    }
+
+    fn exec_with_semantics(
+        command: impl Into<String>,
+        mutability: OperationMutability,
+        idempotency: OperationIdempotency,
+    ) -> Self {
+        Self::Exec {
+            request: ExecRequest::new(command),
+            mutability,
+            idempotency,
+        }
+    }
+
+    #[must_use]
+    pub fn capture_exec(command: impl Into<String>, local_path: impl Into<PathBuf>) -> Self {
+        Self::capture_exec_with_semantics(
+            command,
+            local_path,
+            OperationMutability::Mutating,
+            OperationIdempotency::NonIdempotent,
+        )
+    }
+
+    #[must_use]
+    pub fn capture_read_only_exec(
+        command: impl Into<String>,
+        local_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self::capture_exec_with_semantics(
+            command,
+            local_path,
+            OperationMutability::ReadOnly,
+            OperationIdempotency::Idempotent,
+        )
+    }
+
+    #[must_use]
+    pub fn capture_idempotent_exec(
+        command: impl Into<String>,
+        local_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self::capture_exec_with_semantics(
+            command,
+            local_path,
+            OperationMutability::Mutating,
+            OperationIdempotency::Idempotent,
+        )
+    }
+
+    fn capture_exec_with_semantics(
+        command: impl Into<String>,
+        local_path: impl Into<PathBuf>,
+        mutability: OperationMutability,
+        idempotency: OperationIdempotency,
+    ) -> Self {
+        Self::CaptureExec {
+            request: ExecRequest::new(command),
+            local_path: local_path.into(),
+            mutability,
+            idempotency,
+        }
+    }
+
+    #[must_use]
+    pub fn cleanup_capture_exec(
+        command: impl Into<String>,
+        local_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self::CleanupCaptureExec {
+            request: ExecRequest::new(command),
+            local_path: local_path.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn get_file(remote_path: impl Into<String>, local_path: impl Into<PathBuf>) -> Self {
+        Self::GetFile {
+            transfer: FileTransfer {
+                remote_path: remote_path.into(),
+                local_path: local_path.into(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn put_file(local_path: impl Into<PathBuf>, remote_path: impl Into<String>) -> Self {
+        Self::PutFile {
+            transfer: FileTransfer {
+                local_path: local_path.into(),
+                remote_path: remote_path.into(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn cleanup_exec(command: impl Into<String>) -> Self {
+        Self::CleanupExec {
+            request: ExecRequest::new(command),
+        }
+    }
+
+    #[must_use]
+    pub fn mutability(&self) -> OperationMutability {
+        match self {
+            Self::Exec { mutability, .. } | Self::CaptureExec { mutability, .. } => *mutability,
+            Self::GetFile { .. } => OperationMutability::ReadOnly,
+            Self::PutFile { .. }
+            | Self::EnsureDir { .. }
+            | Self::CleanupExec { .. }
+            | Self::CleanupCaptureExec { .. } => OperationMutability::Mutating,
+        }
+    }
+
+    #[must_use]
+    pub fn idempotency(&self) -> OperationIdempotency {
+        match self {
+            Self::Exec { idempotency, .. } | Self::CaptureExec { idempotency, .. } => *idempotency,
+            Self::PutFile { .. }
+            | Self::GetFile { .. }
+            | Self::EnsureDir { .. }
+            | Self::CleanupExec { .. }
+            | Self::CleanupCaptureExec { .. } => OperationIdempotency::Idempotent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionExecutionBounds {
+    deadlines: DeadlinePolicy,
+    limits: ResourceLimits,
+    absolute_deadline: Option<tokio::time::Instant>,
+}
+
+pub struct SessionExecutor<F> {
+    factory: Arc<F>,
+    policy: ExecutionPolicy,
+    operations: Vec<SessionOperation>,
+    bounds: SessionExecutionBounds,
+}
+
+impl<F> SessionExecutor<F> {
+    #[must_use]
+    pub fn new(
+        factory: Arc<F>,
+        policy: ExecutionPolicy,
+        operations: Vec<SessionOperation>,
+    ) -> Self {
+        Self {
+            factory,
+            policy,
+            operations,
+            bounds: SessionExecutionBounds::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_bounds(
+        mut self,
+        deadlines: DeadlinePolicy,
+        limits: ResourceLimits,
+        absolute_deadline: Option<tokio::time::Instant>,
+    ) -> Self {
+        self.bounds = SessionExecutionBounds {
+            deadlines,
+            limits,
+            absolute_deadline,
+        };
+        self
+    }
+
+    fn effective_timeout(&self, requested: Duration) -> Duration {
+        self.bounds.absolute_deadline.map_or(requested, |deadline| {
+            requested.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        })
+    }
+
+    fn operation_timeout(&self, operation: &SessionOperation) -> Duration {
+        let requested = match operation {
+            SessionOperation::PutFile { .. } | SessionOperation::GetFile { .. } => {
+                self.bounds.deadlines.transfer
+            }
+            SessionOperation::CleanupExec { .. } | SessionOperation::CleanupCaptureExec { .. } => {
+                self.bounds.deadlines.cleanup
+            }
+            SessionOperation::Exec { .. }
+            | SessionOperation::CaptureExec { .. }
+            | SessionOperation::EnsureDir { .. } => self.bounds.deadlines.command,
+        };
+        self.effective_timeout(requested)
+    }
+
+    pub(crate) async fn connect_session(
+        &self,
+        plan: &HostPlan,
+    ) -> Result<ConnectedSession, HostExecutionReport>
+    where
+        F: SessionFactory + 'static,
+    {
+        self.connect_session_from(plan, 0).await
+    }
+
+    async fn connect_session_from(
+        &self,
+        plan: &HostPlan,
+        start_index: usize,
+    ) -> Result<ConnectedSession, HostExecutionReport>
+    where
+        F: SessionFactory + 'static,
+    {
+        let mut errors = Vec::new();
+
+        for transport in plan.transport_chain.iter().copied().skip(start_index) {
+            if let Err(err) = self.policy.allow_transport(transport) {
+                errors.push(err.to_string());
+                continue;
+            }
+
+            match bounded_call(
+                self.effective_timeout(self.bounds.deadlines.connect),
+                "transport connection",
+                self.factory.connect(plan, transport),
+            )
+            .await
+            {
+                Ok(session) => return Ok(ConnectedSession { transport, session }),
+                Err(err) if err.blocks_retry_or_fallback() => {
+                    return Err(classify_typed_connect_failure(
+                        plan.force_state(HostState::Failed),
+                        transport,
+                        err,
+                    ));
+                }
+                Err(err) => errors.push(format!("{transport:?}: {err}")),
+            }
+        }
+
+        let error = if errors.is_empty() {
+            "no usable transport".to_string()
+        } else {
+            errors.join("; ")
+        };
+
+        Err(classify_connect_failure(
+            plan.force_state(HostState::Failed),
+            error,
+        ))
+    }
+
+    async fn connect_session_after(
+        &self,
+        plan: &HostPlan,
+        current: super::mission::TransportKind,
+    ) -> Option<Result<ConnectedSession, HostExecutionReport>>
+    where
+        F: SessionFactory + 'static,
+    {
+        let start_index = plan
+            .transport_chain
+            .iter()
+            .position(|transport| *transport == current)?
+            .saturating_add(1);
+        let has_allowed_transport = plan
+            .transport_chain
+            .iter()
+            .copied()
+            .skip(start_index)
+            .any(|transport| self.policy.allow_transport(transport).is_ok());
+        if !has_allowed_transport {
+            return None;
+        }
+
+        Some(self.connect_session_from(plan, start_index).await)
+    }
+
+    pub(crate) async fn run_connected_session(
+        &self,
+        plan: HostPlan,
+        session: &mut dyn HostSession,
+        disconnect_on_success: bool,
+    ) -> HostExecutionReport {
+        let mut plan = plan.force_state(HostState::Connected);
+
+        for operation in &self.operations {
+            if self.policy.allow_operation(operation.mutability()).is_err() {
+                continue;
+            }
+
+            let phase = operation.phase();
+            let operation_timeout = self.operation_timeout(operation);
+            plan = match plan.transition(HostState::Executing) {
+                Ok(plan) => plan,
+                Err(err) => return transition_failure(plan, phase, err),
+            };
+
+            match operation {
+                SessionOperation::Exec {
+                    request,
+                    idempotency,
+                    ..
+                } => match bounded_call(
+                    operation_timeout,
+                    "remote command",
+                    session.exec(request.clone()),
+                )
+                .await
+                {
+                    Ok(response) => {
+                        if let Err(err) = validate_exec_output_bound(
+                            &response,
+                            self.bounds.limits.max_command_output_bytes,
+                        ) {
+                            return terminal_phase_failure(plan, phase, "exec failed", err);
+                        }
+                        if let Err(err) = validate_exec_response(request, &response) {
+                            return terminal_phase_failure(plan, phase, "exec failed", err);
+                        }
+                    }
+                    Err(err) => {
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            *idempotency,
+                            "exec failed",
+                            err,
+                        );
+                    }
+                },
+                SessionOperation::CaptureExec {
+                    request,
+                    local_path,
+                    idempotency,
+                    ..
+                } => match bounded_call(
+                    operation_timeout,
+                    "captured remote command",
+                    session.exec(request.clone()),
+                )
+                .await
+                {
+                    Ok(response) => {
+                        if let Err(err) = validate_exec_output_bound(
+                            &response,
+                            self.bounds.limits.max_command_output_bytes,
+                        ) {
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                capture_context(phase),
+                                err,
+                            );
+                        }
+                        if let Err(err) = write_exec_capture(local_path, request, &response).await {
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                capture_context(phase),
+                                err,
+                            );
+                        }
+                        if let Err(err) = validate_exec_response(request, &response) {
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                capture_context(phase),
+                                err,
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            *idempotency,
+                            capture_context(phase),
+                            err,
+                        );
+                    }
+                },
+                SessionOperation::CleanupCaptureExec {
+                    request,
+                    local_path,
+                } => match bounded_call(
+                    operation_timeout,
+                    "captured cleanup command",
+                    session.exec(request.clone()),
+                )
+                .await
+                {
+                    Ok(response) => {
+                        if let Err(err) = validate_exec_output_bound(
+                            &response,
+                            self.bounds.limits.max_command_output_bytes,
+                        ) {
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                capture_context(phase),
+                                err,
+                            );
+                        }
+                        if let Err(err) = write_exec_capture(local_path, request, &response).await {
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                capture_context(phase),
+                                err,
+                            );
+                        }
+                        if let Err(err) = validate_exec_response(request, &response) {
+                            return terminal_phase_failure(
+                                plan,
+                                phase,
+                                capture_context(phase),
+                                err,
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            OperationIdempotency::Idempotent,
+                            capture_context(phase),
+                            err,
+                        );
+                    }
+                },
+                SessionOperation::PutFile { transfer } => {
+                    if let Err(err) = validate_local_upload(
+                        &transfer.local_path,
+                        self.bounds.limits.max_payload_bytes,
+                    )
+                    .await
+                    {
+                        return terminal_phase_failure(plan, phase, "put failed", err);
+                    }
+                    if let Err(err) = validate_remote_path(&transfer.remote_path) {
+                        return terminal_phase_failure(plan, phase, "put failed", err);
+                    }
+
+                    if let Err(err) =
+                        bounded_call(operation_timeout, "remote upload", session.put(transfer))
+                            .await
+                    {
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            OperationIdempotency::Idempotent,
+                            "put failed",
+                            err,
+                        );
+                    }
+                }
+                SessionOperation::GetFile { transfer } => {
+                    if let Err(err) = validate_remote_path(&transfer.remote_path) {
+                        return terminal_phase_failure(plan, phase, "get failed", err);
+                    }
+
+                    if let Err(err) =
+                        bounded_call(operation_timeout, "remote download", session.get(transfer))
+                            .await
+                    {
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            OperationIdempotency::Idempotent,
+                            "get failed",
+                            err,
+                        );
+                    }
+                    if let Err(err) = validate_local_download(
+                        &transfer.local_path,
+                        self.bounds.limits.max_download_bytes,
+                    )
+                    .await
+                    {
+                        let _ = tokio::fs::remove_file(&transfer.local_path).await;
+                        return terminal_phase_failure(plan, phase, "get failed", err);
+                    }
+                }
+                SessionOperation::EnsureDir { remote_dir } => {
+                    if let Err(err) = validate_remote_path(remote_dir) {
+                        return terminal_phase_failure(plan, phase, "ensure_dir failed", err);
+                    }
+
+                    if let Err(err) = bounded_call(
+                        operation_timeout,
+                        "remote directory creation",
+                        session.ensure_dir(remote_dir),
+                    )
+                    .await
+                    {
+                        return operation_transport_failure(
+                            plan,
+                            phase,
+                            OperationIdempotency::Idempotent,
+                            "ensure_dir failed",
+                            err,
+                        );
+                    }
+                }
+                SessionOperation::CleanupExec { request } => {
+                    match bounded_call(
+                        operation_timeout,
+                        "remote cleanup command",
+                        session.exec(request.clone()),
+                    )
+                    .await
+                    {
+                        Ok(response) => {
+                            if let Err(err) = validate_exec_output_bound(
+                                &response,
+                                self.bounds.limits.max_command_output_bytes,
+                            ) {
+                                return terminal_phase_failure(
+                                    plan,
+                                    phase,
+                                    "cleanup_exec failed",
+                                    err,
+                                );
+                            }
+                            if let Err(err) = validate_exec_response(request, &response) {
+                                return terminal_phase_failure(
+                                    plan,
+                                    phase,
+                                    "cleanup_exec failed",
+                                    err,
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            return operation_transport_failure(
+                                plan,
+                                phase,
+                                OperationIdempotency::Idempotent,
+                                "cleanup_exec failed",
+                                err,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let complete_plan = match plan.transition(HostState::Complete) {
+            Ok(plan) => plan,
+            Err(err) => return transition_failure(plan, FailurePhase::Cleanup, err),
+        };
+
+        if disconnect_on_success {
+            if let Err(err) = bounded_call(
+                self.bounds.deadlines.cleanup,
+                "session disconnect",
+                session.cleanup(),
+            )
+            .await
+            {
+                return terminal_phase_failure(
+                    complete_plan,
+                    FailurePhase::Cleanup,
+                    "cleanup failed",
+                    err,
+                );
+            }
+        }
+
+        let report = HostExecutionReport::success(complete_plan, HostState::Complete);
+        if disconnect_on_success {
+            report.with_cleanup_outcome(super::scheduler::CleanupOutcome::Complete, false)
+        } else {
+            report
+        }
+    }
+
+    pub(crate) async fn run_connected_session_with_fallback(
+        &self,
+        plan: HostPlan,
+        connected: &mut ConnectedSession,
+        disconnect_on_success: bool,
+    ) -> HostExecutionReport
+    where
+        F: SessionFactory + 'static,
+    {
+        let phase_is_idempotent = self
+            .operations
+            .iter()
+            .filter(|operation| self.policy.allow_operation(operation.mutability()).is_ok())
+            .all(|operation| operation.idempotency() == OperationIdempotency::Idempotent);
+
+        loop {
+            let selected_transport = connected.transport();
+            let mut report = self
+                .run_connected_session(plan.clone(), connected.session_mut(), disconnect_on_success)
+                .await
+                .with_selected_transport(selected_transport);
+
+            if !phase_is_idempotent
+                || report.failure_disposition != Some(FailureDisposition::Retryable)
+            {
+                return report;
+            }
+
+            let Some(fallback) = self.connect_session_after(&plan, selected_transport).await else {
+                return report;
+            };
+
+            if let Err(error) = bounded_call(
+                self.bounds.deadlines.cleanup,
+                "session disconnect before transport fallback",
+                connected.session_mut().cleanup(),
+            )
+            .await
+            {
+                report.error = Some(format!(
+                    "{}; fallback blocked because prior transport cleanup failed: {error}",
+                    report.error.unwrap_or_default()
+                ));
+                report.failure_disposition = Some(FailureDisposition::Terminal);
+                return report;
+            }
+
+            match fallback {
+                Ok(next_session) => *connected = next_session,
+                Err(fallback_report) => {
+                    let operation_error = report.error.take().unwrap_or_default();
+                    let fallback_error = fallback_report.error.unwrap_or_default();
+                    report.error = Some(format!(
+                        "{operation_error}; fallback connection failed: {fallback_error}"
+                    ));
+                    if fallback_report.failure_disposition == Some(FailureDisposition::Terminal) {
+                        report.failure_disposition = Some(FailureDisposition::Terminal);
+                    }
+                    return report;
+                }
+            }
+        }
+    }
+}
+
+async fn bounded_call<T, F>(deadline: Duration, context: &str, future: F) -> crate::Result<T>
+where
+    F: std::future::Future<Output = crate::Result<T>>,
+{
+    if deadline.is_zero() {
+        return Err(crate::Error::DeadlineExceeded(format!(
+            "{context} reached the host or mission deadline"
+        )));
+    }
+    tokio::time::timeout(deadline, future)
+        .await
+        .map_err(|_| crate::Error::DeadlineExceeded(format!("{context} exceeded {deadline:?}")))?
+}
+
+async fn write_exec_capture(
+    local_path: &Path,
+    request: &ExecRequest,
+    response: &ExecResponse,
+) -> Result<(), std::io::Error> {
+    if let Some(parent) = local_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await?;
+        }
+    }
+
+    let contents = format!(
+        "command: {}\nstatus: {}\nstdout:\n{}\nstderr:\n{}\n",
+        request.command,
+        response
+            .status_code
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        String::from_utf8_lossy(&response.stdout),
+        String::from_utf8_lossy(&response.stderr),
+    );
+
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut file = options.open(local_path).await?;
+    use tokio::io::AsyncWriteExt;
+    file.write_all(contents.as_bytes()).await?;
+    file.flush().await
+}
+
+fn validate_exec_output_bound(response: &ExecResponse, maximum: usize) -> Result<(), String> {
+    let actual = response
+        .stdout
+        .len()
+        .checked_add(response.stderr.len())
+        .ok_or_else(|| "command output length overflowed usize".to_string())?;
+    if actual > maximum {
+        return Err(format!(
+            "command output was {actual} bytes, exceeding the {maximum} byte bound"
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_local_upload(path: &Path, maximum: u64) -> Result<(), String> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "upload source must be a regular non-link file: {}",
+            path.display()
+        ));
+    }
+    if metadata.len() > maximum {
+        return Err(format!(
+            "upload source is {} bytes, exceeding the {maximum} byte bound",
+            metadata.len()
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_local_download(path: &Path, maximum: u64) -> Result<(), String> {
+    let metadata = tokio::fs::symlink_metadata(path).await.map_err(|error| {
+        format!(
+            "failed to inspect downloaded file {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "download destination must be a regular non-link file: {}",
+            path.display()
+        ));
+    }
+    if metadata.len() > maximum {
+        return Err(format!(
+            "downloaded file is {} bytes, exceeding the {maximum} byte bound",
+            metadata.len()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_exec_response(request: &ExecRequest, response: &ExecResponse) -> Result<(), String> {
+    match response.status_code {
+        Some(0) => Ok(()),
+        Some(status) => Err(format!(
+            "command `{}` returned exit status {status}",
+            request.command
+        )),
+        None => Err(format!(
+            "command `{}` returned missing exit status",
+            request.command
+        )),
+    }
+}
+
+fn validate_remote_path(remote_path: &str) -> Result<(), String> {
+    if is_absolute_remote_path(remote_path) {
+        return Ok(());
+    }
+
+    Err(format!("remote path must be absolute: {remote_path}"))
+}
+
+fn is_absolute_remote_path(remote_path: &str) -> bool {
+    remote_path.starts_with('/')
+        || remote_path.starts_with(r"\\")
+        || remote_path.as_bytes().get(0..3).is_some_and(|prefix| {
+            prefix[0].is_ascii_alphabetic()
+                && prefix[1] == b':'
+                && matches!(prefix[2], b'\\' | b'/')
+        })
+}
+
+impl SessionOperation {
+    fn phase(&self) -> FailurePhase {
+        match self {
+            Self::PutFile { .. } | Self::EnsureDir { .. } => FailurePhase::Stage,
+            Self::GetFile { .. } => FailurePhase::Collect,
+            Self::CleanupExec { .. } | Self::CleanupCaptureExec { .. } => FailurePhase::Cleanup,
+            Self::Exec { .. } | Self::CaptureExec { .. } => FailurePhase::Execute,
+        }
+    }
+}
+
+fn capture_context(phase: FailurePhase) -> &'static str {
+    match phase {
+        FailurePhase::Cleanup => "cleanup_exec failed",
+        _ => "capture_exec failed",
+    }
+}
+
+fn transition_failure(
+    plan: HostPlan,
+    phase: FailurePhase,
+    err: impl std::fmt::Display,
+) -> HostExecutionReport {
+    HostExecutionReport::terminal_failure(plan, phase, err.to_string())
+}
+
+fn terminal_phase_failure(
+    plan: HostPlan,
+    phase: FailurePhase,
+    context: &str,
+    err: impl std::fmt::Display,
+) -> HostExecutionReport {
+    HostExecutionReport::terminal_failure(plan, phase, format!("{context}: {err}"))
+}
+
+fn operation_transport_failure(
+    plan: HostPlan,
+    phase: FailurePhase,
+    idempotency: OperationIdempotency,
+    context: &str,
+    err: crate::Error,
+) -> HostExecutionReport {
+    let terminal = err.blocks_retry_or_fallback();
+    let rendered = format!("{context}: {err}");
+    let disposition = if terminal {
+        FailureDisposition::Terminal
+    } else {
+        operation_failure_disposition(idempotency, &rendered)
+    };
+    HostExecutionReport::failure_with_disposition(plan, phase, disposition, rendered)
+}
+
+fn operation_failure_disposition(
+    idempotency: OperationIdempotency,
+    error: &str,
+) -> FailureDisposition {
+    if idempotency == OperationIdempotency::NonIdempotent || is_terminal_error(error) {
+        FailureDisposition::Terminal
+    } else {
+        FailureDisposition::Retryable
+    }
+}
+
+fn classify_typed_connect_failure(
+    plan: HostPlan,
+    transport: super::mission::TransportKind,
+    error: crate::Error,
+) -> HostExecutionReport {
+    let phase = if matches!(&error, crate::Error::CredentialProfileFailure(_)) {
+        FailurePhase::Credentials
+    } else {
+        FailurePhase::Connect
+    };
+    HostExecutionReport::failure_with_disposition(
+        plan,
+        phase,
+        FailureDisposition::Terminal,
+        format!("{}: {error}", transport.as_str()),
+    )
+}
+
+fn classify_connect_failure(plan: HostPlan, error: impl std::fmt::Display) -> HostExecutionReport {
+    let rendered = error.to_string();
+    let disposition = if is_terminal_error(&rendered) {
+        FailureDisposition::Terminal
+    } else {
+        FailureDisposition::Retryable
+    };
+    HostExecutionReport::failure_with_disposition(
+        plan,
+        FailurePhase::Connect,
+        disposition,
+        rendered,
+    )
+}
+
+fn is_terminal_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    [
+        "auth failed",
+        "authentication failed",
+        "credential profile error",
+        "authentication error",
+        "failed to authenticate",
+        "logon failure",
+        "account locked",
+        "permission denied",
+        "access denied",
+        "access is denied",
+        "host key verification failed",
+        "host key for",
+        "unknown server key",
+        "unknown host key",
+        "no ssh port",
+        "smb fallback is disabled",
+        "not valid for unix targets",
+        "remote path must be absolute",
+        "no usable transport",
+        "missing exit status",
+        "exit status",
+        "invalid ip",
+        "invalid subnet",
+        "unknown os",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+#[async_trait]
+impl<F> HostExecutor for SessionExecutor<F>
+where
+    F: SessionFactory + 'static,
+{
+    async fn run(&self, plan: HostPlan) -> HostExecutionReport {
+        let plan = match plan.transition(HostState::Connecting) {
+            Ok(plan) => plan,
+            Err(err) => return transition_failure(plan, FailurePhase::Connect, err),
+        };
+        let mut session = match self.connect_session(&plan).await {
+            Ok(session) => session,
+            Err(report) => return report,
+        };
+
+        let mut report = self
+            .run_connected_session_with_fallback(plan, &mut session, true)
+            .await;
+        if report.final_state == HostState::Failed {
+            if let Err(error) = bounded_call(
+                self.bounds.deadlines.cleanup,
+                "session disconnect after failure",
+                session.session_mut().cleanup(),
+            )
+            .await
+            {
+                report.error = Some(format!(
+                    "{}; session disconnect after failure: {error}",
+                    report
+                        .error
+                        .unwrap_or_else(|| "host operation failed".into())
+                ));
+            }
+        }
+        report
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionExecutor, SessionOperation};
+    use crate::runtime::mission::{
+        CpuArchitecture, DeadlinePolicy, HostPlan, HostState, HostTarget, OperatingSystem,
+        PlatformHint, ResourceLimits, TargetContract, TransportKind,
+    };
+    use crate::runtime::policy::ExecutionPolicy;
+    use crate::runtime::scheduler::{FailureDisposition, FailurePhase, HostExecutor, Scheduler};
+    use crate::runtime::session_factory::{BoxedHostSession, SessionFactory};
+    use crate::runtime::transport::{ExecRequest, ExecResponse, FileTransfer, HostSession};
+    use crate::Error;
+    use crate::Result;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ConnectBehavior {
+        AuthFail,
+        ActualAuthWording,
+        CredentialProfileFail,
+        HostIdentityFail,
+        TransientFail,
+        Success,
+    }
+
+    #[derive(Debug, Clone)]
+    struct SessionTemplate {
+        ensure_dir_delay: Duration,
+        cleanup_error: bool,
+        ensure_dir_calls: Arc<AtomicUsize>,
+        events: Arc<Mutex<Vec<String>>>,
+        exec_outputs: Arc<HashMap<String, ExecResponse>>,
+        exec_errors: Arc<HashMap<String, String>>,
+        put_error: Option<String>,
+        downloads: Arc<HashMap<String, Vec<u8>>>,
+        uploads: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    }
+
+    impl SessionTemplate {
+        fn into_session(self) -> FakeSession {
+            FakeSession {
+                ensure_dir_delay: self.ensure_dir_delay,
+                cleanup_error: self.cleanup_error,
+                ensure_dir_calls: self.ensure_dir_calls,
+                events: self.events,
+                exec_outputs: self.exec_outputs,
+                exec_errors: self.exec_errors,
+                put_error: self.put_error,
+                downloads: self.downloads,
+                uploads: self.uploads,
+            }
+        }
+    }
+
+    struct FakeSession {
+        ensure_dir_delay: Duration,
+        cleanup_error: bool,
+        ensure_dir_calls: Arc<AtomicUsize>,
+        events: Arc<Mutex<Vec<String>>>,
+        exec_outputs: Arc<HashMap<String, ExecResponse>>,
+        exec_errors: Arc<HashMap<String, String>>,
+        put_error: Option<String>,
+        downloads: Arc<HashMap<String, Vec<u8>>>,
+        uploads: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    }
+
+    #[async_trait]
+    impl HostSession for FakeSession {
+        async fn exec(&mut self, request: ExecRequest) -> Result<ExecResponse> {
+            self.events
+                .lock()
+                .expect("events lock should be available")
+                .push(format!("exec:{}", request.command));
+            if let Some(error) = self.exec_errors.get(&request.command) {
+                return Err(Error::CommunicatorError(error.clone()));
+            }
+
+            Ok(self
+                .exec_outputs
+                .get(&request.command)
+                .cloned()
+                .unwrap_or(ExecResponse {
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    status_code: Some(0),
+                }))
+        }
+
+        async fn put(&mut self, transfer: &FileTransfer) -> Result<()> {
+            self.events
+                .lock()
+                .expect("events lock should be available")
+                .push(format!("put:{}", transfer.remote_path));
+            if let Some(error) = &self.put_error {
+                return Err(Error::FileTransferError(error.clone()));
+            }
+            let contents = tokio::fs::read(&transfer.local_path).await?;
+            self.uploads
+                .lock()
+                .expect("uploads lock should be available")
+                .insert(transfer.remote_path.clone(), contents);
+            Ok(())
+        }
+
+        async fn get(&mut self, transfer: &FileTransfer) -> Result<()> {
+            self.events
+                .lock()
+                .expect("events lock should be available")
+                .push(format!("get:{}", transfer.remote_path));
+            let contents = self
+                .downloads
+                .get(&transfer.remote_path)
+                .cloned()
+                .ok_or_else(|| {
+                    Error::FileTransferError(format!(
+                        "missing fake download contents for {}",
+                        transfer.remote_path
+                    ))
+                })?;
+            if let Some(parent) = transfer.local_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::write(&transfer.local_path, contents).await?;
+            Ok(())
+        }
+
+        async fn ensure_dir(&mut self, remote_dir: &str) -> Result<()> {
+            self.ensure_dir_calls.fetch_add(1, Ordering::SeqCst);
+            self.events
+                .lock()
+                .expect("events lock should be available")
+                .push(format!("ensure_dir:{remote_dir}"));
+            if !self.ensure_dir_delay.is_zero() {
+                tokio::time::sleep(self.ensure_dir_delay).await;
+            }
+            Ok(())
+        }
+
+        async fn cleanup(&mut self) -> Result<()> {
+            self.events
+                .lock()
+                .expect("events lock should be available")
+                .push("disconnect".to_string());
+            if self.cleanup_error {
+                Err(Error::CommunicatorError("cleanup failure".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct FakeSessionFactory {
+        behaviors: HashMap<(IpAddr, TransportKind), ConnectBehavior>,
+        templates: Arc<Mutex<HashMap<(IpAddr, TransportKind), SessionTemplate>>>,
+        attempts: Arc<Mutex<Vec<(IpAddr, TransportKind)>>>,
+    }
+
+    impl FakeSessionFactory {
+        fn new(entries: Vec<((IpAddr, TransportKind), ConnectBehavior, SessionTemplate)>) -> Self {
+            let mut behaviors = HashMap::new();
+            let mut templates = HashMap::new();
+
+            for (key, behavior, template) in entries {
+                behaviors.insert(key, behavior);
+                templates.insert(key, template);
+            }
+
+            Self {
+                behaviors,
+                templates: Arc::new(Mutex::new(templates)),
+                attempts: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn attempts(&self) -> Vec<(IpAddr, TransportKind)> {
+            self.attempts
+                .lock()
+                .expect("attempts lock should be available")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl SessionFactory for FakeSessionFactory {
+        async fn connect(
+            &self,
+            plan: &HostPlan,
+            transport: TransportKind,
+        ) -> Result<BoxedHostSession> {
+            let key = (plan.target.ip, transport);
+            self.attempts
+                .lock()
+                .expect("attempts lock should be available")
+                .push(key);
+            match self
+                .behaviors
+                .get(&key)
+                .copied()
+                .unwrap_or(ConnectBehavior::AuthFail)
+            {
+                ConnectBehavior::AuthFail => {
+                    Err(Error::CommunicatorError("auth failed".to_string()))
+                }
+                ConnectBehavior::ActualAuthWording => Err(Error::CommunicatorError(
+                    "Authentication error: Failed to authenticate with password".to_string(),
+                )),
+                ConnectBehavior::CredentialProfileFail => Err(Error::CredentialProfileFailure(
+                    "selected profile is unavailable".to_string(),
+                )),
+                ConnectBehavior::HostIdentityFail => Err(Error::HostIdentityFailure(
+                    "host key verification failed for fixture".to_string(),
+                )),
+                ConnectBehavior::TransientFail => Err(Error::CommunicatorError(
+                    "connection reset by peer".to_string(),
+                )),
+                ConnectBehavior::Success => {
+                    let template = self
+                        .templates
+                        .lock()
+                        .expect("templates lock should be available")
+                        .get(&key)
+                        .cloned()
+                        .expect("template should exist");
+                    Ok(Box::new(template.into_session()))
+                }
+            }
+        }
+    }
+
+    fn host_plan(ip: IpAddr, chain: Vec<TransportKind>) -> HostPlan {
+        let contract = if chain.contains(&TransportKind::WindowsSmb) {
+            TargetContract::windows(CpuArchitecture::X86_64, true)
+        } else {
+            TargetContract::ssh(OperatingSystem::Linux, CpuArchitecture::X86_64)
+        };
+        HostPlan {
+            target: HostTarget {
+                ip,
+                platform: PlatformHint::Unknown,
+                open_ports: vec![22, 445],
+            },
+            contract,
+            payload: None,
+            state: HostState::Queued,
+            transport_chain: chain,
+        }
+    }
+
+    fn template(delay_ms: u64, cleanup_error: bool) -> SessionTemplate {
+        SessionTemplate {
+            ensure_dir_delay: Duration::from_millis(delay_ms),
+            cleanup_error,
+            ensure_dir_calls: Arc::new(AtomicUsize::new(0)),
+            events: Arc::new(Mutex::new(Vec::new())),
+            exec_outputs: Arc::new(HashMap::new()),
+            exec_errors: Arc::new(HashMap::new()),
+            put_error: None,
+            downloads: Arc::new(HashMap::new()),
+            uploads: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("pandoras-box-{label}-{unique}"))
+    }
+
+    #[tokio::test]
+    async fn session_executor_skips_mutations_in_dry_run() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8));
+        let session_template = template(0, false);
+        let calls = Arc::clone(&session_template.ensure_dir_calls);
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy {
+                dry_run: true,
+                allow_smb_fallback: true,
+            },
+            vec![SessionOperation::ensure_dir("/tmp/pandoras-box")],
+        );
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Complete);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn dry_run_enforces_mutability_for_every_operation_variant() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
+        let root = temp_dir("dry-run-operation-boundary");
+        let upload_source = root.join("local/chimera");
+        let read_capture = root.join("exec/read.txt");
+        let mutating_capture = root.join("exec/mutating.txt");
+        let idempotent_capture = root.join("exec/idempotent-mutating.txt");
+        let cleanup_capture = root.join("exec/cleanup.txt");
+        let download_path = root.join("files/inventory.json");
+        tokio::fs::create_dir_all(
+            upload_source
+                .parent()
+                .expect("upload source should have a parent"),
+        )
+        .await
+        .expect("fixture directory should exist");
+        tokio::fs::write(&upload_source, b"payload")
+            .await
+            .expect("upload fixture should exist");
+
+        let mut session_template = template(0, false);
+        let events = Arc::clone(&session_template.events);
+        let uploads = Arc::clone(&session_template.uploads);
+        let ensure_dir_calls = Arc::clone(&session_template.ensure_dir_calls);
+        session_template.downloads = Arc::new(HashMap::from([(
+            "/remote/inventory.json".to_string(),
+            b"{\"host\":\"lab\"}\n".to_vec(),
+        )]));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy {
+                dry_run: true,
+                allow_smb_fallback: true,
+            },
+            vec![
+                SessionOperation::capture_read_only_exec("whoami", &read_capture),
+                SessionOperation::read_only_exec("hostname"),
+                SessionOperation::exec("non-idempotent mutation"),
+                SessionOperation::idempotent_exec("idempotent mutation"),
+                SessionOperation::capture_exec("captured mutation", &mutating_capture),
+                SessionOperation::capture_idempotent_exec(
+                    "captured idempotent mutation",
+                    &idempotent_capture,
+                ),
+                SessionOperation::put_file(&upload_source, "/remote/chimera"),
+                SessionOperation::get_file("/remote/inventory.json", &download_path),
+                SessionOperation::ensure_dir("/remote/workspace"),
+                SessionOperation::cleanup_capture_exec("cleanup mutation", &cleanup_capture),
+                SessionOperation::cleanup_exec("cleanup mutation without capture"),
+            ],
+        );
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Complete);
+        assert_eq!(
+            events
+                .lock()
+                .expect("events lock should be available")
+                .as_slice(),
+            [
+                "exec:whoami",
+                "exec:hostname",
+                "get:/remote/inventory.json",
+                "disconnect"
+            ]
+        );
+        assert!(read_capture.is_file());
+        assert_eq!(
+            tokio::fs::read(&download_path)
+                .await
+                .expect("read-only download should be collected"),
+            b"{\"host\":\"lab\"}\n"
+        );
+        assert!(!mutating_capture.exists());
+        assert!(!idempotent_capture.exists());
+        assert!(!cleanup_capture.exists());
+        assert!(uploads
+            .lock()
+            .expect("uploads lock should be available")
+            .is_empty());
+        assert_eq!(ensure_dir_calls.load(Ordering::SeqCst), 0);
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn session_executor_captures_exec_and_collects_file_before_cleanup() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 14));
+        let root = temp_dir("session-artifacts");
+        let capture_path = root.join("exec").join("inventory_hostname.txt");
+        let collect_path = root.join("files").join("inventory.json");
+        let mut session_template = template(0, false);
+        let events = Arc::clone(&session_template.events);
+        session_template.exec_outputs = Arc::new(HashMap::from([(
+            "hostname".to_string(),
+            ExecResponse {
+                stdout: b"host-14\n".to_vec(),
+                stderr: Vec::new(),
+                status_code: Some(0),
+            },
+        )]));
+        session_template.downloads = Arc::new(HashMap::from([(
+            "/tmp/inventory.json".to_string(),
+            br#"{"host":"10.0.0.14"}"#.to_vec(),
+        )]));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![
+                SessionOperation::capture_exec("hostname", &capture_path),
+                SessionOperation::get_file("/tmp/inventory.json", &collect_path),
+                SessionOperation::cleanup_exec("rm -f /tmp/inventory.json"),
+            ],
+        );
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Complete);
+        assert!(tokio::fs::read_to_string(&capture_path)
+            .await
+            .expect("capture file should exist")
+            .contains("host-14"));
+        assert_eq!(
+            tokio::fs::read_to_string(&collect_path)
+                .await
+                .expect("collect file should exist"),
+            "{\"host\":\"10.0.0.14\"}"
+        );
+        assert_eq!(
+            events
+                .lock()
+                .expect("events lock should be available")
+                .as_slice(),
+            [
+                "exec:hostname",
+                "get:/tmp/inventory.json",
+                "exec:rm -f /tmp/inventory.json",
+                "disconnect"
+            ]
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn session_executor_puts_file_executes_collector_and_collects_log_artifacts() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 16));
+        let root = temp_dir("session-staged-artifacts");
+        let script_path = root.join("exec").join("collector.sh");
+        let run_capture_path = root.join("exec").join("collector_run.txt");
+        let inventory_path = root.join("files").join("inventory.txt");
+        let log_path = root.join("logs").join("application.log");
+        tokio::fs::create_dir_all(script_path.parent().expect("script parent should exist"))
+            .await
+            .expect("script dir should be created");
+        tokio::fs::write(&script_path, "#!/bin/sh\necho collector\n")
+            .await
+            .expect("script should be written");
+
+        let mut session_template = template(0, false);
+        let events = Arc::clone(&session_template.events);
+        let uploads = Arc::clone(&session_template.uploads);
+        session_template.exec_outputs = Arc::new(HashMap::from([(
+            "sh /tmp/pandoras_box_collect.sh".to_string(),
+            ExecResponse {
+                stdout: b"collector ok\n".to_vec(),
+                stderr: Vec::new(),
+                status_code: Some(0),
+            },
+        )]));
+        session_template.downloads = Arc::new(HashMap::from([
+            (
+                "/tmp/pandoras_box/inventory.txt".to_string(),
+                b"inventory payload\n".to_vec(),
+            ),
+            (
+                "/tmp/pandoras_box/application.log".to_string(),
+                b"application log payload\n".to_vec(),
+            ),
+        ]));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![
+                SessionOperation::put_file(&script_path, "/tmp/pandoras_box_collect.sh"),
+                SessionOperation::capture_exec("sh /tmp/pandoras_box_collect.sh", &run_capture_path),
+                SessionOperation::get_file("/tmp/pandoras_box/inventory.txt", &inventory_path),
+                SessionOperation::get_file("/tmp/pandoras_box/application.log", &log_path),
+                SessionOperation::cleanup_exec(
+                    "rm -f /tmp/pandoras_box_collect.sh /tmp/pandoras_box/inventory.txt /tmp/pandoras_box/application.log",
+                ),
+            ],
+        );
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Complete);
+        assert!(tokio::fs::read_to_string(&run_capture_path)
+            .await
+            .expect("run capture should exist")
+            .contains("collector ok"));
+        assert_eq!(
+            tokio::fs::read_to_string(&inventory_path)
+                .await
+                .expect("inventory file should exist"),
+            "inventory payload\n"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&log_path)
+                .await
+                .expect("log file should exist"),
+            "application log payload\n"
+        );
+        assert_eq!(
+            uploads
+                .lock()
+                .expect("uploads lock should be available")
+                .get("/tmp/pandoras_box_collect.sh")
+                .cloned(),
+            Some(b"#!/bin/sh\necho collector\n".to_vec())
+        );
+        assert_eq!(
+            events
+                .lock()
+                .expect("events lock should be available")
+                .as_slice(),
+            [
+                "put:/tmp/pandoras_box_collect.sh",
+                "exec:sh /tmp/pandoras_box_collect.sh",
+                "get:/tmp/pandoras_box/inventory.txt",
+                "get:/tmp/pandoras_box/application.log",
+                "exec:rm -f /tmp/pandoras_box_collect.sh /tmp/pandoras_box/inventory.txt /tmp/pandoras_box/application.log",
+                "disconnect"
+            ]
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn session_executor_skips_cleanup_exec_in_dry_run() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 15));
+        let session_template = template(0, false);
+        let events = Arc::clone(&session_template.events);
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy {
+                dry_run: true,
+                allow_smb_fallback: true,
+            },
+            vec![SessionOperation::cleanup_exec("rm -f /tmp/inventory.json")],
+        );
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Complete);
+        assert_eq!(
+            events
+                .lock()
+                .expect("events lock should be available")
+                .as_slice(),
+            ["disconnect"]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_executor_surfaces_cleanup_failure() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            template(0, true),
+        )]));
+        let executor = SessionExecutor::new(factory, ExecutionPolicy::default(), Vec::new());
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Failed);
+        assert!(report
+            .error
+            .as_deref()
+            .expect("error should exist")
+            .contains("cleanup failed"));
+        assert_eq!(report.failure_phase, Some(FailurePhase::Cleanup));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+    }
+
+    #[tokio::test]
+    async fn session_executor_fails_when_exec_has_no_exit_status() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 18));
+        let mut session_template = template(0, false);
+        session_template.exec_outputs = Arc::new(HashMap::from([(
+            "hostname".to_string(),
+            ExecResponse {
+                stdout: b"host-18\n".to_vec(),
+                stderr: Vec::new(),
+                status_code: None,
+            },
+        )]));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![SessionOperation::exec("hostname")],
+        );
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Failed);
+        assert!(report
+            .error
+            .as_deref()
+            .expect("error should exist")
+            .contains("missing exit status"));
+        assert_eq!(report.failure_phase, Some(FailurePhase::Execute));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+    }
+
+    #[tokio::test]
+    async fn session_executor_fails_when_capture_exec_returns_non_zero_status() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 19));
+        let root = temp_dir("session-capture-failure");
+        let capture_path = root.join("exec").join("hostname.txt");
+        let mut session_template = template(0, false);
+        session_template.exec_outputs = Arc::new(HashMap::from([(
+            "hostname".to_string(),
+            ExecResponse {
+                stdout: b"host-19\n".to_vec(),
+                stderr: b"bad status\n".to_vec(),
+                status_code: Some(23),
+            },
+        )]));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![SessionOperation::capture_exec("hostname", &capture_path)],
+        );
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Failed);
+        assert!(report
+            .error
+            .as_deref()
+            .expect("error should exist")
+            .contains("exit status 23"));
+        assert_eq!(report.failure_phase, Some(FailurePhase::Execute));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+        let capture = tokio::fs::read_to_string(&capture_path)
+            .await
+            .expect("failed capture should still be written");
+        assert!(capture.contains("status: 23"));
+        assert!(capture.contains("bad status"));
+    }
+
+    #[tokio::test]
+    async fn session_executor_rejects_relative_remote_put_paths() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 20));
+        let root = temp_dir("session-relative-put");
+        let local_path = root.join("exec").join("collector.sh");
+        tokio::fs::create_dir_all(local_path.parent().expect("local parent should exist"))
+            .await
+            .expect("local dir should exist");
+        tokio::fs::write(&local_path, "#!/bin/sh\necho hi\n")
+            .await
+            .expect("local file should exist");
+        let session_template = template(0, false);
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![SessionOperation::put_file(&local_path, "tmp/collector.sh")],
+        );
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Failed);
+        assert!(report
+            .error
+            .as_deref()
+            .expect("error should exist")
+            .contains("remote path must be absolute"));
+        assert_eq!(report.failure_phase, Some(FailurePhase::Stage));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn session_executor_rejects_relative_remote_get_paths() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 21));
+        let root = temp_dir("session-relative-get");
+        let collect_path = root.join("files").join("inventory.json");
+        let session_template = template(0, false);
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![SessionOperation::get_file(
+                "tmp/inventory.json",
+                &collect_path,
+            )],
+        );
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Failed);
+        assert!(report
+            .error
+            .as_deref()
+            .expect("error should exist")
+            .contains("remote path must be absolute"));
+        assert_eq!(report.failure_phase, Some(FailurePhase::Collect));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn session_executor_classifies_auth_connect_failures_as_terminal() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 30));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::AuthFail,
+            template(0, false),
+        )]));
+        let executor = SessionExecutor::new(factory, ExecutionPolicy::default(), Vec::new());
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Failed);
+        assert_eq!(report.failure_phase, Some(FailurePhase::Connect));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+    }
+
+    #[tokio::test]
+    async fn actual_rustrc_auth_wording_is_terminal_and_blocks_every_fallback() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 34));
+        let factory = Arc::new(FakeSessionFactory::new(vec![
+            (
+                (ip, TransportKind::SshSftp),
+                ConnectBehavior::ActualAuthWording,
+                template(0, false),
+            ),
+            (
+                (ip, TransportKind::WindowsSmb),
+                ConnectBehavior::Success,
+                template(0, false),
+            ),
+        ]));
+        let executor = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy {
+                dry_run: false,
+                allow_smb_fallback: true,
+            },
+            Vec::new(),
+        );
+
+        let report = executor
+            .run(host_plan(
+                ip,
+                vec![TransportKind::SshSftp, TransportKind::WindowsSmb],
+            ))
+            .await;
+
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+        assert_eq!(factory.attempts(), vec![(ip, TransportKind::SshSftp)]);
+        assert!(report
+            .error
+            .expect("auth error")
+            .contains("Failed to authenticate with password"));
+    }
+
+    #[tokio::test]
+    async fn credential_profile_failure_is_terminal_and_blocks_every_fallback() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 36));
+        let factory = Arc::new(FakeSessionFactory::new(vec![
+            (
+                (ip, TransportKind::SshSftp),
+                ConnectBehavior::CredentialProfileFail,
+                template(0, false),
+            ),
+            (
+                (ip, TransportKind::WindowsSmb),
+                ConnectBehavior::Success,
+                template(0, false),
+            ),
+        ]));
+        let executor = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy {
+                dry_run: false,
+                allow_smb_fallback: true,
+            },
+            Vec::new(),
+        );
+
+        let report = executor
+            .run(host_plan(
+                ip,
+                vec![TransportKind::SshSftp, TransportKind::WindowsSmb],
+            ))
+            .await;
+
+        assert_eq!(report.failure_phase, Some(FailurePhase::Credentials));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+        assert_eq!(factory.attempts(), vec![(ip, TransportKind::SshSftp)]);
+    }
+
+    #[tokio::test]
+    async fn host_identity_failure_blocks_smb_fallback() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 35));
+        let factory = Arc::new(FakeSessionFactory::new(vec![
+            (
+                (ip, TransportKind::SshSftp),
+                ConnectBehavior::HostIdentityFail,
+                template(0, false),
+            ),
+            (
+                (ip, TransportKind::WindowsSmb),
+                ConnectBehavior::Success,
+                template(0, false),
+            ),
+        ]));
+        let executor = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy {
+                dry_run: false,
+                allow_smb_fallback: true,
+            },
+            Vec::new(),
+        );
+        let report = executor
+            .run(host_plan(
+                ip,
+                vec![TransportKind::SshSftp, TransportKind::WindowsSmb],
+            ))
+            .await;
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+        assert_eq!(factory.attempts(), vec![(ip, TransportKind::SshSftp)]);
+    }
+
+    #[tokio::test]
+    async fn session_executor_classifies_transient_connect_failures_as_retryable() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 31));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::TransientFail,
+            template(0, false),
+        )]));
+        let executor = SessionExecutor::new(factory, ExecutionPolicy::default(), Vec::new());
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Failed);
+        assert_eq!(report.failure_phase, Some(FailurePhase::Connect));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Retryable)
+        );
+    }
+
+    #[tokio::test]
+    async fn command_output_is_rejected_at_the_configured_bound() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 36));
+        let mut session_template = template(0, false);
+        session_template.exec_outputs = Arc::new(HashMap::from([(
+            "noisy".to_string(),
+            ExecResponse {
+                stdout: vec![b'x'; 32],
+                stderr: Vec::new(),
+                status_code: Some(0),
+            },
+        )]));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![SessionOperation::read_only_exec("noisy")],
+        )
+        .with_bounds(
+            DeadlinePolicy::default(),
+            ResourceLimits {
+                max_command_output_bytes: 8,
+                ..ResourceLimits::default()
+            },
+            None,
+        );
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+        assert_eq!(report.final_state, HostState::Failed);
+        assert!(report.error.expect("bound error").contains("8 byte bound"));
+    }
+
+    #[tokio::test]
+    async fn command_deadline_stops_a_slow_operation() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 37));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            template(200, false),
+        )]));
+        let deadlines = DeadlinePolicy {
+            command: Duration::from_millis(20),
+            cleanup: Duration::from_millis(20),
+            ..DeadlinePolicy::default()
+        };
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![SessionOperation::ensure_dir("/tmp/bounded")],
+        )
+        .with_bounds(deadlines, ResourceLimits::default(), None);
+        let started = Instant::now();
+
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+        assert_eq!(report.final_state, HostState::Failed);
+        assert!(report.error.expect("deadline").contains("exceeded"));
+        assert!(started.elapsed() < Duration::from_millis(150));
+    }
+
+    #[tokio::test]
+    async fn download_larger_than_the_bound_is_removed_and_reported() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 38));
+        let root = temp_dir("bounded-download");
+        let destination = root.join("inventory.json");
+        let mut session_template = template(0, false);
+        session_template.downloads = Arc::new(HashMap::from([(
+            "/tmp/inventory.json".to_string(),
+            vec![b'x'; 32],
+        )]));
+        let factory = Arc::new(FakeSessionFactory::new(vec![(
+            (ip, TransportKind::SshSftp),
+            ConnectBehavior::Success,
+            session_template,
+        )]));
+        let executor = SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![SessionOperation::get_file(
+                "/tmp/inventory.json",
+                &destination,
+            )],
+        )
+        .with_bounds(
+            DeadlinePolicy::default(),
+            ResourceLimits {
+                max_download_bytes: 8,
+                ..ResourceLimits::default()
+            },
+            None,
+        );
+        let report = executor
+            .run(host_plan(ip, vec![TransportKind::SshSftp]))
+            .await;
+        assert_eq!(report.final_state, HostState::Failed);
+        assert!(!destination.exists());
+        assert!(report.error.expect("bound").contains("8 byte bound"));
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn session_executor_falls_back_after_ssh_stage_transfer_failure() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 32));
+        let root = temp_dir("post-connect-smb-fallback");
+        let payload = root.join("chimera.exe");
+        tokio::fs::create_dir_all(&root)
+            .await
+            .expect("fixture directory should exist");
+        tokio::fs::write(&payload, b"payload")
+            .await
+            .expect("payload fixture should exist");
+
+        let mut ssh_template = template(0, false);
+        let ssh_events = Arc::clone(&ssh_template.events);
+        ssh_template.put_error = Some("SFTP channel closed".to_string());
+        let smb_template = template(0, false);
+        let smb_events = Arc::clone(&smb_template.events);
+        let smb_uploads = Arc::clone(&smb_template.uploads);
+        let factory = Arc::new(FakeSessionFactory::new(vec![
+            (
+                (ip, TransportKind::SshSftp),
+                ConnectBehavior::Success,
+                ssh_template,
+            ),
+            (
+                (ip, TransportKind::WindowsSmb),
+                ConnectBehavior::Success,
+                smb_template,
+            ),
+        ]));
+        let executor = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy {
+                dry_run: false,
+                allow_smb_fallback: true,
+            },
+            vec![
+                SessionOperation::ensure_dir(r"C:\Temp\pandoras-box"),
+                SessionOperation::put_file(&payload, r"C:\Temp\pandoras-box\chimera.exe"),
+            ],
+        );
+
+        let report = executor
+            .run(host_plan(
+                ip,
+                vec![TransportKind::SshSftp, TransportKind::WindowsSmb],
+            ))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Complete);
+        assert_eq!(report.selected_transport, Some(TransportKind::WindowsSmb));
+        assert_eq!(report.failure_disposition, None);
+        assert_eq!(
+            factory.attempts(),
+            vec![
+                (ip, TransportKind::SshSftp),
+                (ip, TransportKind::WindowsSmb)
+            ]
+        );
+        assert_eq!(
+            ssh_events
+                .lock()
+                .expect("SSH events lock should be available")
+                .as_slice(),
+            [
+                r"ensure_dir:C:\Temp\pandoras-box",
+                r"put:C:\Temp\pandoras-box\chimera.exe",
+                "disconnect"
+            ]
+        );
+        assert_eq!(
+            smb_events
+                .lock()
+                .expect("SMB events lock should be available")
+                .as_slice(),
+            [
+                r"ensure_dir:C:\Temp\pandoras-box",
+                r"put:C:\Temp\pandoras-box\chimera.exe",
+                "disconnect"
+            ]
+        );
+        assert_eq!(
+            smb_uploads
+                .lock()
+                .expect("SMB uploads lock should be available")
+                .get(r"C:\Temp\pandoras-box\chimera.exe")
+                .cloned(),
+            Some(b"payload".to_vec())
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn session_executor_never_falls_back_non_idempotent_exec() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 33));
+        let mut ssh_template = template(0, false);
+        let ssh_events = Arc::clone(&ssh_template.events);
+        ssh_template.exec_errors = Arc::new(HashMap::from([(
+            "apply-once".to_string(),
+            "connection reset after command dispatch".to_string(),
+        )]));
+        let factory = Arc::new(FakeSessionFactory::new(vec![
+            (
+                (ip, TransportKind::SshSftp),
+                ConnectBehavior::Success,
+                ssh_template,
+            ),
+            (
+                (ip, TransportKind::WindowsSmb),
+                ConnectBehavior::Success,
+                template(0, false),
+            ),
+        ]));
+        let executor = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy::default(),
+            vec![SessionOperation::exec("apply-once")],
+        );
+
+        let report = executor
+            .run(host_plan(
+                ip,
+                vec![TransportKind::SshSftp, TransportKind::WindowsSmb],
+            ))
+            .await;
+
+        assert_eq!(report.final_state, HostState::Failed);
+        assert_eq!(report.selected_transport, Some(TransportKind::SshSftp));
+        assert_eq!(
+            report.failure_disposition,
+            Some(FailureDisposition::Terminal)
+        );
+        assert_eq!(factory.attempts(), vec![(ip, TransportKind::SshSftp)]);
+        assert_eq!(
+            ssh_events
+                .lock()
+                .expect("SSH events lock should be available")
+                .as_slice(),
+            ["exec:apply-once", "disconnect"]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_executor_never_falls_back_after_authentication_failure() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10));
+        let smb_template = template(0, false);
+        let factory = Arc::new(FakeSessionFactory::new(vec![
+            (
+                (ip, TransportKind::SshSftp),
+                ConnectBehavior::AuthFail,
+                template(0, false),
+            ),
+            (
+                (ip, TransportKind::WindowsSmb),
+                ConnectBehavior::Success,
+                smb_template,
+            ),
+        ]));
+
+        let denied = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy {
+                dry_run: false,
+                allow_smb_fallback: false,
+            },
+            Vec::new(),
+        );
+        let allowed = SessionExecutor::new(
+            Arc::clone(&factory),
+            ExecutionPolicy {
+                dry_run: false,
+                allow_smb_fallback: true,
+            },
+            Vec::new(),
+        );
+        let plan = host_plan(ip, vec![TransportKind::SshSftp, TransportKind::WindowsSmb]);
+
+        let denied_report = denied.run(plan.clone()).await;
+        let allowed_report = allowed.run(plan).await;
+
+        assert_eq!(denied_report.final_state, HostState::Failed);
+        assert_eq!(allowed_report.final_state, HostState::Failed);
+        assert_eq!(
+            factory.attempts(),
+            vec![(ip, TransportKind::SshSftp), (ip, TransportKind::SshSftp)]
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_with_session_executor_keeps_other_hosts_moving() {
+        let slow_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 11));
+        let failed_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 12));
+        let fast_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 13));
+
+        let factory = Arc::new(FakeSessionFactory::new(vec![
+            (
+                (slow_ip, TransportKind::SshSftp),
+                ConnectBehavior::Success,
+                template(200, false),
+            ),
+            (
+                (failed_ip, TransportKind::SshSftp),
+                ConnectBehavior::AuthFail,
+                template(0, false),
+            ),
+            (
+                (fast_ip, TransportKind::SshSftp),
+                ConnectBehavior::Success,
+                template(10, false),
+            ),
+        ]));
+        let executor = Arc::new(SessionExecutor::new(
+            factory,
+            ExecutionPolicy::default(),
+            vec![SessionOperation::ensure_dir("/tmp/pandoras-box")],
+        ));
+        let scheduler = Scheduler::new(3);
+        let start = Instant::now();
+
+        let reports = scheduler
+            .execute(
+                vec![
+                    host_plan(slow_ip, vec![TransportKind::SshSftp]),
+                    host_plan(failed_ip, vec![TransportKind::SshSftp]),
+                    host_plan(fast_ip, vec![TransportKind::SshSftp]),
+                ],
+                executor,
+            )
+            .await;
+
+        assert_eq!(reports.len(), 3);
+        assert_eq!(
+            reports
+                .iter()
+                .filter(|report| report.final_state == HostState::Complete)
+                .count(),
+            2
+        );
+        assert_eq!(
+            reports
+                .iter()
+                .filter(|report| report.final_state == HostState::Failed)
+                .count(),
+            1
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(280),
+            "expected host-local concurrency, took {:?}",
+            start.elapsed()
+        );
+    }
+}

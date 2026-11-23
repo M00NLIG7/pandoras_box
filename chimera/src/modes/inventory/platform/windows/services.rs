@@ -1,63 +1,55 @@
-use std::sync::Arc;
-use futures::future::join_all;
-use crate::utils::CommandExecutor;
-use crate::types::{Service, ServiceStatus, ServiceStartType};
 use crate::error::{Error, Result};
+use crate::types::{Service, ServiceStartType, ServiceStatus};
 use std::collections::HashMap;
 use wmi::{COMLibrary, Variant, WMIConnection};
 
-pub async fn services() -> Vec<Service> {
-    let com_lib = match COMLibrary::new() {
-        Ok(lib) => lib,
-        _ => return Vec::new(), // or handle the error as appropriate
-    };
-
-    let wmi_con = match WMIConnection::new(com_lib) {
-        Ok(con) => con,
-        _ => return Vec::new(), // or handle the error as appropriate
-    };
+pub async fn services() -> Result<Vec<Service>> {
+    let com_lib = COMLibrary::new()
+        .map_err(|error| Error::Execution(format!("failed to initialize COM: {error}")))?;
+    let wmi_con = WMIConnection::new(com_lib)
+        .map_err(|error| Error::Execution(format!("failed to connect to WMI: {error}")))?;
 
     // Only collect critical/commonly vulnerable services
     // Focuses on services relevant for security auditing and attack vectors
     let critical_services = vec![
-        "NTDS",                 // Active Directory Domain Services
-        "DNS",                  // DNS Server
-        "KDC",                  // Kerberos Key Distribution Center
-        "Netlogon",             // Net Logon
-        "W32Time",              // Windows Time (critical for Kerberos)
-        "LanmanServer",         // Server (SMB/CIFS) - commonly exploited
-        "LanmanWorkstation",    // Workstation (SMB client)
-        "RpcSs",                // RPC Endpoint Mapper - attack vector
-        "RpcLocator",           // RPC Locator
-        "Dhcp",                 // DHCP Server
-        "DHCPServer",           // DHCP Server (alt name)
-        "Spooler",              // Print Spooler - CVE-2021-1675 PrintNightmare
-        "RemoteRegistry",       // Remote Registry - often exploited
-        "WinRM",                // Windows Remote Management
-        "TermService",          // Remote Desktop Services
-        "MSSQLSERVER",          // SQL Server
-        "SQLAgent$*",           // SQL Server Agent
-        "W3SVC",                // IIS Web Server
-        "IISADMIN",             // IIS Admin Service
-        "FTPSvc",               // FTP Server
-        "Telnet",               // Telnet (should be disabled!)
-        "SNMP",                 // SNMP Service - weak auth
-        "WMPNetworkSvc",        // Windows Media Player Network Sharing
-        "EventLog",             // Event Log (for monitoring)
-        "ADWS",                 // Active Directory Web Services
+        "NTDS",              // Active Directory Domain Services
+        "DNS",               // DNS Server
+        "KDC",               // Kerberos Key Distribution Center
+        "Netlogon",          // Net Logon
+        "W32Time",           // Windows Time (critical for Kerberos)
+        "LanmanServer",      // Server (SMB/CIFS) - commonly exploited
+        "LanmanWorkstation", // Workstation (SMB client)
+        "RpcSs",             // RPC Endpoint Mapper - attack vector
+        "RpcLocator",        // RPC Locator
+        "Dhcp",              // DHCP Server
+        "DHCPServer",        // DHCP Server (alt name)
+        "Spooler",           // Print Spooler - CVE-2021-1675 PrintNightmare
+        "RemoteRegistry",    // Remote Registry - often exploited
+        "WinRM",             // Windows Remote Management
+        "TermService",       // Remote Desktop Services
+        "MSSQLSERVER",       // SQL Server
+        "SQLAgent$*",        // SQL Server Agent
+        "W3SVC",             // IIS Web Server
+        "IISADMIN",          // IIS Admin Service
+        "FTPSvc",            // FTP Server
+        "Telnet",            // Telnet (should be disabled!)
+        "SNMP",              // SNMP Service - weak auth
+        "WMPNetworkSvc",     // Windows Media Player Network Sharing
+        "EventLog",          // Event Log (for monitoring)
+        "ADWS",              // Active Directory Web Services
     ];
 
-    let service_filter = critical_services.iter()
+    let service_filter = critical_services
+        .iter()
         .map(|s| format!("Name='{}'", s))
         .collect::<Vec<_>>()
         .join(" OR ");
 
     let query = format!("SELECT * FROM Win32_Service WHERE {}", service_filter);
 
-    let results: Vec<HashMap<String, Variant>> = match wmi_con.raw_query(&query) {
-        Ok(results) => results,
-        Err(_) => return Vec::new(),
-    };
+    let results: Vec<HashMap<String, Variant>> = wmi_con
+        .raw_query(&query)
+        .map_err(|error| Error::Execution(format!("service WMI query failed: {error}")))?;
     let mut services = Vec::new();
     for os in results {
         // Skip services with missing required fields instead of panicking
@@ -105,6 +97,5 @@ pub async fn services() -> Vec<Service> {
         });
     }
 
-    services
+    Ok(services)
 }
-

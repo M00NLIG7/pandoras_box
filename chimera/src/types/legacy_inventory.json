@@ -1,0 +1,12 @@
+{
+  "hostname":"example-node", "ip":"192.0.2.41", "os":"Example OS", "cores":3,
+  "cpu":"Example CPU", "memory":3073,
+  "disks":[{"name":"disk-a","mountPoint":"/sample","filesystem":"ext4","totalSpace":8193,"availableSpace":1025}],
+  "networkAdapters":"test-adapter",
+  "ports":[{"port":1234,"protocol":"tcp","version":"v4","state":"listen","process":{"pid":42,"name":"sample"}}],
+  "connections":[{"localAddress":"192.0.2.41:1234","remoteAddress":"192.0.2.42:5432","state":"established","protocol":"tcp","process":{"pid":43,"name":"peer"}}],
+  "services":[{"name":"sample-service","state":"running","startMode":"enabled","status":"active"}],
+  "users":[{"name":"sample-user","uid":"42","gid":"43","isAdmin":true,"groups":["sample-group"],"isLocal":true,"shell":"/bin/sh"}],
+  "shares":[{"shareType":"nFS","networkPath":"/example/shared"},{"shareType":"sMB","networkPath":"//example/shared"}],
+  "containers":[{"containerId":"example-id","image":"sample-image","name":"example-container","networks":[{"networkName":"sample-net","ip":"192.0.2.43","gateway":"192.0.2.1","macAddress":"02:00:00:00:00:43"}],"portBindings":["1234/tcp"],"volumes":[{"hostPath":"/sample","containerPath":"/data","mode":"ro","volumeName":"example","rw":false,"vType":"bind"}],"status":"running","cmd":"sample"}]
+}

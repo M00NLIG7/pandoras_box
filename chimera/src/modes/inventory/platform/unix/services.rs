@@ -1,10 +1,8 @@
 use crate::error::{Error, Result};
 use crate::types::{Service, ServiceStartType, ServiceStatus};
 use crate::utils::CommandExecutor;
-use futures::future::join_all;
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::OnceCell;
@@ -75,7 +73,13 @@ macro_rules! define_init_system {
 define_init_system!(
     SystemdInit,
     "systemctl",
-    vec!["list-units", "--type=service", "--no-pager"]
+    vec![
+        "list-units",
+        "--type=service",
+        "--no-pager",
+        "--no-legend",
+        "--plain"
+    ]
 );
 define_init_system!(OpenrcInit, "rc-status", vec!["-s"]);
 define_init_system!(RunitInit, "sv", vec!["status", "/service/*"]);
@@ -83,69 +87,27 @@ define_init_system!(S6Init, "s6-rc", vec!["-a", "list"]);
 
 impl SystemdInit {
     async fn parse_services_output(&self, output: &str) -> Result<Vec<Service>> {
-        let service_futures: Vec<_> = output
+        Ok(output
             .lines()
             .filter(|line| line.contains(".service"))
-            .map(|line| async {
+            .filter_map(|line| {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() < 3 {
-                    return Err(Error::Execution("Invalid service line format".into()));
-                }
-
-                let name = parts[0].to_string();
-                let state = parts[2].to_string();
-                let start_mode = self.get_service_start_type(&name).await.ok().flatten();
-                let status = self.get_service_status(&name).await.ok();
-
-                Ok(Service {
-                    name,
-                    state,
-                    start_mode,
-                    status,
+                let name = parts.first()?;
+                let active_state = *parts.get(2)?;
+                let status = match active_state {
+                    "active" => ServiceStatus::Active,
+                    "inactive" => ServiceStatus::Inactive,
+                    "failed" => ServiceStatus::Failed,
+                    _ => ServiceStatus::Unknown,
+                };
+                Some(Service {
+                    name: (*name).to_string(),
+                    state: active_state.to_string(),
+                    start_mode: None,
+                    status: Some(status),
                 })
             })
-            .collect();
-
-        let results = join_all(service_futures).await;
-        Ok(results.into_iter().filter_map(Result::ok).collect())
-    }
-
-    async fn get_service_status(&self, name: &str) -> Result<ServiceStatus> {
-        let output = CommandExecutor::execute_command(
-            Self::binary(),
-            Some(&["show", name, "--property=ActiveState"]),
-            None,
-        )
-        .await
-        .map_err(|e| Error::Execution(e.to_string()))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let status_str = stdout
-            .split('=')
-            .nth(1)
-            .ok_or_else(|| Error::Execution("Invalid status format".into()))?
-            .trim();
-
-        Ok(match status_str {
-            "active" => ServiceStatus::Active,
-            "inactive" => ServiceStatus::Inactive,
-            "failed" => ServiceStatus::Failed,
-            _ => ServiceStatus::Unknown,
-        })
-    }
-
-    async fn get_service_start_type(&self, name: &str) -> Result<Option<ServiceStartType>> {
-        let output =
-            CommandExecutor::execute_command(Self::binary(), Some(&["is-enabled", name]), None)
-                .await
-                .map_err(|e| Error::Execution(e.to_string()))?;
-
-        let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(match status.as_str() {
-            "enabled" => Some(ServiceStartType::Enabled),
-            "disabled" => Some(ServiceStartType::Disabled),
-            _ => None,
-        })
+            .collect())
     }
 }
 
@@ -169,29 +131,6 @@ impl OpenrcInit {
                 })
             })
             .collect())
-    }
-
-    async fn get_service_status(&self, name: &str) -> Result<ServiceStatus> {
-        let output =
-            CommandExecutor::execute_command(Self::binary(), Some(&[name, "status"]), None)
-                .await
-                .map_err(|e| Error::Execution(e.to_string()))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(match stdout.trim() {
-            s if s.contains("started") => ServiceStatus::Active,
-            s if s.contains("stopped") => ServiceStatus::Inactive,
-            _ => ServiceStatus::Unknown,
-        })
-    }
-
-    async fn get_service_start_type(&self, name: &str) -> Result<Option<ServiceStartType>> {
-        let enabled_path = Path::new("/etc/runlevels/default").join(name);
-        Ok(if enabled_path.exists() {
-            Some(ServiceStartType::Enabled)
-        } else {
-            Some(ServiceStartType::Disabled)
-        })
     }
 }
 
@@ -424,27 +363,25 @@ pub async fn detect_init_system() -> InitSystem {
     }
 }
 
-pub async fn services() -> Vec<Service> {
-    let init_system = detect_init_system().await;
-    init_system.list_services().await.unwrap_or_default()
+pub async fn services() -> Result<Vec<Service>> {
+    detect_init_system().await.list_services().await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncBufReadExt;
-    use tokio::io::AsyncReadExt;
 
-    use std::time::Duration;
+    #[tokio::test]
+    async fn parses_systemd_service_fixture() {
+        let fixture = "sshd.service loaded active running OpenSSH daemon\nfailed.service loaded failed failed Broken service\ninvalid\n";
+        let services = SystemdInit
+            .parse_services_output(fixture)
+            .await
+            .expect("fixture should parse");
 
-    // Integration Tests with Containers
-    // Integration Tests with Containers
-    mod container_tests {
-        use super::services;
-
-        #[tokio::test]
-        async fn test_services() {
-            println!("{:?}", services().await)
-        }
+        assert_eq!(services.len(), 2);
+        assert_eq!(services[0].name, "sshd.service");
+        assert_eq!(services[0].status, Some(ServiceStatus::Active));
+        assert_eq!(services[1].status, Some(ServiceStatus::Failed));
     }
 }

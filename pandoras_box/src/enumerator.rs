@@ -1,3 +1,4 @@
+use crate::ttl::{classify_ttl, NativeTtlProber, SharedTtlProber, TtlSignature};
 use crate::Host;
 use crate::Result;
 use crate::OS;
@@ -5,14 +6,13 @@ use futures::future::join_all;
 use log::warn;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::{Deref, DerefMut};
-use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 
 const TIMEOUT_DURATION: Duration = Duration::from_secs(1);
-const TCP_PORTS: [u16; 2] = [139, 22];
+const TCP_PORTS: [u16; 4] = [22, 135, 139, 445];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ipv4AddrExt(Ipv4Addr);
@@ -69,25 +69,15 @@ impl FromStr for Ipv4AddrExt {
     }
 }
 
-impl From<String> for Subnet {
-    fn from(value: String) -> Self {
-        Subnet::try_from(value.as_str()).unwrap_or_default()
-    }
-}
-
-impl From<&String> for Subnet {
-    fn from(value: &String) -> Self {
-        Subnet::try_from(value.as_str()).unwrap_or_default()
-    }
-}
-
 impl std::fmt::Display for Subnet {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}/{}", self.ip, self.mask)
     }
 }
 
-#[derive(Debug, Default)]
+pub const DEFAULT_MAX_TARGETS: usize = 65_536;
+
+#[derive(Debug, Default, Clone, Copy)]
 pub struct Subnet {
     ip: Ipv4AddrExt,
     mask: u8,
@@ -98,19 +88,49 @@ impl Subnet {
         Self { ip, mask }
     }
 
-    fn iter_hosts(&self) -> Box<dyn Iterator<Item = Ipv4AddrExt> + '_> {
-        // Prevent overflow: when mask = 0, shift would be 32 which is undefined behavior
-        // For /0, iterate entire IPv4 space (impractical, but safe)
-        if self.mask == 0 {
-            warn!("Subnet mask /0 covers entire IPv4 space (4.3 billion addresses), limiting iteration");
-            // Return empty iterator for /0 to prevent DoS
-            return Box::new((0..0).map(|ip| Ipv4AddrExt(Ipv4Addr::from(ip))));
+    #[must_use]
+    pub fn host_count(&self) -> u64 {
+        let (first, end_exclusive) = self.host_bounds();
+        end_exclusive - first
+    }
+
+    pub fn hosts_bounded(&self, max_targets: usize) -> Result<Vec<IpAddr>> {
+        if max_targets == 0 {
+            return Err(crate::Error::ArgumentError(
+                "max_targets must be greater than zero".to_string(),
+            ));
         }
 
-        let shift_amount = 32 - self.mask;
-        let start = u32::from(*self.ip) & !((1u32 << shift_amount) - 1);
-        let end = start | ((1u32 << shift_amount) - 1);
-        Box::new((start + 1..end).map(|ip| Ipv4AddrExt(Ipv4Addr::from(ip))))
+        let host_count = self.host_count();
+        if host_count > max_targets as u64 {
+            return Err(crate::Error::ArgumentError(format!(
+                "subnet {self} contains {host_count} usable targets, exceeding the configured limit of {max_targets}"
+            )));
+        }
+
+        Ok(self.iter_hosts().map(IpAddr::from).collect())
+    }
+
+    fn host_bounds(&self) -> (u64, u64) {
+        let host_bits = 32 - u32::from(self.mask);
+        let address_count = 1u64 << host_bits;
+        let network_mask = if self.mask == 0 {
+            0
+        } else {
+            u32::MAX << host_bits
+        };
+        let network = u64::from(u32::from(*self.ip) & network_mask);
+
+        if self.mask >= 31 {
+            (network, network + address_count)
+        } else {
+            (network + 1, network + address_count - 1)
+        }
+    }
+
+    fn iter_hosts(&self) -> Box<dyn Iterator<Item = Ipv4AddrExt> + '_> {
+        let (first, end_exclusive) = self.host_bounds();
+        Box::new((first..end_exclusive).map(|ip| Ipv4AddrExt(Ipv4Addr::from(ip as u32))))
     }
 }
 
@@ -124,7 +144,8 @@ impl TryFrom<&str> for Subnet {
         }
 
         let ip: Ipv4AddrExt = parts[0].parse()?;
-        let mask: u8 = parts[1].parse()
+        let mask: u8 = parts[1]
+            .parse()
             .map_err(|_| Self::Error::ArgumentError(format!("Invalid CIDR mask: {}", parts[1])))?;
 
         // Validate mask is in valid range for IPv4 (0-32)
@@ -141,20 +162,33 @@ impl TryFrom<&str> for Subnet {
 
 pub struct Enumerator {
     subnet: Subnet,
+    ttl_probe: SharedTtlProber,
 }
 
 impl Enumerator {
     pub fn new(subnet: Subnet) -> Self {
-        Enumerator { subnet }
+        Self::with_ttl_probe(subnet, Arc::new(NativeTtlProber::default()))
+    }
+
+    pub fn with_ttl_probe(subnet: Subnet, ttl_probe: SharedTtlProber) -> Self {
+        Enumerator { subnet, ttl_probe }
     }
 
     pub async fn sweep(&self) -> Result<Vec<Arc<Host>>> {
+        if self.subnet.host_count() > DEFAULT_MAX_TARGETS as u64 {
+            return Err(crate::Error::ArgumentError(format!(
+                "subnet {} contains {} usable targets, exceeding the enumerator limit of {}",
+                self.subnet,
+                self.subnet.host_count(),
+                DEFAULT_MAX_TARGETS
+            )));
+        }
+
         // First, perform TCP checks
         let tcp_handles: Vec<_> = self
             .subnet
             .iter_hosts()
             .map(|ip| tokio::spawn(async move { Self::tcp_check(ip).await }))
-
             .collect();
 
         let tcp_results: Vec<(Ipv4AddrExt, Vec<u16>)> = join_all(tcp_handles)
@@ -167,7 +201,8 @@ impl Enumerator {
         let icmp_handles: Vec<_> = tcp_results
             .into_iter()
             .map(|(ip, open_ports)| {
-                tokio::spawn(async move { Self::icmp_ping(ip, open_ports).await })
+                let ttl_probe = Arc::clone(&self.ttl_probe);
+                tokio::spawn(async move { Self::resolve_host(ip, open_ports, ttl_probe).await })
             })
             .collect();
 
@@ -196,77 +231,149 @@ impl Enumerator {
 
     async fn tcp_connect(ip: Ipv4AddrExt, port: u16) -> bool {
         let addr = SocketAddr::new(IpAddr::V4(*ip), port);
-        match timeout(TIMEOUT_DURATION, TcpStream::connect(&addr)).await {
-            Ok(Ok(_)) => true,
-            _ => false,
-        }
+        matches!(
+            timeout(TIMEOUT_DURATION, TcpStream::connect(&addr)).await,
+            Ok(Ok(_))
+        )
     }
 
-    async fn icmp_ping(ip: Ipv4AddrExt, open_ports: Vec<u16>) -> Option<Host> {
-        let output = if cfg!(target_os = "windows") {
-            match Command::new("ping")
-                .arg("-n 1")
-                .arg(ip.to_string())
-                .output()
-            {
-                Ok(output) => output,
-                Err(e) => {
-                    warn!("Failed to run ping command for {}: {}", ip, e);
-                    return None;
-                }
-            }
-        } else {
-            match Command::new("ping")
-                .arg("-c 1")
-                .arg("-W 1")
-                .arg(ip.to_string())
-                .output()
-            {
-                Ok(output) => output,
-                Err(e) => {
-                    warn!("Failed to run ping command for {}: {}", ip, e);
-                    return None;
-                }
-            }
-        };
-
-        if output.status.success() {
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            let ttl_value = if cfg!(target_os = "windows") {
-                // On Windows, `TTL=` is uppercase
-                output_str.split("TTL=").nth(1)
-            } else {
-                // On Linux, `ttl=` is lowercase
-                output_str.split("ttl=").nth(1)
-            };
-
-            if let Some(ttl_str) = ttl_value {
-                let ttl: u8 = ttl_str
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("0")
-                    .parse()
-                    .unwrap_or(0);
-                return Some(Host {
-                    ip: ip.to_string(),
-                    os: Self::determine_os(ttl),
-                    open_ports,
-                });
-            }
+    async fn resolve_host(
+        ip: Ipv4AddrExt,
+        open_ports: Vec<u16>,
+        ttl_probe: SharedTtlProber,
+    ) -> Option<Host> {
+        let ttl = ttl_probe.probe_ttl(IpAddr::V4(*ip)).await;
+        if ttl.is_none() {
+            warn!(
+                "TTL probe unavailable for {}, falling back to port fingerprinting",
+                ip
+            );
         }
 
         Some(Host {
             ip: ip.to_string(),
-            os: OS::Unknown,
+            os: Self::infer_os(&open_ports, ttl),
             open_ports,
         })
     }
 
-    fn determine_os(ttl: u8) -> OS {
-        match ttl {
-            55..=64 => OS::Unix,
-            110..=128 => OS::Windows,
-            _ => OS::Unknown,
+    fn infer_os(open_ports: &[u16], ttl: Option<u8>) -> OS {
+        match ttl.map(classify_ttl).unwrap_or(TtlSignature::Unknown) {
+            TtlSignature::Unix => OS::Unix,
+            TtlSignature::Windows => OS::Windows,
+            TtlSignature::Unknown => {
+                let has_windows_ports = open_ports.contains(&135)
+                    || open_ports.contains(&139)
+                    || open_ports.contains(&445);
+
+                if has_windows_ports {
+                    OS::Windows
+                } else if open_ports.contains(&22) {
+                    OS::Unix
+                } else {
+                    OS::Unknown
+                }
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Enumerator, Subnet, DEFAULT_MAX_TARGETS};
+    use crate::ttl::TtlProber;
+    use crate::OS;
+    use async_trait::async_trait;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+
+    struct FakeTtlProber {
+        ttl: Option<u8>,
+    }
+
+    #[async_trait]
+    impl TtlProber for FakeTtlProber {
+        async fn probe_ttl(&self, _ip: IpAddr) -> Option<u8> {
+            self.ttl
+        }
+    }
+
+    #[test]
+    fn infer_os_prefers_ttl_for_samba_hosts() {
+        assert_eq!(Enumerator::infer_os(&[22, 445], Some(64)), OS::Unix);
+    }
+
+    #[test]
+    fn infer_os_detects_windows_from_ttl_over_ssh_only() {
+        assert_eq!(Enumerator::infer_os(&[22], Some(128)), OS::Windows);
+    }
+
+    #[test]
+    fn infer_os_falls_back_to_ports_when_ttl_is_missing() {
+        assert_eq!(Enumerator::infer_os(&[135, 445], None), OS::Windows);
+        assert_eq!(Enumerator::infer_os(&[22], None), OS::Unix);
+    }
+
+    #[test]
+    fn subnet_hosts_returns_ip_list() {
+        let subnet = Subnet::new(Ipv4Addr::new(10, 0, 0, 0).into(), 30);
+        let hosts = subnet
+            .hosts_bounded(DEFAULT_MAX_TARGETS)
+            .expect("small subnet should fit the target bound");
+
+        assert_eq!(hosts.len(), 2);
+        assert!(hosts.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(hosts.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+    }
+
+    #[test]
+    fn cidr_32_enumerates_the_requested_address() {
+        let subnet = Subnet::try_from("192.0.2.10/32").expect("/32 should parse");
+
+        assert_eq!(subnet.host_count(), 1);
+        assert_eq!(
+            subnet.hosts_bounded(1).expect("one host should fit"),
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]
+        );
+    }
+
+    #[test]
+    fn cidr_31_enumerates_both_point_to_point_addresses() {
+        let subnet = Subnet::try_from("192.0.2.10/31").expect("/31 should parse");
+
+        assert_eq!(subnet.host_count(), 2);
+        assert_eq!(
+            subnet.hosts_bounded(2).expect("two hosts should fit"),
+            vec![
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+            ]
+        );
+    }
+
+    #[test]
+    fn oversized_cidr_is_rejected_before_materialization() {
+        let subnet = Subnet::try_from("0.0.0.0/0").expect("/0 should parse");
+
+        assert_eq!(subnet.host_count(), 4_294_967_294);
+        let error = subnet
+            .hosts_bounded(DEFAULT_MAX_TARGETS)
+            .expect_err("/0 must exceed the bounded target count");
+        assert!(error.to_string().contains("exceeding the configured limit"));
+    }
+
+    #[tokio::test]
+    async fn resolve_host_uses_injected_ttl_probe() {
+        let host = Enumerator::resolve_host(
+            Ipv4Addr::new(10, 0, 0, 8).into(),
+            vec![22, 445],
+            Arc::new(FakeTtlProber { ttl: Some(64) }),
+        )
+        .await
+        .expect("host should resolve");
+
+        assert_eq!(host.ip, "10.0.0.8");
+        assert_eq!(host.os, OS::Unix);
+        assert_eq!(host.open_ports, vec![22, 445]);
     }
 }

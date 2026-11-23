@@ -1,135 +1,71 @@
 //! Types and structures for CCDC automation system
-//! 
+//!
 //! This module contains the core types used for system automation
 //! across both Windows and Linux systems.
 
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use log::{error, info};
-
-
-
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::PermissionsExt;
-
+use serde::{Deserialize, Serialize};
 
 /// Represents the different execution modes available for system
 /// automation and configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExecutionMode {
-   /// Initial remote access configuration
-   /// 
-   /// # Tasks
-   /// * Verify network connectivity
-   /// * Establish remote connections (RDP/SSH)
-   /// * Validate administrative access
-   Remote,
+    /// System inventory and asset discovery
+    ///
+    /// # Tasks
+    /// * List installed software/packages
+    /// * Enumerate users and groups
+    /// * Identify running services
+    /// * Map network connections
+    Inventory,
 
-   /// Credential and account security management
-   /// 
-   /// # Tasks
-   /// * Change default passwords
-   /// * Create backup administrative accounts
-   /// * Disable unnecessary accounts
-   Credentials,
-
-   /// System inventory and asset discovery
-   /// 
-   /// # Tasks
-   /// * List installed software/packages
-   /// * Enumerate users and groups
-   /// * Identify running services
-   /// * Map network connections
-   Inventory,
-
-   /// System update and patch management
-   /// 
-   /// # Tasks
-   /// * Configure update sources
-   /// * Install pending updates
-   /// * Validate system patch level
-   Update,
-
-   /// OS-specific configurations
-   /// 
-   /// # Windows Tasks
-   /// * Disable SMBv1
-   /// * Mitigate Zerologon vulnerability
-   /// * Implement Kerberoasting protections
-   /// * Harden LSA against Mimikatz
-   /// * Enable Windows Defender
-   ///
-   /// # Linux Tasks
-   /// * Install and configure rsyslog
-   /// * Set up Auditd logging
-   /// * Configure fail2ban
-   Baseline,
-
-   /// Serve inventory and log
-   Serve,
+    /// Collect runtime artifacts for Pandora integration
+    Collector,
 }
 
 /// Result of an execution operation
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExecutionResult {
-   /// Whether the operation completed successfully
-   pub success: bool,
-   /// The mode that was executed
-   pub mode: ExecutionMode,
-   /// Detailed message about the operation result
-   pub message: String,
-   /// Timestamp when the operation completed
-   #[serde(with = "chrono::serde::ts_seconds")]
-   pub timestamp: DateTime<Utc>,
+    /// Whether the operation completed successfully
+    pub success: bool,
+    /// The mode that was executed
+    pub mode: ExecutionMode,
+    /// Detailed message about the operation result
+    pub message: String,
+    /// Timestamp when the operation completed
+    #[serde(with = "chrono::serde::ts_seconds")]
+    pub timestamp: DateTime<Utc>,
 }
 
 impl ExecutionResult {
-   pub fn new(mode: ExecutionMode, success: bool, message: String) -> Self {
-       let result = Self {
-           success,
-           mode: mode.clone(),
-           message: message.clone(),
-           timestamp: Utc::now(),
-       };
+    pub fn new(mode: ExecutionMode, success: bool, message: String) -> Self {
+        let result = Self {
+            success,
+            mode: mode.clone(),
+            message: message.clone(),
+            timestamp: Utc::now(),
+        };
 
-       // Log based on success/failure
-       if success {
-           info!("[{}] {}", mode.as_str(), message);
-       } else {
-           error!("[{}] {}", mode.as_str(), message);
-       }
+        // Log based on success/failure
+        if success {
+            info!("[{}] {}", mode.as_str(), message);
+        } else {
+            error!("[{}] {}", mode.as_str(), message);
+        }
 
-       result
-   }
+        result
+    }
 }
 
 impl ExecutionMode {
-   /// Gets a description of what the mode does
-   /// 
-   /// # Returns
-   /// A static string describing the mode's purpose
-   pub fn description(&self) -> &'static str {
-       match self {
-           ExecutionMode::Remote => "Establishes initial system access and remote connections",
-           ExecutionMode::Credentials => "Manages system credentials and account security",
-           ExecutionMode::Inventory => "Performs system inventory and asset discovery",
-           ExecutionMode::Update => "Handles system updates and patch management",
-           ExecutionMode::Baseline => "Implements OS-specific security configurations",
-           ExecutionMode::Serve => "Serves inventory and log",
-       }
-   }
-
-   /// Gets a short string representation of the mode
-   pub fn as_str(&self) -> &'static str {
-       match self {
-           ExecutionMode::Remote => "REMOTE",
-           ExecutionMode::Credentials => "CREDS",
-           ExecutionMode::Inventory => "INVEN",
-           ExecutionMode::Update => "UPDATE",
-           ExecutionMode::Baseline => "BASELINE",
-           ExecutionMode::Serve => "SERVE",
-       }
-   }
+    /// Gets a short string representation of the mode
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExecutionMode::Inventory => "INVEN",
+            ExecutionMode::Collector => "COLLECT",
+        }
+    }
 }
 
 /// Represents the operational status of a system service.
@@ -192,9 +128,9 @@ pub struct Disk {
     pub(crate) mount_point: String,
     /// Type of filesystem (e.g., ext4, ntfs)
     pub(crate) filesystem: String,
-    /// Total disk capacity in bytes
+    /// Total disk capacity in whole MiB
     pub(crate) total_space: u64,
-    /// Currently available space in bytes
+    /// Currently available space in whole MiB
     pub(crate) available_space: u64,
 }
 
@@ -295,17 +231,6 @@ pub enum ConnectionState {
     Unknown,
 }
 
-impl ConnectionState {
-    /// Checks if the connection is in a closed state.
-    ///
-    /// # Returns
-    /// * `true` if the connection state is `Closed`
-    /// * `false` for all other states
-    pub fn is_closed(&self) -> bool {
-        matches!(self, ConnectionState::Close)
-    }
-}
-
 /// Information about a system process.
 ///
 /// Contains the process identifier and name for tracking
@@ -397,9 +322,11 @@ pub struct OpenPort {
 #[serde(rename_all = "camelCase")]
 pub enum ShareType {
     /// Network File System
-    NFS,
+    #[serde(rename = "NFS", alias = "nFS")]
+    Nfs,
     /// Server Message Block
-    SMB,
+    #[serde(rename = "SMB", alias = "sMB")]
+    Smb,
 }
 
 /// Configuration for a network file share.
@@ -414,14 +341,32 @@ pub struct Share {
     pub(crate) network_path: String,
 }
 
-/// Windows-specific server feature detection.
-#[cfg(target_os = "windows")]
-pub trait ServerFeatures {
-    /// Lists enabled Windows server features.
-    ///
-    /// # Returns
-    /// * Vector of feature names
-    fn server_features() -> Vec<String>;
+/// Inventory sections that can be partially unavailable.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum InventorySection {
+    Identity,
+    Connections,
+    Services,
+    Shares,
+    Containers,
+}
+
+/// A machine-readable explanation for an incomplete inventory section.
+#[derive(Debug, Deserialize, Serialize, Clone, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InventorySectionError {
+    pub(crate) section: InventorySection,
+    pub(crate) message: String,
+}
+
+impl InventorySectionError {
+    pub(crate) fn new(section: InventorySection, message: impl Into<String>) -> Self {
+        Self {
+            section,
+            message: message.into(),
+        }
+    }
 }
 
 /// Comprehensive system information.
@@ -441,7 +386,7 @@ pub struct Host {
     pub(crate) cores: u8,
     /// CPU model name
     pub(crate) cpu: String,
-    /// Total memory in bytes
+    /// Total memory in whole MiB
     pub(crate) memory: u64,
     /// Disk configurations
     pub(crate) disks: Vec<Disk>,
@@ -459,11 +404,9 @@ pub struct Host {
     pub(crate) shares: Vec<Share>,
     /// Container configurations
     pub(crate) containers: Vec<Container>,
-    /*
-    /// Windows server features
-    #[cfg(target_os = "windows")]
-    pub(crate) server_features: Vec<String>,
-    */
+    /// Collection failures that left one or more sections incomplete
+    #[serde(default)]
+    pub(crate) section_errors: Vec<InventorySectionError>,
 }
 
 /// Interface for user information operations.
@@ -481,12 +424,7 @@ pub trait UserInfo {
     /// * `true` if user is a local account
     /// * `false` if domain account
     fn is_local(&self) -> bool;
-
-    /// Gets the user's login shell.
-    ///
-    /// # Returns
-    /// * The path to the user's login shell
-    #[cfg(target_os = "linux")]
-    fn shell(&self) -> String;
 }
 
+#[cfg(test)]
+mod saved_inventory_tests;

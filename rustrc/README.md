@@ -1,28 +1,37 @@
-# RustRC: Rust Remote Control Library
+# RustRC
 
-Rust RC is a comprehensive Rust library designed to facilitate headless remote control and task execution across various platforms and protocols, including WinRM, SSH, Telnet, and more. This library aims to streamline the development process for Rust programmers looking to remotely manage systems and automate tasks with efficiency and security at the forefront.
+RustRC is the SSH execution and SFTP transport adapter used by Pandora's Box. The first-release surface is intentionally limited to SSH; Winexe, WinRM, Telnet, embedded container runtimes, and remote-listener transfer helpers are not shipped.
 
-## Features:
+## Security boundary
 
-- **Multi-Protocol Support**: Rust RC provides out-of-the-box support for several communication protocols, enabling developers to choose the most suitable one for their needs. Whether it's SSH for Linux/Unix systems, WinRM for Windows, Telnet for legacy devices, or other protocols, Rust RC covers a broad spectrum.
-- **Secure Communication**: Emphasizing security, Rust RC implements the latest encryption standards to ensure safe and secure data transmission across all supported protocols.
-- **Cross-Platform Compatibility**: Designed with cross-platform usage in mind, Rust RC allows developers to write code once and run it on multiple operating systems, facilitating seamless system management and task automation.
-- **Extensibility**: Thanks to its modular design, Rust RC is easily extensible, enabling developers to add support for additional protocols or enhance existing functionalities as needed.
-- **High Performance**: Leveraging Rust's performance capabilities, Rust RC is optimized for speed and low resource consumption, making it ideal for scenarios requiring high efficiency and minimal overhead.
-- **Comprehensive Documentation**: To help developers get started and make the most out of the library, Rust RC comes with detailed documentation covering setup, examples, API references, and best practices.
+- Command execution and file transfer stay inside one authenticated SSH session.
+- File upload and download use SFTP, including drive-aware Windows path candidates. Authentication and host-key failures remain typed terminal outcomes; Pandora never converts them into transport fallback.
+- Connection and inactivity deadlines are separate from configurable command/transfer deadlines. Command output and downloads are byte-bounded while streaming.
+- `SSHConfig::key`, `SSHConfig::agent_with_policy`, and `SSHConfig::password` require an enrolled `known_hosts` key by default.
+- Pandora's named-profile adapter preflights private keys and exact SHA-256 fingerprints or selects one exact existing SSH-agent identity before opening a target connection. Missing/duplicate identities and agent signing errors fail terminally without trying another key.
+- `HostKeyPolicy::DangerouslyAcceptUnknown` is an explicit first-contact escape hatch. It does not enroll or persist the key, and it still rejects a changed enrolled key.
+- RustRC does not download tools or payloads during compilation.
 
-## Getting Started:
+## Example
 
-Rust RC is designed to be straightforward to integrate into your Rust projects. Installation instructions, a getting started guide, and comprehensive examples can be found in the project's README.md file on the GitHub repository. Whether you're looking to automate system administration tasks, manage remote systems, or develop sophisticated remote control applications, Rust RC provides the tools and flexibility needed to accomplish your goals.
+Set `RUSTRC_SOCKET`, `RUSTRC_PASSWORD`, and optionally `RUSTRC_USERNAME`, enroll the server key in the operator's `known_hosts`, then run:
 
-## Contributions:
+```sh
+cargo run --locked -p rustrc --example ssh_client
+```
 
-Rust RC is an open-source project, and contributions are warmly welcomed. Whether it's by adding new features, improving existing ones, writing documentation, or reporting bugs, your contributions can help make Rust RC even better for everyone.
+The example reads the secret from the environment rather than a process argument. Pandora adds named runtime profiles for external environment/file secrets, pinned keys, and existing agents; see [`../docs/CREDENTIAL_PROFILES.md`](../docs/CREDENTIAL_PROFILES.md).
 
-## License:
+## Validation
 
-Rust RC is released under the MIT License, providing the flexibility to use and modify the library for personal, commercial, or open-source projects.
+```sh
+cargo test --locked -p rustrc
+cargo test --locked -p rustrc --doc
+cargo clippy --locked -p rustrc --all-targets -- -D warnings
+```
 
----
+See [`PROVENANCE.md`](PROVENANCE.md) for the quarantined pre-release Winexe/runc findings and reintroduction requirements.
 
-Join the Rust RC community today and start building powerful, efficient, and secure remote control applications with Rust!
+## License
+
+RustRC source in this release is covered by the repository's MIT license.

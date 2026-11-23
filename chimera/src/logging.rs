@@ -1,10 +1,34 @@
-use std::io::Write;
-use log::SetLoggerError;
-use crate::utils::get_default_output_dir;
+use crate::utils::{get_default_output_dir, APPLICATION_LOG_FILENAME};
 use chrono::Local;
+use std::io::Write;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LogFileMode {
+    Append,
+    Truncate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoggingConfig {
+    pub file_mode: LogFileMode,
+}
+
+impl LoggingConfig {
+    pub fn append_file() -> Self {
+        Self {
+            file_mode: LogFileMode::Append,
+        }
+    }
+
+    pub fn truncate_file() -> Self {
+        Self {
+            file_mode: LogFileMode::Truncate,
+        }
+    }
+}
 
 pub struct MultiWriter {
-    writers: Vec<Box<dyn Write + Send + Sync>>
+    writers: Vec<Box<dyn Write + Send + Sync>>,
 }
 
 impl Write for MultiWriter {
@@ -23,14 +47,29 @@ impl Write for MultiWriter {
     }
 }
 
-pub fn init_logging() -> Result<(), SetLoggerError> {
+pub fn init_logging(config: LoggingConfig) -> Result<(), Box<dyn std::error::Error>> {
     let default_output = get_default_output_dir();
+    let mut writers: Vec<Box<dyn Write + Send + Sync>> = vec![Box::new(std::io::stderr())];
 
-    // Create ./output directory if it doesn't exist
-    std::fs::create_dir_all(&default_output).expect("Failed to create output directory");
+    std::fs::create_dir_all(&default_output)?;
+
+    let mut file = std::fs::OpenOptions::new();
+    file.create(true).write(true);
+    match config.file_mode {
+        LogFileMode::Append => {
+            file.append(true);
+        }
+        LogFileMode::Truncate => {
+            file.truncate(true);
+        }
+    }
+
+    writers.push(Box::new(
+        file.open(default_output.join(APPLICATION_LOG_FILENAME))?,
+    ));
 
     let env = env_logger::Env::default().default_filter_or("info");
-    
+
     env_logger::Builder::from_env(env)
         .format(|buf, record| {
             writeln!(
@@ -42,17 +81,7 @@ pub fn init_logging() -> Result<(), SetLoggerError> {
                 record.args()
             )
         })
-        .target(env_logger::Target::Pipe(Box::new(MultiWriter {
-            writers: vec![
-                Box::new(std::io::stderr()),
-                Box::new(std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(default_output.join("application.log"))
-                    .expect("Failed to open log file"))
-            ]
-        })))
-        .init();
+        .target(env_logger::Target::Pipe(Box::new(MultiWriter { writers })))
+        .try_init()?;
     Ok(())
 }
-
