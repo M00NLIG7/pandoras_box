@@ -2026,7 +2026,10 @@ fn join_or_dash(values: &[String]) -> String {
 }
 
 fn markdown_cell(value: &str) -> String {
-    value.replace('|', "\\|").replace('\n', " ")
+    value
+        .replace('|', "\\|")
+        .replace("\r\n", " ")
+        .replace('\n', " ")
 }
 
 fn csv_escape(value: &str) -> String {
